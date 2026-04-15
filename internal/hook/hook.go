@@ -1,0 +1,125 @@
+// Package hook speaks the Claude Code PreToolUse protocol.
+//
+// It reads a single JSON object from stdin (the tool-use request) and
+// writes a single JSON object to stdout (the hook response). The response
+// uses the native `hookSpecificOutput` shape Claude Code understands.
+//
+// This package has zero business logic — it is purely serialization.
+package hook
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+)
+
+// Request is the PreToolUse payload Claude Code writes to the hook's stdin.
+// Field shapes verified empirically 2026-04-15 (see docs/plans/2026-04-15-claude-guard.md).
+type Request struct {
+	SessionID      string          `json:"session_id"`
+	TranscriptPath string          `json:"transcript_path"`
+	CWD            string          `json:"cwd"`
+	PermissionMode string          `json:"permission_mode"`
+	AgentID        string          `json:"agent_id,omitempty"`
+	AgentType      string          `json:"agent_type,omitempty"`
+	HookEventName  string          `json:"hook_event_name"`
+	ToolName       string          `json:"tool_name"`
+	ToolInput      json.RawMessage `json:"tool_input"`
+	ToolUseID      string          `json:"tool_use_id"`
+}
+
+// BashInput is the tool_input shape when ToolName == "Bash".
+type BashInput struct {
+	Command     string `json:"command"`
+	Description string `json:"description,omitempty"`
+}
+
+// Bash returns the parsed Bash tool_input, or an error if ToolName is not Bash
+// or the payload is malformed.
+func (r *Request) Bash() (*BashInput, error) {
+	if r.ToolName != "Bash" {
+		return nil, fmt.Errorf("tool is %q, not Bash", r.ToolName)
+	}
+	var bi BashInput
+	if err := json.Unmarshal(r.ToolInput, &bi); err != nil {
+		return nil, fmt.Errorf("decode bash tool_input: %w", err)
+	}
+	return &bi, nil
+}
+
+// Decision is an explicit verdict the guard wants to send back to Claude Code.
+type Decision string
+
+const (
+	// DecisionContinue means: "no verdict, let Claude Code decide normally."
+	// Emits an empty `{}` response.
+	DecisionContinue Decision = ""
+	// DecisionAllow auto-approves the tool use.
+	DecisionAllow Decision = "allow"
+	// DecisionDeny blocks the tool use. Reason is surfaced to Claude.
+	DecisionDeny Decision = "deny"
+)
+
+// Response is the JSON shape Claude Code expects on stdout.
+// We always emit the native `hookSpecificOutput` form; it's the most
+// explicit and least likely to silently change semantics.
+type Response struct {
+	HookSpecificOutput *hookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+}
+
+type hookSpecificOutput struct {
+	HookEventName            string `json:"hookEventName"`
+	PermissionDecision       string `json:"permissionDecision"`
+	PermissionDecisionReason string `json:"permissionDecisionReason"`
+}
+
+// Continue returns an empty response — no verdict, Claude Code prompts normally.
+func Continue() Response {
+	return Response{}
+}
+
+// Allow returns a response that auto-approves the tool use.
+func Allow(reason string) Response {
+	return Response{
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "allow",
+			PermissionDecisionReason: reason,
+		},
+	}
+}
+
+// Deny returns a response that blocks the tool use. Reason is shown to Claude.
+func Deny(reason string) Response {
+	return Response{
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "deny",
+			PermissionDecisionReason: reason,
+		},
+	}
+}
+
+// ReadRequest parses the PreToolUse JSON payload from r.
+func ReadRequest(r io.Reader) (*Request, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("read stdin: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty stdin")
+	}
+	var req Request
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("decode request: %w", err)
+	}
+	return &req, nil
+}
+
+// WriteResponse writes the JSON response to w and returns the number of bytes written.
+// Always emits a trailing newline — easier for humans to read in logs.
+func WriteResponse(w io.Writer, resp Response) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(resp)
+}
