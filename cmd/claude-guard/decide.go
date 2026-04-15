@@ -30,15 +30,17 @@ func cmdDecide(_ []string) int {
 	}
 	cfg := result.Config
 
-	// Open logger (best-effort). Nil logger is OK — engine handles it.
-	var logger *clog.Logger
-	if cfg.Log.Path != "" {
-		lg, err := clog.Open(cfg.Log.Path, cfg.Log.MaxSizeBytes, cfg.Log.KeepFiles)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "claude-guard: open log: %v\n", err)
-		} else {
-			logger = lg
-		}
+	// Open decision logger (best-effort). Nil logger is OK — engine handles it.
+	var logger *clog.DecisionLogger
+	logDir := cfg.Log.Dir
+	if logDir == "" {
+		logDir = config.DefaultLogDir()
+	}
+	if lg, err := clog.OpenDecisionLogger(clog.DefaultPaths(logDir), cfg.Log.MaxSizeMB, cfg.Log.KeepFiles); err != nil {
+		fmt.Fprintf(os.Stderr, "claude-guard: open log: %v\n", err)
+	} else {
+		logger = lg
+		defer logger.Close()
 	}
 
 	// Parse the PreToolUse payload from stdin.

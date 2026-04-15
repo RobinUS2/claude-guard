@@ -67,12 +67,12 @@ type ShadowTrace struct {
 // Engine evaluates Bash commands against the configured rules.
 type Engine struct {
 	cfg *config.Config
-	log *clog.Logger
+	log *clog.DecisionLogger
 }
 
 // New creates an engine with the given config and logger.
 // Logger may be nil — engine then skips logging.
-func New(cfg *config.Config, logger *clog.Logger) *Engine {
+func New(cfg *config.Config, logger *clog.DecisionLogger) *Engine {
 	return &Engine{cfg: cfg, log: logger}
 }
 
@@ -160,30 +160,28 @@ func (e *Engine) record(in Input, out Output) {
 	if e.log == nil {
 		return
 	}
-	rec := clog.Record{
+	rec := clog.DecisionRecord{
 		GuardVersion: version.Version,
-		SessionID:   in.SessionID,
-		ToolUseID:   in.ToolUseID,
-		AgentID:     in.AgentID,
-		AgentType:   in.AgentType,
-		CWD:         in.CWD,
-		ToolName:    in.ToolName,
-		Command:     in.Command,
-		Description: in.Description,
-		Tier:        out.Tier,
-		Verdict:     string(out.Verdict),
-		Rule:        out.Rule,
-		Reason:      out.Reason,
-		LatencyUS:   out.Latency.Microseconds(),
-		Shadow: &clog.ShadowRecord{
+		SessionID:    in.SessionID,
+		ToolUseID:    in.ToolUseID,
+		AgentID:      in.AgentID,
+		AgentType:    in.AgentType,
+		CWD:          in.CWD,
+		ToolName:     in.ToolName,
+		Command:      in.Command,
+		Description:  in.Description,
+		Tier:         out.Tier,
+		Verdict:      string(out.Verdict),
+		Rule:         out.Rule,
+		Reason:       out.Reason,
+		LatencyUS:    out.Latency.Microseconds(),
+	}
+	if out.Shadow.Tier1Rule != "" || out.Shadow.Tier2Rule != "" || out.Shadow.Tier4LLM != "" {
+		rec.Shadow = &clog.ShadowFields{
 			Tier1Block: out.Shadow.Tier1Rule,
 			Tier2Allow: out.Shadow.Tier2Rule,
 			Tier4LLM:   out.Shadow.Tier4LLM,
-		},
+		}
 	}
-	// Zero out shadow record if all fields empty (cleaner logs).
-	if rec.Shadow.Tier1Block == "" && rec.Shadow.Tier2Allow == "" && rec.Shadow.Tier4LLM == "" && rec.Shadow.Tier5Legacy == "" {
-		rec.Shadow = nil
-	}
-	_ = e.log.Write(rec)
+	e.log.Decision(rec)
 }

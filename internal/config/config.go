@@ -45,11 +45,16 @@ type Config struct {
 	InstantAllow []rules.Rule `yaml:"-"`
 }
 
-// Log configures the decision log path and rotation.
+// Log configures the decision log paths and rotation.
+// Dir is the base directory; the three files (decisions, denies, app)
+// live inside it as decisions.jsonl, denies.jsonl, app.jsonl.
+// Path is the legacy single-file path, kept as a compatibility alias
+// for anyone migrating from v0.
 type Log struct {
-	Path         string `yaml:"path"`
-	MaxSizeBytes int64  `yaml:"max_size_bytes"`
-	KeepFiles    int    `yaml:"keep_files"`
+	Dir       string `yaml:"dir"`
+	Path      string `yaml:"path"`         // legacy alias
+	MaxSizeMB int    `yaml:"max_size_mb"`
+	KeepFiles int    `yaml:"keep_files"`
 }
 
 // LLM toggles the Haiku classifier tier.
@@ -90,7 +95,6 @@ func Default() *Config {
 	home, _ := os.UserHomeDir()
 
 	logDir := DefaultLogDir()
-	logPath := filepath.Join(logDir, "decisions.jsonl")
 	cachePath := filepath.Join(home, ".cache/claude-guard")
 	legacyPath := filepath.Join(home, ".config/claude-guard/legacy-patterns.yaml")
 
@@ -98,9 +102,9 @@ func Default() *Config {
 		Version:    SchemaVersion,
 		ShadowMode: true, // safe default: observe, don't enforce
 		Log: Log{
-			Path:         logPath,
-			MaxSizeBytes: 50 * 1024 * 1024,
-			KeepFiles:    3,
+			Dir:       logDir,
+			MaxSizeMB: 50,
+			KeepFiles: 3,
 		},
 		LLM: LLM{
 			Enabled:    false, // disabled in Phase 1

@@ -8,91 +8,138 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
-func TestLogger_WriteAndRead(t *testing.T) {
+func TestDecisionLogger_WritesToFirehose(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "log.jsonl")
-	lg, err := Open(path, 0, 0)
+	paths := DefaultPaths(dir)
+
+	dl, err := OpenDecisionLogger(paths, 10, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer dl.Close()
 
-	rec := Record{
+	dl.Decision(DecisionRecord{
 		GuardVersion: "test",
-		SessionID:    "sess-1",
-		ToolUseID:    "tu-1",
+		SessionID:    "s1",
+		ToolUseID:    "tu1",
 		ToolName:     "Bash",
-		Command:      "ls -la",
+		Command:      "git status",
 		Tier:         "instant_allow",
 		Verdict:      "allow",
-		Rule:         "readonly",
-	}
-	if err := lg.Write(rec); err != nil {
+		Rule:         "git-readonly",
+		LatencyUS:    42,
+	})
+	dl.Decision(DecisionRecord{
+		ToolName: "Bash",
+		Command:  "go test ./...",
+		Tier:     "default",
+		Verdict:  "continue",
+	})
+	dl.Close()
+
+	data, err := os.ReadFile(paths.Decisions)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lg.Write(Record{ToolName: "Bash", Tier: "default", Verdict: "continue"}); err != nil {
-		t.Fatal(err)
+	if strings.Count(string(data), "\n") != 2 {
+		t.Errorf("want 2 lines, got %d", strings.Count(string(data), "\n"))
 	}
 
-	data, err := os.ReadFile(path)
+	// Parse first line, verify schema.
+	firstLine := strings.SplitN(string(data), "\n", 2)[0]
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(firstLine), &rec); err != nil {
+		t.Fatalf("first line not valid JSON: %v", err)
+	}
+	if rec["msg"] != MsgDecision {
+		t.Errorf("msg = %v", rec["msg"])
+	}
+	if rec["verdict"] != "allow" {
+		t.Errorf("verdict = %v", rec["verdict"])
+	}
+	if rec["rule"] != "git-readonly" {
+		t.Errorf("rule = %v", rec["rule"])
+	}
+}
+
+func TestDecisionLogger_DenyGoesToBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	paths := DefaultPaths(dir)
+
+	dl, err := OpenDecisionLogger(paths, 10, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Count lines and parse each as JSON
-	sc := bufio.NewScanner(strings.NewReader(string(data)))
-	var lines int
-	for sc.Scan() {
-		lines++
-		var parsed map[string]any
-		if err := json.Unmarshal(sc.Bytes(), &parsed); err != nil {
-			t.Errorf("line %d not valid JSON: %v", lines, err)
-		}
+	dl.Decision(DecisionRecord{
+		ToolName: "Bash",
+		Command:  "rm -rf /",
+		Tier:     "instant_block",
+		Verdict:  "deny",
+		Rule:     "rm-rf-system",
+		Reason:   "rm -rf on system/home directory",
+	})
+	dl.Decision(DecisionRecord{
+		ToolName: "Bash",
+		Command:  "ls",
+		Tier:     "instant_allow",
+		Verdict:  "allow",
+	})
+	dl.Close()
+
+	decisionsData, _ := os.ReadFile(paths.Decisions)
+	deniesData, _ := os.ReadFile(paths.Denies)
+
+	// Both records in the firehose.
+	if n := strings.Count(string(decisionsData), "\n"); n != 2 {
+		t.Errorf("decisions.jsonl: want 2 lines, got %d", n)
 	}
-	if lines != 2 {
-		t.Errorf("want 2 lines, got %d", lines)
+	// Only the deny in denies.
+	if n := strings.Count(string(deniesData), "\n"); n != 1 {
+		t.Errorf("denies.jsonl: want 1 line, got %d", n)
+	}
+	if !strings.Contains(string(deniesData), "rm-rf-system") {
+		t.Errorf("denies.jsonl missing rule: %s", string(deniesData))
 	}
 }
 
-func TestLogger_Rotation(t *testing.T) {
+func TestDecisionLogger_ShadowGroup(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "log.jsonl")
-	lg, err := Open(path, 200, 2) // rotate every 200 bytes, keep 2 generations
-	if err != nil {
-		t.Fatal(err)
-	}
+	paths := DefaultPaths(dir)
+	dl, _ := OpenDecisionLogger(paths, 10, 3)
+	defer dl.Close()
 
-	// Write enough to trigger two rotations.
-	for i := 0; i < 20; i++ {
-		rec := Record{
-			GuardVersion: "test",
-			SessionID:    "sess-rotation",
-			ToolName:     "Bash",
-			Command:      strings.Repeat("x", 50),
-			Tier:         "default",
-			Verdict:      "continue",
-		}
-		if err := lg.Write(rec); err != nil {
-			t.Fatalf("write %d: %v", i, err)
-		}
-	}
+	dl.Decision(DecisionRecord{
+		ToolName: "Bash",
+		Command:  "git status",
+		Tier:     "default",
+		Verdict:  "continue",
+		Shadow: &ShadowFields{
+			Tier2Allow: "git-readonly",
+		},
+	})
+	dl.Close()
 
-	// Base file should exist.
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("base file missing: %v", err)
+	data, _ := os.ReadFile(paths.Decisions)
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &rec); err != nil {
+		t.Fatalf("not JSON: %v", err)
 	}
-	// .1 should exist.
-	if _, err := os.Stat(path + ".1"); err != nil {
-		t.Errorf(".1 missing: %v", err)
+	shadow, ok := rec["shadow"].(map[string]any)
+	if !ok {
+		t.Fatalf("no shadow group: %v", rec)
+	}
+	if shadow["tier2_allow"] != "git-readonly" {
+		t.Errorf("tier2_allow = %v", shadow["tier2_allow"])
 	}
 }
 
-func TestLogger_ConcurrentWrites(t *testing.T) {
+func TestDecisionLogger_ConcurrentWrites(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "log.jsonl")
-	lg, err := Open(path, 0, 0)
+	paths := DefaultPaths(dir)
+	dl, err := OpenDecisionLogger(paths, 10, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,24 +152,19 @@ func TestLogger_ConcurrentWrites(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := 0; i < writes; i++ {
-				rec := Record{
-					Time:     time.Now().UTC(),
+				dl.Decision(DecisionRecord{
 					ToolName: "Bash",
 					Command:  "test",
 					Tier:     "default",
 					Verdict:  "continue",
-				}
-				if err := lg.Write(rec); err != nil {
-					t.Errorf("writer %d: %v", id, err)
-					return
-				}
+				})
 			}
 		}(g)
 	}
 	wg.Wait()
+	dl.Close()
 
-	// Verify every line is a complete JSON record (no interleaving corruption).
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(paths.Decisions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,9 +173,9 @@ func TestLogger_ConcurrentWrites(t *testing.T) {
 	var lines int
 	for sc.Scan() {
 		lines++
-		var parsed map[string]any
-		if err := json.Unmarshal(sc.Bytes(), &parsed); err != nil {
-			t.Errorf("line %d not valid JSON: %v\nline: %s", lines, err, sc.Bytes())
+		var rec map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			t.Errorf("line %d: %v\n%s", lines, err, sc.Bytes())
 		}
 	}
 	if lines != goroutines*writes {
@@ -141,35 +183,31 @@ func TestLogger_ConcurrentWrites(t *testing.T) {
 	}
 }
 
-func TestLogger_TruncatesOversized(t *testing.T) {
+func TestDecisionLogger_NilSafe(t *testing.T) {
+	var dl *DecisionLogger
+	dl.Decision(DecisionRecord{Command: "ls"}) // must not panic
+	dl.Close()                                  // must not panic
+}
+
+func TestOpenAppLogger(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "log.jsonl")
-	lg, err := Open(path, 0, 0)
+	path := filepath.Join(dir, "app.jsonl")
+	logger, closer, err := OpenAppLogger(path, 10, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
+	logger.Info("startup", "guard_version", "test", "shadow_mode", true)
+	logger.Warn("config_fallback", "reason", "file not found")
+	_ = closer.Close()
 
-	// A command longer than maxRecordBytes.
-	huge := strings.Repeat("x", maxRecordBytes*2)
-	rec := Record{
-		ToolName: "Bash",
-		Command:  huge,
-		Reason:   strings.Repeat("r", maxRecordBytes),
-		Tier:     "default",
-		Verdict:  "continue",
+	data, _ := os.ReadFile(path)
+	if strings.Count(string(data), "\n") != 2 {
+		t.Errorf("want 2 lines, got:\n%s", data)
 	}
-	if err := lg.Write(rec); err != nil {
-		t.Fatalf("write: %v", err)
+	if !strings.Contains(string(data), "startup") {
+		t.Errorf("startup message missing: %s", data)
 	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(data) > maxRecordBytes+100 {
-		t.Errorf("line too large: %d bytes", len(data))
-	}
-	if !strings.Contains(string(data), "truncated") {
-		t.Errorf("expected 'truncated' marker in output: %s", string(data))
+	if !strings.Contains(string(data), "config_fallback") {
+		t.Errorf("config_fallback message missing: %s", data)
 	}
 }

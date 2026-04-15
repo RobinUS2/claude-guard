@@ -27,12 +27,13 @@ func cmdMonitor(args []string) int {
 	fs.SetOutput(os.Stderr)
 
 	var (
-		follow      bool
-		since       int
-		verdict     string
-		tier        string
-		rawJSON     bool
+		follow       bool
+		since        int
+		verdict      string
+		tier         string
+		rawJSON      bool
 		pathOverride string
+		file         string
 	)
 	fs.BoolVar(&follow, "follow", true, "keep following the log after printing existing entries")
 	fs.BoolVar(&follow, "f", true, "alias for --follow")
@@ -42,6 +43,7 @@ func cmdMonitor(args []string) int {
 	fs.StringVar(&tier, "tier", "", "filter by tier (instant_block, instant_allow, default, parse_error)")
 	fs.BoolVar(&rawJSON, "json", false, "print raw JSON lines instead of pretty-printed output")
 	fs.StringVar(&pathOverride, "path", "", "log file path override (default: from config)")
+	fs.StringVar(&file, "file", "decisions", "which log to tail: decisions (all), denies (only blocks), app")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -53,10 +55,25 @@ func cmdMonitor(args []string) int {
 	path := pathOverride
 	if path == "" {
 		result := config.Load("")
-		path = result.Config.Log.Path
+		paths := clog.DefaultPaths(result.Config.Log.Dir)
+		switch file {
+		case "decisions":
+			path = paths.Decisions
+		case "denies":
+			path = paths.Denies
+		case "app":
+			path = paths.App
+		default:
+			fmt.Fprintf(os.Stderr, "monitor: unknown --file value %q (expected decisions|denies|app)\n", file)
+			return 2
+		}
 	}
 
 	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if !follow {
+			fmt.Fprintf(os.Stderr, "monitor: log file does not exist: %s\n", path)
+			return 0
+		}
 		fmt.Fprintf(os.Stderr, "monitor: log file does not exist yet: %s\n", path)
 		fmt.Fprintln(os.Stderr, "monitor: waiting for first entry…")
 		for {
@@ -67,7 +84,7 @@ func cmdMonitor(args []string) int {
 		}
 	}
 
-	filter := func(rec clog.Record) bool {
+	filter := func(rec clog.ReadRecord) bool {
 		if verdict != "" && rec.Verdict != verdict {
 			return false
 		}
@@ -124,12 +141,12 @@ func cmdMonitor(args []string) int {
 	}
 }
 
-func printLine(line []byte, filter func(clog.Record) bool, raw bool) {
+func printLine(line []byte, filter func(clog.ReadRecord) bool, raw bool) {
 	line = trimNewline(line)
 	if len(line) == 0 {
 		return
 	}
-	var rec clog.Record
+	var rec clog.ReadRecord
 	if err := json.Unmarshal(line, &rec); err != nil {
 		// Not our schema — print raw.
 		fmt.Println(string(line))
@@ -146,8 +163,8 @@ func printLine(line []byte, filter func(clog.Record) bool, raw bool) {
 	prettyPrint(rec)
 }
 
-func prettyPrint(rec clog.Record) {
-	ts := rec.Time.Local().Format("15:04:05")
+func prettyPrint(rec clog.ReadRecord) {
+	ts := formatTime(rec.Time)
 	verdictMark := "·"
 	switch rec.Verdict {
 	case "allow":
@@ -187,6 +204,22 @@ func prettyPrint(rec clog.Record) {
 	if rec.Description != "" {
 		fmt.Printf("         desc:   %s\n", rec.Description)
 	}
+}
+
+// formatTime takes an RFC3339Nano timestamp and returns HH:MM:SS local.
+// Returns the raw string on parse failure.
+func formatTime(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		if len(raw) > 19 {
+			return raw[11:19] // slice HH:MM:SS out of RFC3339 prefix
+		}
+		return raw
+	}
+	return t.Local().Format("15:04:05")
 }
 
 func trimNewline(b []byte) []byte {

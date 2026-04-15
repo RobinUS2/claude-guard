@@ -48,8 +48,8 @@ func TestLoad_ValidYAML(t *testing.T) {
 	yamlContent := `version: 1
 shadow_mode: false
 log:
-  path: /tmp/test-guard.log
-  max_size_bytes: 1048576
+  dir: /tmp/test-guard-logs
+  max_size_mb: 10
   keep_files: 2
 llm:
   enabled: true
@@ -73,8 +73,8 @@ llm:
 	if !result.Config.LLM.Enabled {
 		t.Error("LLM should be enabled")
 	}
-	if result.Config.Log.Path != "/tmp/test-guard.log" {
-		t.Errorf("Log.Path = %q", result.Config.Log.Path)
+	if result.Config.Log.Dir != "/tmp/test-guard-logs" {
+		t.Errorf("Log.Dir = %q", result.Config.Log.Dir)
 	}
 	// Compiled-in rules must still be present.
 	if len(result.Config.InstantBlock) == 0 {

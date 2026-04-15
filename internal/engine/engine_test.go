@@ -2,24 +2,25 @@ package engine
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
 )
 
-func newTestEngine(t *testing.T, shadow bool) (*Engine, string) {
+func newTestEngine(t *testing.T, shadow bool) (*Engine, clog.Paths) {
 	t.Helper()
 	cfg := config.Default()
 	cfg.ShadowMode = shadow
 
-	logPath := filepath.Join(t.TempDir(), "log.jsonl")
-	lg, err := clog.Open(logPath, 0, 0)
+	dir := t.TempDir()
+	paths := clog.DefaultPaths(dir)
+	lg, err := clog.OpenDecisionLogger(paths, 10, 3)
 	if err != nil {
 		t.Fatalf("open logger: %v", err)
 	}
-	return New(cfg, lg), logPath
+	t.Cleanup(lg.Close)
+	return New(cfg, lg), paths
 }
 
 func TestEngine_NonBashFallsThrough(t *testing.T) {
@@ -142,17 +143,29 @@ func TestEngine_NilLogger_DoesNotPanic(t *testing.T) {
 }
 
 func TestEngine_LogsEveryDecision(t *testing.T) {
-	e, logPath := newTestEngine(t, false)
+	e, paths := newTestEngine(t, false)
 	e.Decide(Input{ToolName: "Bash", Command: "ls", SessionID: "s1", ToolUseID: "t1"})
 	e.Decide(Input{ToolName: "Bash", Command: "rm -rf /", SessionID: "s1", ToolUseID: "t2"})
 	e.Decide(Input{ToolName: "Bash", Command: "go test ./...", SessionID: "s1", ToolUseID: "t3"})
 
-	data, err := readFile(logPath)
+	// Flush pending lumberjack writes by closing the engine's logger.
+	e.log.Close()
+
+	data, err := readFile(paths.Decisions)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if countLines(data) != 3 {
-		t.Errorf("want 3 log lines, got %d", countLines(data))
+		t.Errorf("want 3 log lines in firehose, got %d\n%s", countLines(data), data)
+	}
+
+	// The deny should also land in denies.jsonl.
+	denyData, err := readFile(paths.Denies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countLines(denyData) != 1 {
+		t.Errorf("want 1 deny line, got %d\n%s", countLines(denyData), denyData)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
+	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"github.com/RobinUS2/claude-guard/internal/version"
 )
 
@@ -49,7 +50,10 @@ func cmdDoctor(_ []string) int {
 		fmt.Sprintf("%d compiled-in rules", len(cfg.InstantAllow)))
 
 	// 3. Log directory writable
-	logDir := filepath.Dir(cfg.Log.Path)
+	logDir := cfg.Log.Dir
+	if logDir == "" {
+		logDir = config.DefaultLogDir()
+	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		check("log:dir", false, err.Error())
 	} else {
@@ -98,11 +102,18 @@ func cmdDoctor(_ []string) int {
 		}
 	}
 
+	paths := clog.DefaultPaths(logDir)
 	fmt.Println()
-	fmt.Printf("log:     %s\n", cfg.Log.Path)
-	fmt.Println("tips:    watch decisions in real time:  claude-guard monitor")
-	fmt.Println("         only show blocks:              claude-guard monitor --verdict deny")
-	fmt.Println("         raw JSONL for jq:              claude-guard monitor --json | jq .")
+	fmt.Println("log files:")
+	fmt.Printf("  decisions (firehose):  %s\n", paths.Decisions)
+	fmt.Printf("  denies (audit trail):  %s\n", paths.Denies)
+	fmt.Printf("  app  (startup/errors): %s\n", paths.App)
+	fmt.Println()
+	fmt.Println("tips:")
+	fmt.Println("  watch all decisions:           claude-guard monitor")
+	fmt.Println("  watch only blocks:             claude-guard monitor --file denies")
+	fmt.Println("  raw JSONL for jq:              claude-guard monitor --json | jq .")
+	fmt.Println("  test a command interactively:  claude-guard test 'git status'")
 	fmt.Println()
 	if pass {
 		fmt.Println("overall: OK")
