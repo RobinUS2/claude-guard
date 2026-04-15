@@ -3,11 +3,15 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
 	"github.com/RobinUS2/claude-guard/internal/hook"
+	"github.com/RobinUS2/claude-guard/internal/llm"
+	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
+	"github.com/RobinUS2/claude-guard/internal/redact"
 )
 
 // cmdDecide is the PreToolUse hook entrypoint.
@@ -30,18 +34,38 @@ func cmdDecide(_ []string) int {
 	}
 	cfg := result.Config
 
-	// Open decision logger (best-effort). Nil logger is OK — engine handles it.
-	var logger *clog.DecisionLogger
+	// Resolve log dir + open the decision logger and the app logger.
 	logDir := cfg.Log.Dir
 	if logDir == "" {
 		logDir = config.DefaultLogDir()
 	}
-	if lg, err := clog.OpenDecisionLogger(clog.DefaultPaths(logDir), cfg.Log.MaxSizeMB, cfg.Log.KeepFiles); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-guard: open log: %v\n", err)
+	paths := clog.DefaultPaths(logDir)
+
+	var decisionLog *clog.DecisionLogger
+	if lg, err := clog.OpenDecisionLogger(paths, cfg.Log.MaxSizeMB, cfg.Log.KeepFiles); err != nil {
+		fmt.Fprintf(os.Stderr, "claude-guard: open decision log: %v\n", err)
 	} else {
-		logger = lg
-		defer logger.Close()
+		decisionLog = lg
+		defer decisionLog.Close()
 	}
+
+	appLogger, appCloser, appErr := clog.OpenAppLogger(paths.App, cfg.Log.MaxSizeMB, cfg.Log.KeepFiles)
+	if appErr != nil {
+		fmt.Fprintf(os.Stderr, "claude-guard: open app log: %v\n", appErr)
+	} else if appCloser != nil {
+		defer appCloser.Close()
+	}
+
+	// LLM tier setup: pick a provider from env, set up redactor + breaker.
+	// All three are optional — if any returns nil, that piece is disabled
+	// and the engine simply skips it.
+	classifier := llm.AutoSelect("anthropic", os.Getenv) // prefer Anthropic; fall back to Gemini
+	var br *breaker.Breaker
+	if classifier != nil {
+		circuitPath := filepath.Join(os.Getenv("HOME"), ".cache", "claude-guard", "llm-circuit.json")
+		br = breaker.New(circuitPath)
+	}
+	redactor := redact.New(nil, nil)
 
 	// Parse the PreToolUse payload from stdin.
 	req, err := hook.ReadRequest(os.Stdin)
@@ -65,8 +89,15 @@ func cmdDecide(_ []string) int {
 		return 1
 	}
 
-	// Run the engine.
-	eng := engine.New(cfg, logger)
+	// Run the engine with the full set of components.
+	eng := engine.NewWithOptions(engine.Options{
+		Config:      cfg,
+		DecisionLog: decisionLog,
+		AppLog:      appLogger,
+		Redactor:    redactor,
+		LLM:         classifier,
+		Breaker:     br,
+	})
 	out := eng.Decide(engine.Input{
 		ToolName:    req.ToolName,
 		Command:     bi.Command,

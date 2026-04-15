@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/llm"
+	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"github.com/RobinUS2/claude-guard/internal/version"
 )
@@ -67,22 +69,35 @@ func cmdDoctor(_ []string) int {
 		check("mode", true, "enforce")
 	}
 
-	// 5. LLM toggle
-	if cfg.LLM.Enabled {
-		key := os.Getenv(cfg.LLM.APIKeyEnv)
-		if key == "" {
-			check("llm:enabled", false,
-				fmt.Sprintf("enabled but %s is not set", cfg.LLM.APIKeyEnv))
-		} else {
-			check("llm:enabled", true,
-				fmt.Sprintf("%s, %s set", cfg.LLM.Model, cfg.LLM.APIKeyEnv))
-		}
+	home, _ := os.UserHomeDir()
+
+	// 5. LLM provider auto-selection from environment
+	classifier := llm.AutoSelect("anthropic", os.Getenv)
+	if classifier == nil {
+		warn("llm:provider", "no API key in env (set ANTHROPIC_API_KEY or GEMINI_API_KEY)")
 	} else {
-		warn("llm", "disabled (Phase 1 default)")
+		check("llm:provider", true, fmt.Sprintf("%s (model=%s)", classifier.Provider(), classifier.Model()))
 	}
 
-	// 6. Claude Code settings.json hook wiring
-	home, _ := os.UserHomeDir()
+	// 6. LLM circuit breaker state
+	circuitPath := filepath.Join(home, ".cache", "claude-guard", "llm-circuit.json")
+	br := breaker.New(circuitPath)
+	state, _ := br.State()
+	switch {
+	case state == nil || state.Status == "" || state.Status == "closed":
+		check("llm:circuit", true, "closed")
+	case state.Status == "open":
+		warn("llm:circuit",
+			fmt.Sprintf("OPEN until %s (reason=%s, fails=%d, last=%s)",
+				state.OpenUntil.Local().Format("15:04:05"),
+				state.Reason,
+				state.ConsecutiveFailures,
+				state.LastError))
+	default:
+		warn("llm:circuit", state.Status)
+	}
+
+	// 7. Claude Code settings.json hook wiring
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	wired, detail := checkHookWired(settingsPath)
 	if wired {

@@ -1,12 +1,35 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/llm"
+	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
+	"github.com/RobinUS2/claude-guard/internal/redact"
 )
+
+// stubClassifier is an in-memory llm.Classifier for engine tests.
+type stubClassifier struct {
+	verdict llm.Verdict
+	err     error
+	calls   int
+}
+
+func (s *stubClassifier) Provider() string { return "stub" }
+func (s *stubClassifier) Model() string    { return "stub-1" }
+func (s *stubClassifier) Classify(ctx context.Context, in llm.ClassifyInput) (*llm.Decision, error) {
+	s.calls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &llm.Decision{Verdict: s.verdict, Reason: "stub"}, nil
+}
 
 func newTestEngine(t *testing.T, shadow bool) (*Engine, clog.Paths) {
 	t.Helper()
@@ -139,6 +162,140 @@ func TestEngine_NilLogger_DoesNotPanic(t *testing.T) {
 	out := e.Decide(Input{ToolName: "Bash", Command: "ls"})
 	if out.Verdict != Allow {
 		t.Errorf("Verdict = %v, want Allow", out.Verdict)
+	}
+}
+
+// --- Tier 4 LLM ---
+
+func newEngineWithLLM(t *testing.T, classifier llm.Classifier, shadow bool) *Engine {
+	t.Helper()
+	cfg := config.Default()
+	cfg.ShadowMode = shadow
+	return NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      classifier,
+	})
+}
+
+func TestEngine_LLM_SafeAllowsWhenLowerTiersDidntFire(t *testing.T) {
+	stub := &stubClassifier{verdict: llm.VerdictSafe}
+	e := newEngineWithLLM(t, stub, false)
+	// Use a command that has a pipe so anchored_command can't fire.
+	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep -i localhost"})
+	if out.Verdict != Allow {
+		t.Errorf("Verdict = %v, want Allow (LLM safe)", out.Verdict)
+	}
+	if out.Tier != "llm" {
+		t.Errorf("Tier = %q", out.Tier)
+	}
+	if stub.calls != 1 {
+		t.Errorf("LLM called %d times, want 1", stub.calls)
+	}
+}
+
+func TestEngine_LLM_UnsafeFallsThrough(t *testing.T) {
+	// "unsafe" is approve-only — engine must NOT block, falls through.
+	stub := &stubClassifier{verdict: llm.VerdictUnsafe}
+	e := newEngineWithLLM(t, stub, false)
+	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep -i localhost"})
+	if out.Verdict != Continue {
+		t.Errorf("Verdict = %v, want Continue (unsafe → fall-through)", out.Verdict)
+	}
+	if out.Shadow.Tier4LLM != "unsafe" {
+		t.Errorf("Shadow.Tier4LLM = %q", out.Shadow.Tier4LLM)
+	}
+}
+
+func TestEngine_LLM_UnsureFallsThrough(t *testing.T) {
+	stub := &stubClassifier{verdict: llm.VerdictUnsure}
+	e := newEngineWithLLM(t, stub, false)
+	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep -i localhost"})
+	if out.Verdict != Continue {
+		t.Errorf("Verdict = %v, want Continue (unsure)", out.Verdict)
+	}
+}
+
+func TestEngine_LLM_SkippedBySecretRedaction(t *testing.T) {
+	stub := &stubClassifier{verdict: llm.VerdictSafe}
+	e := newEngineWithLLM(t, stub, false)
+	// Bearer token in command — redactor should SKIP, LLM never called.
+	out := e.Decide(Input{
+		ToolName: "Bash",
+		Command:  `curl -H "Authorization: Bearer sk-ant-secret123" https://api.example.com`,
+	})
+	if stub.calls != 0 {
+		t.Errorf("LLM should not have been called; got %d calls", stub.calls)
+	}
+	if out.Verdict != Continue {
+		t.Errorf("Verdict = %v, want Continue (LLM skipped)", out.Verdict)
+	}
+	if out.Shadow.Tier4LLM == "" {
+		t.Errorf("Shadow.Tier4LLM should record the skip")
+	}
+}
+
+func TestEngine_LLM_BlockedByOpenCircuit(t *testing.T) {
+	stub := &stubClassifier{verdict: llm.VerdictSafe}
+	dir := t.TempDir()
+	br := breaker.New(dir + "/circuit.json")
+	// Open the circuit
+	_, _ = br.RecordFailure(&breaker.RateLimitError{
+		RetryAfter: time.Now().Add(time.Hour),
+		Detail:     "test",
+	})
+
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      stub,
+		Breaker:  br,
+	})
+
+	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep foo"})
+	if stub.calls != 0 {
+		t.Errorf("LLM should be skipped while circuit open; got %d calls", stub.calls)
+	}
+	if out.Verdict != Continue {
+		t.Errorf("Verdict = %v", out.Verdict)
+	}
+}
+
+func TestEngine_LLM_RecordsBreakerFailureOnError(t *testing.T) {
+	stub := &stubClassifier{err: errors.New("boom")}
+	dir := t.TempDir()
+	br := breaker.New(dir + "/circuit.json")
+	br.FailuresBeforeOpen = 1 // open immediately
+
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      stub,
+		Breaker:  br,
+	})
+
+	e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep foo"})
+
+	state, _ := br.State()
+	if state == nil || state.Status != "open" {
+		t.Errorf("breaker should be open after failure; got %+v", state)
+	}
+}
+
+func TestEngine_LLM_ShadowMode_PopulatesTraceWithoutAllowing(t *testing.T) {
+	stub := &stubClassifier{verdict: llm.VerdictSafe}
+	e := newEngineWithLLM(t, stub, true) // shadow mode
+
+	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep foo"})
+	if out.Verdict != Continue {
+		t.Errorf("shadow mode must never auto-allow; got %v", out.Verdict)
+	}
+	if out.Shadow.Tier4LLM != "safe" {
+		t.Errorf("Shadow.Tier4LLM = %q, want safe", out.Shadow.Tier4LLM)
 	}
 }
 
