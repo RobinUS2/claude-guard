@@ -108,21 +108,44 @@ type KeyInputs struct {
 
 // SchemaVersion is part of every cache key. Bump it when the KeyInputs
 // shape changes in a way that should invalidate existing entries.
-const SchemaVersion = "1"
+//
+// v2: added scope-aware keys (global key strips cwd + branch).
+const SchemaVersion = "2"
 
-// Key returns the deterministic cache key for these inputs.
+// Key returns the deterministic project-scoped cache key for these
+// inputs. Project keys include cwd + git_branch — they apply only to
+// the same project.
 func Key(in KeyInputs) string {
+	return keyWithDimensions(in, true)
+}
+
+// GlobalKey returns the deterministic global-scoped cache key. Global
+// keys strip cwd + git_branch — they apply to a command anywhere on
+// disk. Used for commands the LLM judged as universally safe (`git
+// status`, `ls`, `cat /etc/hosts`).
+func GlobalKey(in KeyInputs) string {
+	return keyWithDimensions(in, false)
+}
+
+func keyWithDimensions(in KeyInputs, includeProject bool) string {
 	var b strings.Builder
 	b.WriteString(SchemaVersion)
 	b.WriteByte('\x00')
+	if includeProject {
+		b.WriteString("p\x00")
+	} else {
+		b.WriteString("g\x00")
+	}
 	b.WriteString(in.Tool)
 	b.WriteByte('\x00')
 	b.WriteString(in.Command)
 	b.WriteByte('\x00')
-	b.WriteString(in.CWD)
-	b.WriteByte('\x00')
-	b.WriteString(in.GitBranch)
-	b.WriteByte('\x00')
+	if includeProject {
+		b.WriteString(in.CWD)
+		b.WriteByte('\x00')
+		b.WriteString(in.GitBranch)
+		b.WriteByte('\x00')
+	}
 	b.WriteString(in.PromptVersion)
 	b.WriteByte('\x00')
 	b.WriteString(in.RulesHash)

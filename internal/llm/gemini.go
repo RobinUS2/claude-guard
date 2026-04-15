@@ -12,10 +12,14 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 )
 
-// DefaultGeminiModel is Gemini 2.5 Flash — fast, cheap, good at strict
-// JSON output. The 2.5 Flash family is significantly cheaper than Haiku
-// for short prompts and typically returns in under 500ms.
-const DefaultGeminiModel = "gemini-2.5-flash"
+// DefaultGeminiModel is Gemini 2.5 Flash Lite — purpose-built for
+// low-latency classification (typical p50 ~500ms, p95 ~1500ms). The
+// regular Flash model is smarter but routinely takes 2-4s for prompts
+// with strict response schemas, which blows the hook's synchronous
+// budget. Flash Lite is a better default for the fast tier; the
+// verifier in the background uses Gemini Pro (or Anthropic Sonnet
+// when available) for the heavy reasoning.
+const DefaultGeminiModel = "gemini-2.5-flash-lite"
 
 // GeminiClassifier hits Google's Gemini API for classification.
 type GeminiClassifier struct {
@@ -30,19 +34,21 @@ type GeminiClassifier struct {
 
 // NewGemini constructs a GeminiClassifier with sensible defaults.
 //
-// MaxTokens default is 1500 — even with strict responseSchema, Gemini
-// 2.5 Flash sometimes generates more tokens than expected (long reason
-// fields with backslash-escaped quotes blow up the token count fast).
-// 1500 leaves room for any reasonable JSON without truncation.
+// Timeouts:
+//   - flash-lite: 6s  (typical p95 ~1.5s, headroom for outliers)
+//   - flash:      6s  (slower but still in the synchronous hook budget)
+//   - pro:        20s (verifier only, runs in background)
+//
+// MaxTokens 1500: even with strict responseSchema, Gemini sometimes
+// generates more tokens than expected (long reason fields with
+// backslash-escaped quotes blow up the token count fast).
 func NewGemini(apiKey, model string) *GeminiClassifier {
 	if model == "" {
 		model = DefaultGeminiModel
 	}
-	timeout := 4 * time.Second
+	timeout := 6 * time.Second
 	if model == "gemini-2.5-pro" || model == "gemini-pro" {
-		// Gemini Pro is significantly slower than Flash. Used as a verifier
-		// in the background, so we can afford a longer timeout.
-		timeout = 15 * time.Second
+		timeout = 20 * time.Second
 	}
 	return &GeminiClassifier{
 		APIKey:       apiKey,
@@ -202,12 +208,17 @@ var classifierResponseSchema = &geminiResponseSchema{
 				"external_write", "destructive", "exfil", "unknown",
 			},
 		},
+		"scope": {
+			Type:        "string",
+			Description: "global = safe in any cwd; project = safe only in this project",
+			Enum:        []string{"global", "project"},
+		},
 		"reason": {
 			Type:        "string",
 			Description: "1-2 sentence plain-English explanation",
 		},
 	},
-	Required: []string{"decision", "reason"},
+	Required: []string{"decision", "reason", "scope"},
 }
 
 func (c *GeminiClassifier) buildRequest(in ClassifyInput) geminiRequest {

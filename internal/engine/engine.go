@@ -26,6 +26,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
+	"github.com/RobinUS2/claude-guard/internal/projectctx"
 	"github.com/RobinUS2/claude-guard/internal/redact"
 	"github.com/RobinUS2/claude-guard/internal/rules"
 	"github.com/RobinUS2/claude-guard/internal/shellparse"
@@ -36,7 +37,10 @@ import (
 // not block a synchronous hook — long retries belong in the cross-
 // invocation breaker, not in the hook path. Cache hits bypass this
 // entirely (~1ms file read).
-const llmDeadline = 4 * time.Second
+//
+// 7s is the engine ceiling. The Gemini client itself has a tighter
+// 6s budget for fast models so this is mostly a backstop.
+const llmDeadline = 7 * time.Second
 
 // Verdict is the engine's final output. Matches the three Claude Code
 // outcomes: continue (fall through), allow (auto-approve), deny (block).
@@ -301,23 +305,41 @@ func (e *Engine) Decide(in Input) Output {
 	// Tier 3: cache lookup (only when there's an LLM to back it — caching
 	// deterministic verdicts adds latency for no gain since they're already
 	// sub-millisecond).
-	cacheKey := ""
+	//
+	// We try the global cache key first, then the project-scoped key. A
+	// global hit means "this command is safe in any cwd" and bypasses
+	// the LLM regardless of where you are. A project hit only matches
+	// the same cwd + branch.
+	keyInputs := cache.KeyInputs{
+		Tool:          in.ToolName,
+		Command:       in.Command,
+		CWD:           in.CWD,
+		GitBranch:     gitBranchOf(in.CWD),
+		PromptVersion: e.promptVersion,
+		RulesHash:     e.rulesHash,
+	}
+	var globalKey, projectKey string
 	if e.cache != nil && e.llm != nil {
-		cacheKey = cache.Key(cache.KeyInputs{
-			Tool:          in.ToolName,
-			Command:       in.Command,
-			CWD:           in.CWD,
-			GitBranch:     gitBranchOf(in.CWD),
-			PromptVersion: e.promptVersion,
-			RulesHash:     e.rulesHash,
-		})
-		if entry, hit := e.cache.Get(cacheKey); hit {
+		globalKey = cache.GlobalKey(keyInputs)
+		projectKey = cache.Key(keyInputs)
+
+		for _, attempt := range []struct {
+			key   string
+			scope string
+		}{
+			{globalKey, "global"},
+			{projectKey, "project"},
+		} {
+			entry, hit := e.cache.Get(attempt.key)
+			if !hit {
+				continue
+			}
 			eff := entry.EffectiveVerdict()
-			suffix := string(eff)
+			suffix := attempt.scope + ":" + string(eff)
 			if entry.Disagreement {
-				suffix = "verifier-deny:" + string(eff)
+				suffix = attempt.scope + ":verifier-deny:" + string(eff)
 			} else if entry.Verified {
-				suffix = "verified:" + string(eff)
+				suffix = attempt.scope + ":verified:" + string(eff)
 			}
 			out.Shadow.Tier4LLM = "cache:" + suffix
 
@@ -332,9 +354,7 @@ func (e *Engine) Decide(in Input) Output {
 					e.record(in, out)
 					return out
 				case cache.VerdictDeny:
-					// Verifier disagreement → block. This is the high-confidence
-					// signal: two different models reviewed and disagreed, so
-					// the verifier (slower, stronger) wins.
+					// Verifier disagreement → block.
 					out.Verdict = Deny
 					out.Tier = "cache"
 					out.Rule = "verifier:" + entry.VerifierProvider + "/" + entry.VerifierModel
@@ -344,7 +364,7 @@ func (e *Engine) Decide(in Input) Output {
 					return out
 				}
 			}
-			// Shadow mode or non-actionable verdict: fall through to default.
+			// Shadow mode or non-actionable verdict.
 			out.Latency = time.Since(start)
 			e.record(in, out)
 			return out
@@ -356,24 +376,36 @@ func (e *Engine) Decide(in Input) Output {
 		llmVerdict := e.runLLMTier(in)
 		out.Shadow.Tier4LLM = llmVerdict.shadow
 		// Cache safe verdicts so the next identical command is instant.
-		if e.cache != nil && cacheKey != "" && llmVerdict.allow {
-			_ = e.cache.Put(cacheKey, cache.Entry{
+		// The cache key is chosen by the LLM-decided scope.
+		if e.cache != nil && llmVerdict.allow {
+			storeKey := projectKey
+			scopeStr := "project"
+			if llmVerdict.scope == llm.ScopeGlobal {
+				storeKey = globalKey
+				scopeStr = "global"
+			}
+			_ = e.cache.Put(storeKey, cache.Entry{
 				Verdict:  cache.VerdictAllow,
 				Reason:   llmVerdict.reason,
 				Tier:     "llm",
 				Provider: e.llm.Provider(),
 				Model:    e.llm.Model(),
 			}, 90*24*time.Hour)
+			out.Shadow.Tier4LLM = "safe:" + scopeStr
 			// Spawn the async verifier (cross-provider second opinion).
-			// AwaitVerifications in decide.go waits for these after the
-			// hook response has been written, before the process exits.
-			e.spawnVerification(cacheKey, in)
+			e.spawnVerification(storeKey, in)
+		}
+		// Always populate Reason and Rule from the LLM result so the
+		// decision log has the WHY, even on fall-through.
+		if llmVerdict.reason != "" {
+			out.Reason = llmVerdict.reason
+		}
+		if e.llm != nil {
+			out.Rule = e.llm.Provider() + "/" + e.llm.Model()
 		}
 		if !e.cfg.ShadowMode && llmVerdict.allow {
 			out.Verdict = Allow
 			out.Tier = "llm"
-			out.Rule = e.llm.Provider() + "/" + e.llm.Model()
-			out.Reason = llmVerdict.reason
 			out.Latency = time.Since(start)
 			e.record(in, out)
 			return out
@@ -405,9 +437,10 @@ func (e *Engine) Decide(in Input) Output {
 
 // llmCallResult is the engine-internal summary of a Tier 4 attempt.
 type llmCallResult struct {
-	allow  bool   // true only when LLM said "safe"
-	shadow string // "safe", "unsafe", "unsure", "skipped:<reason>", or "error"
-	reason string // human-readable reason for the decision
+	allow  bool      // true only when LLM said "safe"
+	shadow string    // "safe", "unsafe", "unsure", "skipped:<reason>", or "error"
+	reason string    // human-readable reason for the decision
+	scope  llm.Scope // global vs project — used for cache key choice
 }
 
 // runLLMTier handles redaction, circuit breaker check, and the actual
@@ -443,13 +476,16 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 		}
 	}
 
-	// Actual LLM call.
+	// Actual LLM call. Pass project context so the model can reason
+	// about commands like 'npm run build' that execute project scripts.
 	ctx, cancel := context.WithTimeout(context.Background(), llmDeadline)
 	defer cancel()
+	projCtx := projectctx.Context(in.CWD, in.Command)
 	dec, err := e.llm.Classify(ctx, llm.ClassifyInput{
-		Command:     in.Command,
-		Description: in.Description,
-		CWD:         in.CWD,
+		Command:        in.Command,
+		Description:    in.Description,
+		CWD:            in.CWD,
+		ProjectContext: projCtx,
 	})
 	if err != nil {
 		// Record failure for the breaker; log to app.
@@ -480,10 +516,16 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 
 	switch dec.Verdict {
 	case llm.VerdictSafe:
+		// Default scope is project (safer) when the LLM doesn't say.
+		scope := dec.Scope
+		if scope != llm.ScopeGlobal && scope != llm.ScopeProject {
+			scope = llm.ScopeProject
+		}
 		return llmCallResult{
 			allow:  true,
 			shadow: "safe",
 			reason: dec.Reason,
+			scope:  scope,
 		}
 	case llm.VerdictUnsafe:
 		// LLM is approve-only — fall through. Log the would-have-been block.
@@ -595,10 +637,33 @@ func (e *Engine) spawnVerification(cacheKey string, in Input) {
 			return
 		}
 
-		// Map LLM verdict to cache verdict. Only "safe" is allow; everything
-		// else (unsafe, unsure) is treated as "verifier disagrees with allow"
-		// → deny. This is the safer default: when in doubt, future calls
-		// should prompt the user.
+		// Map LLM verdict to cache verdict.
+		//   safe   → agreement, mark verified
+		//   unsafe → REAL disagreement, mark Disagreement, next call denies
+		//   unsure → verifier abstained, original allow stands.
+		//
+		// `unsure` is NOT treated as disagreement because most "unsure"
+		// verdicts come from the verifier being unable to see inside
+		// custom binaries or project scripts. Demoting to abstain
+		// reduces the false-positive deny rate on legitimate dev workflows.
+		switch dec.Verdict {
+		case llm.VerdictSafe:
+			// agreement → mark verified
+		case llm.VerdictUnsafe:
+			// Real disagreement: verifier strongly believes this is dangerous.
+		default:
+			// VerdictUnsure: verifier abstains. Skip the cache update so the
+			// original allow stays untouched and Verified=false (still pending
+			// review by some other model run).
+			e.appLog().Info("verifier_unsure_abstain",
+				"reason", dec.Reason,
+				"verifier_provider", e.verifier.Provider(),
+				"verifier_model", e.verifier.Model(),
+				"command_preview", previewCommand(in.Command),
+				"tool_use_id", in.ToolUseID,
+			)
+			return
+		}
 		var verifierVerdict cache.Verdict
 		if dec.Verdict == llm.VerdictSafe {
 			verifierVerdict = cache.VerdictAllow

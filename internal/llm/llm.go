@@ -56,11 +56,35 @@ const (
 	VerdictUnsure Verdict = "unsure"
 )
 
+// Scope describes how broadly an "allow" verdict should be cached.
+//
+// Some commands (`git status`, `ls`, `cat /etc/hosts`) are safe in
+// every context — they get cached globally and a hit from any cwd
+// short-circuits the LLM tier. Others (`npm run build`, `make deploy`,
+// `./scripts/foo.sh`) execute project-specific code that's safe in
+// THIS project but possibly different elsewhere — they get cached
+// per-cwd. The classifier returns one of these scopes alongside the
+// verdict.
+type Scope string
+
+const (
+	// ScopeGlobal: the verdict applies to this command anywhere on
+	// disk. Cache key omits cwd + git branch.
+	ScopeGlobal Scope = "global"
+	// ScopeProject: the verdict applies only to the same cwd
+	// (project-relative commands like npm/make scripts). Cache key
+	// includes cwd hash + git branch.
+	ScopeProject Scope = "project"
+)
+
 // Decision is the parsed JSON response from the classifier.
 type Decision struct {
 	Verdict  Verdict `json:"decision"`
 	Category string  `json:"category,omitempty"`
 	Reason   string  `json:"reason,omitempty"`
+	// Scope determines how broadly an allow verdict can be cached.
+	// Empty string is treated as ScopeProject (the safer default).
+	Scope Scope `json:"scope,omitempty"`
 }
 
 // ClassifyInput is what the engine passes per call.
@@ -69,6 +93,11 @@ type ClassifyInput struct {
 	Description string // Claude Code's tool_input.description
 	CWD         string
 	GitBranch   string
+	// ProjectContext is a small pre-built block of project-relevant
+	// information (e.g. matching package.json scripts, makefile
+	// targets) that helps the LLM reason about what the command will
+	// actually do. Already capped in size by internal/projectctx.
+	ProjectContext string
 }
 
 // Classifier is the provider-agnostic interface. AnthropicClassifier and
@@ -207,7 +236,19 @@ func buildUserMessage(in ClassifyInput) string {
 		b.WriteString(in.GitBranch)
 		b.WriteString("\n")
 	}
-	b.WriteString("\nReturn JSON only.")
+	if in.ProjectContext != "" {
+		b.WriteString("\nPROJECT CONTEXT (for commands that execute project-defined scripts):\n")
+		b.WriteString(in.ProjectContext)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nReturn JSON only with these fields:\n")
+	b.WriteString(`  decision: "safe" | "unsafe" | "unsure"
+  category: short tag (read_only_query | file_read | file_write_scoped | external_write | destructive | exfil | unknown)
+  scope:    "global" | "project"
+            "global"  → safe in every cwd (e.g. ls, cat, git status)
+            "project" → safe only in this specific project (e.g. npm run build, make test, ./scripts/foo.sh)
+            When in doubt, prefer "project" — it's the safer default.
+  reason:   1-2 sentence plain-English explanation`)
 	return b.String()
 }
 
