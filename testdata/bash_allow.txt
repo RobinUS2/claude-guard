@@ -1,0 +1,152 @@
+# bash_allow.txt — commands that MUST end in Allow under tier 1+2 only
+# (no LLM, no cache, no legacy). One command per line. Lines starting
+# with # and blank lines are ignored.
+#
+# These exercise the deterministic instant_allow rules. Every command
+# here is a "shape that's anchored, no shell trickery, in the allow
+# program list". Catches regressions when allow rules tighten or
+# break.
+
+# --- POSIX read-only family ---
+ls
+ls -la
+ls -la /tmp
+cat /etc/hosts
+head -10 /var/log/system.log
+tail -5 /tmp/test.log
+wc -l /tmp/test.log
+grep foo /tmp/test.log
+grep -r foo /tmp
+find /tmp -type f
+find /tmp -name '*.log'
+which python3
+whereis ls
+file /tmp/test
+stat /tmp/test
+du -sh /tmp
+df -h
+env
+printenv PATH
+echo hello
+echo "hello world"
+echo hello world
+date
+pwd
+whoami
+hostname
+uname -a
+id
+
+# --- Text/data inspection ---
+jq .
+yq .
+cmp /tmp/a /tmp/b
+diff /tmp/a /tmp/b
+xxd /bin/ls
+od -c /tmp/file
+hexdump /tmp/file
+
+# --- Git read-only subcommands ---
+git status
+git log
+git log --oneline
+git log -n 5
+git diff
+git diff main
+git diff HEAD~1
+git show
+git show HEAD
+git branch
+git branch -a
+git remote
+git remote -v
+git blame /tmp/file
+git rev-parse HEAD
+git ls-files
+git ls-tree HEAD
+git describe
+git config user.name
+
+# gcloud is intentionally NOT in tier 2 (its subcommand tree is too
+# deep for anchored_command). gcloud calls fall through to the LLM
+# tier — see bash_continue.txt.
+
+# --- bq read-only ---
+bq show
+bq ls
+bq query
+bq head
+
+# --- terraform read-only ---
+terraform plan
+terraform validate
+terraform fmt
+terraform show
+terraform version
+terraform state
+terraform output
+terraform workspace
+terraform console
+
+# --- docker / podman read-only ---
+docker ps
+docker images
+docker inspect foo
+docker logs foo
+docker version
+docker info
+podman ps
+podman images
+
+# --- kubectl read-only ---
+kubectl get
+kubectl get pods
+kubectl describe
+kubectl logs foo
+kubectl version
+kubectl cluster-info
+kubectl explain
+
+# --- go safe subcommands ---
+go version
+go env
+go list
+go vet
+go fmt
+go doc
+go help
+
+# --- node package managers, read-only ---
+npm list
+npm ls
+npm view foo
+npm outdated
+npm audit
+npm config list
+npm whoami
+yarn list
+yarn outdated
+pnpm list
+
+# --- gh read-only outer subcommands (note: 'gh pr merge' is not safe but is gated by LLM tier 4 / user prompt) ---
+gh pr
+gh issue
+gh repo
+gh run
+gh api
+gh auth
+gh release
+gh search
+gh status
+gh version
+gh help
+
+# --- make read-only targets ---
+make help
+make test
+make check
+make lint
+make vet
+make fmt
+make typecheck
+make build

@@ -21,6 +21,7 @@ import (
 
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
@@ -90,6 +91,7 @@ type Engine struct {
 	verifier llm.Classifier // optional cross-provider verifier
 	breaker  *breaker.Breaker
 	cache    *cache.Cache
+	legacy   *legacy.AllowList // tier 5: migrated allow list from settings.json
 
 	// promptVersion + rulesHash feed the cache key. Computed once at
 	// engine construction so every Decide call uses the same key shape.
@@ -116,6 +118,11 @@ type Options struct {
 	Verifier llm.Classifier
 	Breaker  *breaker.Breaker
 	Cache    *cache.Cache
+	// Legacy is the migrated allow list from settings.json. Tier 5.
+	// Used as a safety net during phase 4 of the rollout — anything
+	// previously auto-approved continues to flow through while the
+	// smarter tiers warm up.
+	Legacy *legacy.AllowList
 }
 
 // New creates an engine with the given config and logger.
@@ -136,6 +143,7 @@ func NewWithOptions(opts Options) *Engine {
 		verifier: opts.Verifier,
 		breaker:  opts.Breaker,
 		cache:    opts.Cache,
+		legacy:   opts.Legacy,
 	}
 	if e.cfg == nil {
 		e.cfg = config.Default()
@@ -371,7 +379,22 @@ func (e *Engine) Decide(in Input) Output {
 		}
 	}
 
-	// Tier 5: legacy allow list — stub in Phase 1
+	// Tier 5: legacy allow list (migrated from settings.json).
+	// Last-resort allow before falling through to the user prompt.
+	if e.legacy != nil {
+		if match := e.legacy.Match(in.Command); match != nil {
+			out.Shadow.Tier1Rule = out.Shadow.Tier1Rule // unchanged
+			if !e.cfg.ShadowMode {
+				out.Verdict = Allow
+				out.Tier = "legacy"
+				out.Rule = match.Source
+				out.Reason = "matched legacy allow pattern: " + match.Prefix
+				out.Latency = time.Since(start)
+				e.record(in, out)
+				return out
+			}
+		}
+	}
 
 	// Tier 6: default (no verdict, fall through to user prompt).
 	out.Latency = time.Since(start)

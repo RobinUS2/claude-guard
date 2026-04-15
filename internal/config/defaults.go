@@ -137,17 +137,17 @@ func DefaultAllowRules() []rules.Rule {
 			RequireSubcmdAny: []string{"status", "log", "diff", "show", "branch", "remote", "blame", "rev-parse", "ls-files", "ls-tree", "describe", "config"},
 		},
 
-		// gcloud read-only (list/describe/get)
-		&rules.AnchoredCommand{
-			RuleName: "gcloud-readonly",
-			Programs: []string{"gcloud"},
-		},
-		// Note: gcloud has deeply nested subcommands (gcloud run services list),
-		// so anchored_command can't express "first positional is list/describe".
-		// For v1 we rely on the LLM tier to refine gcloud; the anchored rule
-		// above only matches gcloud invocations that actually pass the
-		// no-redirect/no-pipe constraint, which still covers most cases. A
-		// nested-subcommand matcher is Phase 2 work.
+		// gcloud is intentionally NOT in tier 2. Its subcommand tree is too
+		// deep for anchored_command to express "must be a read subcommand"
+		// — `gcloud run deploy`, `gcloud builds submit`, `gcloud projects
+		// delete` would all sneak through a naive `Programs: ["gcloud"]`
+		// rule (they're a single anchored call, no pipes, no redirects).
+		// Without a nested-subcommand matcher (Phase 2 work), gcloud calls
+		// must fall through to the LLM tier where the model can reason
+		// about the full command tree.
+		//
+		// This is a deliberate tradeoff: more LLM cost for gcloud-heavy
+		// sessions, but no risk of auto-approving a gcloud mutation.
 
 		// bq (BigQuery) read-only
 		&rules.AnchoredCommand{

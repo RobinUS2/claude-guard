@@ -8,6 +8,7 @@ import (
 
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
+	"github.com/RobinUS2/claude-guard/internal/legacy"
 )
 
 // cmdTest dry-runs a command through the engine and prints a trace of
@@ -52,7 +53,14 @@ func cmdTest(args []string) int {
 		cfg.ShadowMode = false
 	}
 
-	eng := engine.New(cfg, nil) // no logger for dry runs
+	// Load tier 5 (legacy) so dry-runs reflect what the real hook
+	// would do. Missing file is fine.
+	legacyList, _ := legacy.Load(defaultLegacyPath())
+
+	eng := engine.NewWithOptions(engine.Options{
+		Config: cfg,
+		Legacy: legacyList,
+	})
 	out := eng.Decide(engine.Input{
 		ToolName: "Bash",
 		Command:  command,

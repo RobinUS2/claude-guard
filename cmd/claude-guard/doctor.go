@@ -9,6 +9,7 @@ import (
 
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
@@ -115,6 +116,20 @@ func cmdDoctor(_ []string) int {
 				check("llm:cache", true, detail)
 			}
 		}
+	}
+
+	// 6c. Tier 5 legacy allow list
+	legacyPath := filepath.Join(home, ".config", "claude-guard", "legacy-patterns.yaml")
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		legacyPath = filepath.Join(xdg, "claude-guard", "legacy-patterns.yaml")
+	}
+	if _, err := os.Stat(legacyPath); os.IsNotExist(err) {
+		warn("legacy:patterns", "not migrated (run: claude-guard migrate)")
+	} else if al, err := legacy.Load(legacyPath); err == nil && al != nil {
+		check("legacy:patterns", true,
+			fmt.Sprintf("%d patterns loaded from %s", len(al.Patterns), legacyPath))
+	} else if err != nil {
+		warn("legacy:patterns", err.Error())
 	}
 
 	// 7. Claude Code settings.json hook wiring

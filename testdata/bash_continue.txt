@@ -1,0 +1,64 @@
+# bash_continue.txt — commands that MUST fall through (verdict=Continue)
+# under tier 1+2 only (no LLM, no cache, no legacy).
+#
+# These are commands that:
+#   - don't match any deterministic block rule (so tier 1 doesn't fire)
+#   - don't match any anchored allow rule (so tier 2 doesn't fire)
+# In production, these would normally hit tier 4 (LLM) or fall to the
+# user prompt. In this corpus we just verify they reach Continue.
+
+# --- Anchored allow rules don't apply to commands with shell trickery ---
+ls -la > /tmp/listing
+cat /etc/hosts | grep localhost
+echo "evil" > /tmp/tmp.txt
+ls /tmp && cat /tmp/foo
+ls; cat /tmp/foo
+(ls /tmp)
+echo $(date)
+ls -la | head -5
+
+# --- Commands not in any anchored allow list ---
+go build ./...
+go test ./...
+go test -race ./...
+npm install
+npm run dev
+npm run build
+yarn install
+yarn build
+pnpm install
+gcloud
+gcloud version
+gcloud builds submit
+gcloud run deploy
+gcloud projects list
+gcloud projects describe foo
+gcloud builds list
+gcloud secrets versions access latest --secret=foo
+docker build .
+docker run alpine
+docker compose up
+kubectl apply -f deploy.yaml
+kubectl create secret generic foo
+terraform init
+terraform apply
+terraform destroy
+
+# --- Variable-expanded commands fall through (HasUnresolved) ---
+cat $HOME/.bashrc
+echo $PATH
+ls $HOME
+
+# --- Custom scripts the engine has no opinion on ---
+./run.sh
+./scripts/test.sh
+make deploy
+./bin/myapp serve
+
+# --- Long pipelines / compound commands ---
+git log | head
+ls /tmp | wc -l
+find . -name "*.go" | xargs wc -l
+
+# --- Variable-wrapped rm bypass attempts (tier 1 conservative on unresolved) ---
+R=rm; $R -rf /

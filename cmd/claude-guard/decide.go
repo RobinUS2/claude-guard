@@ -10,6 +10,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
 	"github.com/RobinUS2/claude-guard/internal/hook"
+	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
@@ -79,6 +80,10 @@ func cmdDecide(_ []string) int {
 	}
 	redactor := redact.New(nil, nil)
 
+	// Tier 5: legacy allow list (migrated from settings.json). Missing
+	// file is fine — it just means tier 5 is empty.
+	legacyList, _ := legacy.Load(defaultLegacyPath())
+
 	// Parse the PreToolUse payload from stdin.
 	req, err := hook.ReadRequest(os.Stdin)
 	if err != nil {
@@ -111,6 +116,7 @@ func cmdDecide(_ []string) int {
 		Verifier:    verifier,
 		Breaker:     br,
 		Cache:       cch,
+		Legacy:      legacyList,
 	})
 	out := eng.Decide(engine.Input{
 		ToolName:    req.ToolName,

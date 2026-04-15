@@ -14,11 +14,10 @@ func stub(name string) int {
 	return 64
 }
 
-// cmdTest and cmdDoctor live in their own files now.
+// cmdTest, cmdDoctor, cmdMigrate live in their own files now.
 func cmdExplain(_ []string) int    { return stub("explain") }
 func cmdReplay(_ []string) int     { return stub("replay") }
 func cmdStats(_ []string) int      { return stub("stats") }
-func cmdMigrate(_ []string) int    { return stub("migrate") }
 func cmdLint(_ []string) int       { return stub("lint") }
 func cmdEvalPrompt(_ []string) int { return stub("eval-prompt") }
 func cmdBench(_ []string) int      { return stub("bench") }
