@@ -26,6 +26,7 @@ Subcommands:
   stats               tier-hit counts, cache hit rate, LLM latency
   doctor              health check: config, schema, API key, hook wiring
   migrate             settings.json allow-list → legacy-patterns.yaml
+  backup [--dest D]   copy logs + cache + config to backup destination (default: Google Drive)
   lint                validate config.yaml and run bundled rule tests
   eval-prompt         run the classifier against the eval corpus
   bench               engine latency against a corpus (no LLM)
@@ -62,6 +63,8 @@ func run(args []string) int {
 		return cmdDoctor(args[1:])
 	case "migrate":
 		return cmdMigrate(args[1:])
+	case "backup":
+		return cmdBackup(args[1:])
 	case "lint":
 		return cmdLint(args[1:])
 	case "eval-prompt":
