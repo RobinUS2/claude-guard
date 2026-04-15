@@ -30,22 +30,28 @@ type GeminiClassifier struct {
 
 // NewGemini constructs a GeminiClassifier with sensible defaults.
 //
-// MaxTokens default is 600 — Gemini 2.5 Flash sometimes prefixes JSON
-// output with brief preamble before honoring strict-JSON mode, and the
-// previous 200-token budget got truncated mid-preamble. 600 leaves plenty
-// of room for the actual JSON object plus any leading framing.
+// MaxTokens default is 1500 — even with strict responseSchema, Gemini
+// 2.5 Flash sometimes generates more tokens than expected (long reason
+// fields with backslash-escaped quotes blow up the token count fast).
+// 1500 leaves room for any reasonable JSON without truncation.
 func NewGemini(apiKey, model string) *GeminiClassifier {
 	if model == "" {
 		model = DefaultGeminiModel
+	}
+	timeout := 4 * time.Second
+	if model == "gemini-2.5-pro" || model == "gemini-pro" {
+		// Gemini Pro is significantly slower than Flash. Used as a verifier
+		// in the background, so we can afford a longer timeout.
+		timeout = 15 * time.Second
 	}
 	return &GeminiClassifier{
 		APIKey:       apiKey,
 		ModelName:    model,
 		BaseURL:      "https://generativelanguage.googleapis.com",
-		Timeout:      4 * time.Second,
-		MaxTokens:    600,
+		Timeout:      timeout,
+		MaxTokens:    1500,
 		SystemPrompt: DefaultSystemPrompt(),
-		HTTP:         &http.Client{Timeout: 4 * time.Second},
+		HTTP:         &http.Client{Timeout: timeout},
 	}
 }
 

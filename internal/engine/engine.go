@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/cache"
@@ -86,6 +87,7 @@ type Engine struct {
 	app      *slog.Logger
 	redactor *redact.Redactor
 	llm      llm.Classifier
+	verifier llm.Classifier // optional cross-provider verifier
 	breaker  *breaker.Breaker
 	cache    *cache.Cache
 
@@ -93,6 +95,11 @@ type Engine struct {
 	// engine construction so every Decide call uses the same key shape.
 	promptVersion string
 	rulesHash     string
+
+	// pendingVerifies tracks goroutines spawned to verify cached entries.
+	// AwaitVerifications waits for them — called by decide.go after the
+	// hook response has been written to stdout.
+	pendingVerifies sync.WaitGroup
 }
 
 // Options configures the engine. All fields are optional — nil
@@ -103,8 +110,12 @@ type Options struct {
 	AppLog      *slog.Logger
 	Redactor    *redact.Redactor
 	LLM         llm.Classifier
-	Breaker     *breaker.Breaker
-	Cache       *cache.Cache
+	// Verifier is an optional second classifier that asynchronously
+	// reviews cached LLM verdicts. Should be a different provider from
+	// LLM for the strongest cross-model signal.
+	Verifier llm.Classifier
+	Breaker  *breaker.Breaker
+	Cache    *cache.Cache
 }
 
 // New creates an engine with the given config and logger.
@@ -122,6 +133,7 @@ func NewWithOptions(opts Options) *Engine {
 		app:      opts.AppLog,
 		redactor: opts.Redactor,
 		llm:      opts.LLM,
+		verifier: opts.Verifier,
 		breaker:  opts.Breaker,
 		cache:    opts.Cache,
 	}
@@ -132,6 +144,29 @@ func NewWithOptions(opts Options) *Engine {
 	e.promptVersion = cache.HashString(llm.DefaultSystemPrompt())
 	e.rulesHash = computeRulesHash(e.cfg)
 	return e
+}
+
+// AwaitVerifications blocks until all background verifier goroutines
+// have finished, or the deadline is reached. The hook entrypoint calls
+// this AFTER closing stdout (so the user is already unblocked) and
+// BEFORE exiting the process. Returns true on clean completion, false
+// on deadline timeout.
+func (e *Engine) AwaitVerifications(deadline time.Duration) bool {
+	if deadline <= 0 {
+		e.pendingVerifies.Wait()
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		e.pendingVerifies.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(deadline):
+		return false
+	}
 }
 
 // gitBranchOf returns a coarse branch identity for cache key purposes.
@@ -268,17 +303,39 @@ func (e *Engine) Decide(in Input) Output {
 			RulesHash:     e.rulesHash,
 		})
 		if entry, hit := e.cache.Get(cacheKey); hit {
-			out.Shadow.Tier4LLM = "cache:" + string(entry.Verdict)
-			if !e.cfg.ShadowMode && entry.Verdict == cache.VerdictAllow {
-				out.Verdict = Allow
-				out.Tier = "cache"
-				out.Rule = entry.Tier + "/" + entry.Provider
-				out.Reason = entry.Reason
-				out.Latency = time.Since(start)
-				e.record(in, out)
-				return out
+			eff := entry.EffectiveVerdict()
+			suffix := string(eff)
+			if entry.Disagreement {
+				suffix = "verifier-deny:" + string(eff)
+			} else if entry.Verified {
+				suffix = "verified:" + string(eff)
 			}
-			// Shadow mode or non-allow verdict: skip to default.
+			out.Shadow.Tier4LLM = "cache:" + suffix
+
+			if !e.cfg.ShadowMode {
+				switch eff {
+				case cache.VerdictAllow:
+					out.Verdict = Allow
+					out.Tier = "cache"
+					out.Rule = entry.Tier + "/" + entry.Provider
+					out.Reason = entry.Reason
+					out.Latency = time.Since(start)
+					e.record(in, out)
+					return out
+				case cache.VerdictDeny:
+					// Verifier disagreement → block. This is the high-confidence
+					// signal: two different models reviewed and disagreed, so
+					// the verifier (slower, stronger) wins.
+					out.Verdict = Deny
+					out.Tier = "cache"
+					out.Rule = "verifier:" + entry.VerifierProvider + "/" + entry.VerifierModel
+					out.Reason = "verified by " + entry.VerifierProvider + " (disagreement with original): " + entry.VerifierReason
+					out.Latency = time.Since(start)
+					e.record(in, out)
+					return out
+				}
+			}
+			// Shadow mode or non-actionable verdict: fall through to default.
 			out.Latency = time.Since(start)
 			e.record(in, out)
 			return out
@@ -298,6 +355,10 @@ func (e *Engine) Decide(in Input) Output {
 				Provider: e.llm.Provider(),
 				Model:    e.llm.Model(),
 			}, 90*24*time.Hour)
+			// Spawn the async verifier (cross-provider second opinion).
+			// AwaitVerifications in decide.go waits for these after the
+			// hook response has been written, before the process exits.
+			e.spawnVerification(cacheKey, in)
 		}
 		if !e.cfg.ShadowMode && llmVerdict.allow {
 			out.Verdict = Allow
@@ -416,6 +477,100 @@ func (e *Engine) appLog() *slog.Logger {
 		return e.app
 	}
 	return slog.New(slog.DiscardHandler)
+}
+
+// spawnVerification fires off a goroutine that calls the verifier
+// classifier, compares its verdict to the original, and updates the
+// cache entry. Used for cross-provider verification: a faster classifier
+// (e.g. Gemini Flash) decides in real time, a slower one (e.g. Sonnet)
+// audits the decision in the background.
+//
+// No-op when the verifier is not configured. Caller should call
+// AwaitVerifications before exiting the process.
+func (e *Engine) spawnVerification(cacheKey string, in Input) {
+	if e.verifier == nil || e.cache == nil || cacheKey == "" {
+		return
+	}
+	e.pendingVerifies.Add(1)
+	go func() {
+		defer e.pendingVerifies.Done()
+		// Use a fresh redacted command for the verifier — we don't keep
+		// the redacted form around from the fast path. Skip if redaction
+		// flagged this command — same protection as fast path.
+		cmd := in.Command
+		if e.redactor != nil {
+			res := e.redactor.Scan(in.Command)
+			if res.Decision == redact.Skip {
+				return
+			}
+			cmd = res.Redacted
+		}
+
+		// Verifier gets a more generous deadline than the fast path —
+		// it's not in the user's critical path.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		dec, err := e.verifier.Classify(ctx, llm.ClassifyInput{
+			Command:     cmd,
+			Description: in.Description,
+			CWD:         in.CWD,
+		})
+		if err != nil {
+			e.appLog().Warn("verifier_error",
+				"err", err.Error(),
+				"provider", e.verifier.Provider(),
+				"model", e.verifier.Model(),
+				"tool_use_id", in.ToolUseID,
+			)
+			return
+		}
+
+		// Map LLM verdict to cache verdict. Only "safe" is allow; everything
+		// else (unsafe, unsure) is treated as "verifier disagrees with allow"
+		// → deny. This is the safer default: when in doubt, future calls
+		// should prompt the user.
+		var verifierVerdict cache.Verdict
+		if dec.Verdict == llm.VerdictSafe {
+			verifierVerdict = cache.VerdictAllow
+		} else {
+			verifierVerdict = cache.VerdictDeny
+		}
+
+		updated, err := e.cache.Verify(cacheKey, cache.VerifierResult{
+			Provider: e.verifier.Provider(),
+			Model:    e.verifier.Model(),
+			Verdict:  verifierVerdict,
+			Reason:   dec.Reason,
+		})
+		if err != nil {
+			e.appLog().Warn("verifier_cache_update_error",
+				"err", err.Error(),
+				"tool_use_id", in.ToolUseID,
+			)
+			return
+		}
+		if !updated {
+			// Cache entry vanished between Put and Verify — possibly evicted
+			// or rotated by another process. Not an error.
+			return
+		}
+
+		level := slog.LevelInfo
+		msg := "verifier_agree"
+		if verifierVerdict != cache.VerdictAllow {
+			level = slog.LevelWarn
+			msg = "verifier_disagree_DENY_NEXT_CALL"
+		}
+		e.appLog().Log(context.Background(), level, msg,
+			"verifier_provider", e.verifier.Provider(),
+			"verifier_model", e.verifier.Model(),
+			"verifier_verdict", string(dec.Verdict),
+			"verifier_reason", dec.Reason,
+			"command", in.Command,
+			"tool_use_id", in.ToolUseID,
+		)
+	}()
 }
 
 // record appends a log entry for this decision if a logger is attached.

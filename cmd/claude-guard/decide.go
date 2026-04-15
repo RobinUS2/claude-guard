@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
@@ -58,9 +59,17 @@ func cmdDecide(_ []string) int {
 	}
 
 	// LLM tier setup: pick a provider from env, set up redactor + breaker
-	// + cache. All four are optional — if any returns nil, that piece is
-	// disabled and the engine simply skips it.
-	classifier := llm.AutoSelect("anthropic", os.Getenv) // prefer Anthropic; fall back to Gemini
+	// + cache + verifier. All five are optional — if any returns nil,
+	// that piece is disabled and the engine simply skips it.
+	//
+	// Verifier is the cross-provider second opinion: when both Anthropic
+	// and Gemini keys are present, the fast classifier and the verifier
+	// come from different providers. Different model architectures catch
+	// different failure modes, and using two providers also defends
+	// against prompt injection attacks targeted at one provider's prompt
+	// format.
+	classifier, verifier := pickClassifierAndVerifier(os.Getenv)
+
 	cacheRoot := filepath.Join(os.Getenv("HOME"), ".cache", "claude-guard")
 	var br *breaker.Breaker
 	var cch *cache.Cache
@@ -99,6 +108,7 @@ func cmdDecide(_ []string) int {
 		AppLog:      appLogger,
 		Redactor:    redactor,
 		LLM:         classifier,
+		Verifier:    verifier,
 		Breaker:     br,
 		Cache:       cch,
 	})
@@ -128,5 +138,74 @@ func cmdDecide(_ []string) int {
 		fmt.Fprintf(os.Stderr, "claude-guard: write response: %v\n", err)
 		return 1
 	}
+
+	// Close stdout so Claude Code unblocks immediately. After this point
+	// any background work (verifier goroutines) keeps running, but the
+	// user is no longer waiting on us.
+	_ = os.Stdout.Close()
+
+	// Wait for any in-flight verifier goroutines to finish (or 30s max).
+	// Each verify call is ~1-3 seconds, so this rarely hits the cap.
+	eng.AwaitVerifications(30 * time.Second)
 	return 0
+}
+
+// pickClassifierAndVerifier returns (fast, verifier). The verifier is
+// always from a different provider than the fast classifier — that's
+// the whole point of cross-provider verification. Returns (nil, nil)
+// if no API keys are available.
+func pickClassifierAndVerifier(getenv func(string) string) (llm.Classifier, llm.Classifier) {
+	hasAnthropic := false
+	hasGemini := false
+	for _, k := range llm.AnthropicEnvKeys {
+		if getenv(k) != "" {
+			hasAnthropic = true
+			break
+		}
+	}
+	for _, k := range llm.GeminiEnvKeys {
+		if getenv(k) != "" {
+			hasGemini = true
+			break
+		}
+	}
+
+	switch {
+	case hasAnthropic && hasGemini:
+		// Both providers — Gemini Flash is fastest, Anthropic Sonnet is
+		// the stronger verifier. Cross-provider, fastest-first.
+		fast := llm.AutoSelect("gemini", getenv)
+		ver := llm.NewAnthropic(firstNonEmpty(getenv, llm.AnthropicEnvKeys), VerifierAnthropicModel)
+		return fast, ver
+	case hasAnthropic:
+		// Only Anthropic — fast=Haiku, verifier=Sonnet (same provider,
+		// stronger model — weaker signal but still useful).
+		fast := llm.AutoSelect("anthropic", getenv)
+		ver := llm.NewAnthropic(firstNonEmpty(getenv, llm.AnthropicEnvKeys), VerifierAnthropicModel)
+		return fast, ver
+	case hasGemini:
+		// Only Gemini — fast=Flash, verifier=Pro.
+		fast := llm.AutoSelect("gemini", getenv)
+		ver := llm.NewGemini(firstNonEmpty(getenv, llm.GeminiEnvKeys), VerifierGeminiModel)
+		return fast, ver
+	default:
+		return nil, nil
+	}
+}
+
+// VerifierAnthropicModel is the strong Anthropic model used as a
+// background verifier. Sonnet 4.5 strikes the right balance: stronger
+// than Haiku but not as expensive or slow as Opus.
+const VerifierAnthropicModel = "claude-sonnet-4-5"
+
+// VerifierGeminiModel is the strong Gemini model used as a verifier.
+const VerifierGeminiModel = "gemini-2.5-pro"
+
+func firstNonEmpty(getenv func(string) string, keys []string) string {
+	for _, k := range keys {
+		if v := getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
 }

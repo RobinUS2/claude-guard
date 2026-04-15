@@ -245,3 +245,117 @@ func TestHashStrings_OrderIndependent(t *testing.T) {
 		t.Errorf("HashStrings should be order-independent")
 	}
 }
+
+// --- Verifier ---
+
+func TestVerify_AgreementMarksVerified(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	c := newTestCache(t, now)
+	key := Key(KeyInputs{Command: "git status"})
+	_ = c.Put(key, Entry{Verdict: VerdictAllow, Reason: "fast: read-only"}, time.Hour)
+
+	updated, err := c.Verify(key, VerifierResult{
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Verdict:  VerdictAllow,
+		Reason:   "verifier: confirmed read-only",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated {
+		t.Fatal("Verify should report hit")
+	}
+
+	got, ok := c.Get(key)
+	if !ok {
+		t.Fatal("entry missing after verify")
+	}
+	if !got.Verified {
+		t.Error("Verified should be true")
+	}
+	if got.Disagreement {
+		t.Error("Disagreement should be false on agreement")
+	}
+	if got.VerifierProvider != "anthropic" {
+		t.Errorf("VerifierProvider = %q", got.VerifierProvider)
+	}
+	if got.EffectiveVerdict() != VerdictAllow {
+		t.Errorf("EffectiveVerdict = %q, want allow", got.EffectiveVerdict())
+	}
+}
+
+func TestVerify_DisagreementFlipsEffectiveVerdict(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	c := newTestCache(t, now)
+	key := Key(KeyInputs{Command: "rm -rf node_modules"})
+	_ = c.Put(key, Entry{Verdict: VerdictAllow, Reason: "fast: scoped to worktree"}, time.Hour)
+
+	_, err := c.Verify(key, VerifierResult{
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-5",
+		Verdict:  VerdictDeny,
+		Reason:   "verifier: actually targets a system path",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := c.Get(key)
+	if !got.Disagreement {
+		t.Error("Disagreement should be true")
+	}
+	if got.EffectiveVerdict() != VerdictDeny {
+		t.Errorf("EffectiveVerdict = %q, want deny (verifier's verdict wins)", got.EffectiveVerdict())
+	}
+	// Original verdict is preserved for audit
+	if got.Verdict != VerdictAllow {
+		t.Errorf("original Verdict should be preserved as allow; got %q", got.Verdict)
+	}
+}
+
+func TestVerify_MissOnUnknownKey(t *testing.T) {
+	c := newTestCache(t, time.Now())
+	updated, err := c.Verify("nonexistent", VerifierResult{Verdict: VerdictAllow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated {
+		t.Error("Verify should report miss on unknown key")
+	}
+}
+
+func TestVerify_PreservesExpiry(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	c := newTestCache(t, now)
+	key := Key(KeyInputs{Command: "ls"})
+	_ = c.Put(key, Entry{Verdict: VerdictAllow}, time.Hour)
+	original, _ := c.Get(key)
+
+	c.now = func() time.Time { return now.Add(10 * time.Minute) }
+	_, _ = c.Verify(key, VerifierResult{Verdict: VerdictAllow})
+
+	updated, _ := c.Get(key)
+	if !updated.ExpiresAt.Equal(original.ExpiresAt) {
+		t.Errorf("ExpiresAt changed: %v -> %v", original.ExpiresAt, updated.ExpiresAt)
+	}
+}
+
+func TestEffectiveVerdict_NoDisagreement(t *testing.T) {
+	e := &Entry{
+		Verdict:         VerdictAllow,
+		Verified:        true,
+		VerifierVerdict: VerdictAllow,
+		Disagreement:    false,
+	}
+	if e.EffectiveVerdict() != VerdictAllow {
+		t.Errorf("EffectiveVerdict = %q", e.EffectiveVerdict())
+	}
+}
+
+func TestEffectiveVerdict_UnverifiedReturnsOriginal(t *testing.T) {
+	e := &Entry{Verdict: VerdictAllow, Verified: false}
+	if e.EffectiveVerdict() != VerdictAllow {
+		t.Errorf("EffectiveVerdict = %q", e.EffectiveVerdict())
+	}
+}

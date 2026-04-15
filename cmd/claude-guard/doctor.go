@@ -106,9 +106,14 @@ func cmdDoctor(_ []string) int {
 		case cs.Entries == 0:
 			warn("llm:cache", "empty (will warm up after first LLM calls)")
 		default:
-			detail := fmt.Sprintf("%d entries, %.1f KiB on disk, %d expired",
-				cs.Entries, float64(cs.BytesOnDisk)/1024, cs.ExpiredHits)
-			check("llm:cache", true, detail)
+			pending := cs.Entries - cs.Verified
+			detail := fmt.Sprintf("%d entries (%d verified, %d pending, %d disagreements), %.1f KiB",
+				cs.Entries, cs.Verified, pending, cs.Disagree, float64(cs.BytesOnDisk)/1024)
+			if cs.Disagree > 0 {
+				warn("llm:cache", detail)
+			} else {
+				check("llm:cache", true, detail)
+			}
 		}
 	}
 
