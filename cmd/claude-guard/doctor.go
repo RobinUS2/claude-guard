@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
@@ -95,6 +96,20 @@ func cmdDoctor(_ []string) int {
 				state.LastError))
 	default:
 		warn("llm:circuit", state.Status)
+	}
+
+	// 6b. Cache stats
+	cacheDir := filepath.Join(home, ".cache", "claude-guard", "verdicts")
+	cch := cache.New(cacheDir)
+	if cs, err := cch.Stats(); err == nil {
+		switch {
+		case cs.Entries == 0:
+			warn("llm:cache", "empty (will warm up after first LLM calls)")
+		default:
+			detail := fmt.Sprintf("%d entries, %.1f KiB on disk, %d expired",
+				cs.Entries, float64(cs.BytesOnDisk)/1024, cs.ExpiredHits)
+			check("llm:cache", true, detail)
+		}
 	}
 
 	// 7. Claude Code settings.json hook wiring

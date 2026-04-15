@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
 	"github.com/RobinUS2/claude-guard/internal/hook"
@@ -56,14 +57,16 @@ func cmdDecide(_ []string) int {
 		defer appCloser.Close()
 	}
 
-	// LLM tier setup: pick a provider from env, set up redactor + breaker.
-	// All three are optional — if any returns nil, that piece is disabled
-	// and the engine simply skips it.
+	// LLM tier setup: pick a provider from env, set up redactor + breaker
+	// + cache. All four are optional — if any returns nil, that piece is
+	// disabled and the engine simply skips it.
 	classifier := llm.AutoSelect("anthropic", os.Getenv) // prefer Anthropic; fall back to Gemini
+	cacheRoot := filepath.Join(os.Getenv("HOME"), ".cache", "claude-guard")
 	var br *breaker.Breaker
+	var cch *cache.Cache
 	if classifier != nil {
-		circuitPath := filepath.Join(os.Getenv("HOME"), ".cache", "claude-guard", "llm-circuit.json")
-		br = breaker.New(circuitPath)
+		br = breaker.New(filepath.Join(cacheRoot, "llm-circuit.json"))
+		cch = cache.New(filepath.Join(cacheRoot, "verdicts"))
 	}
 	redactor := redact.New(nil, nil)
 
@@ -97,6 +100,7 @@ func cmdDecide(_ []string) int {
 		Redactor:    redactor,
 		LLM:         classifier,
 		Breaker:     br,
+		Cache:       cch,
 	})
 	out := eng.Decide(engine.Input{
 		ToolName:    req.ToolName,

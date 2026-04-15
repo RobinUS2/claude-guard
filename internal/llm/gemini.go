@@ -42,10 +42,10 @@ func NewGemini(apiKey, model string) *GeminiClassifier {
 		APIKey:       apiKey,
 		ModelName:    model,
 		BaseURL:      "https://generativelanguage.googleapis.com",
-		Timeout:      3 * time.Second,
+		Timeout:      4 * time.Second,
 		MaxTokens:    600,
 		SystemPrompt: DefaultSystemPrompt(),
-		HTTP:         &http.Client{Timeout: 3 * time.Second},
+		HTTP:         &http.Client{Timeout: 4 * time.Second},
 	}
 }
 

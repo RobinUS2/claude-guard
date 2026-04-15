@@ -13,8 +13,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
@@ -27,8 +31,9 @@ import (
 
 // Tier 4 (LLM) hard timeout. Per-call timeout. Anything longer should
 // not block a synchronous hook — long retries belong in the cross-
-// invocation breaker, not in the hook path.
-const llmDeadline = 3 * time.Second
+// invocation breaker, not in the hook path. Cache hits bypass this
+// entirely (~1ms file read).
+const llmDeadline = 4 * time.Second
 
 // Verdict is the engine's final output. Matches the three Claude Code
 // outcomes: continue (fall through), allow (auto-approve), deny (block).
@@ -82,6 +87,12 @@ type Engine struct {
 	redactor *redact.Redactor
 	llm      llm.Classifier
 	breaker  *breaker.Breaker
+	cache    *cache.Cache
+
+	// promptVersion + rulesHash feed the cache key. Computed once at
+	// engine construction so every Decide call uses the same key shape.
+	promptVersion string
+	rulesHash     string
 }
 
 // Options configures the engine. All fields are optional — nil
@@ -93,6 +104,7 @@ type Options struct {
 	Redactor    *redact.Redactor
 	LLM         llm.Classifier
 	Breaker     *breaker.Breaker
+	Cache       *cache.Cache
 }
 
 // New creates an engine with the given config and logger.
@@ -111,11 +123,66 @@ func NewWithOptions(opts Options) *Engine {
 		redactor: opts.Redactor,
 		llm:      opts.LLM,
 		breaker:  opts.Breaker,
+		cache:    opts.Cache,
 	}
 	if e.cfg == nil {
 		e.cfg = config.Default()
 	}
+	// Pre-compute the cache key inputs that don't change per call.
+	e.promptVersion = cache.HashString(llm.DefaultSystemPrompt())
+	e.rulesHash = computeRulesHash(e.cfg)
 	return e
+}
+
+// gitBranchOf returns a coarse branch identity for cache key purposes.
+// It does NOT exec `git` — that would be too slow on the hot path
+// (~10ms per call) and the answer would be wrong inside subshells anyway.
+// Instead we read .git/HEAD directly, walking up from cwd until we find
+// one. Returns "" if there is no git repo, "DETACHED" for detached HEAD,
+// or the bare branch name (e.g. "main", "feature-x").
+//
+// The intent is "did we move to a meaningfully different branch?", not
+// "what is the exact ref?" — so categorising main/master/production into
+// a single bucket would be a future optimisation if we see cache thrash
+// during git bisect sessions.
+func gitBranchOf(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	dir := cwd
+	for i := 0; i < 32; i++ { // bounded ascent — never walk past root
+		head := filepath.Join(dir, ".git", "HEAD")
+		if data, err := os.ReadFile(head); err == nil {
+			s := strings.TrimSpace(string(data))
+			if strings.HasPrefix(s, "ref: refs/heads/") {
+				return strings.TrimPrefix(s, "ref: refs/heads/")
+			}
+			if len(s) == 40 || len(s) == 64 {
+				return "DETACHED"
+			}
+			return s
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+	return ""
+}
+
+// computeRulesHash returns a stable hash of the active rule set. Cached
+// LLM verdicts are invalidated when this changes — a rule update means
+// the engine's behavior for the same command may differ.
+func computeRulesHash(cfg *config.Config) string {
+	var names []string
+	for _, r := range cfg.InstantBlock {
+		names = append(names, "block:"+r.Name())
+	}
+	for _, r := range cfg.InstantAllow {
+		names = append(names, "allow:"+r.Name())
+	}
+	return cache.HashStrings(names)
 }
 
 // Decide runs the tier pipeline for a single input.
@@ -187,12 +254,51 @@ func (e *Engine) Decide(in Input) Output {
 		}
 	}
 
-	// Tier 3: cache — stub in Phase 1 (will be added in a follow-up)
+	// Tier 3: cache lookup (only when there's an LLM to back it — caching
+	// deterministic verdicts adds latency for no gain since they're already
+	// sub-millisecond).
+	cacheKey := ""
+	if e.cache != nil && e.llm != nil {
+		cacheKey = cache.Key(cache.KeyInputs{
+			Tool:          in.ToolName,
+			Command:       in.Command,
+			CWD:           in.CWD,
+			GitBranch:     gitBranchOf(in.CWD),
+			PromptVersion: e.promptVersion,
+			RulesHash:     e.rulesHash,
+		})
+		if entry, hit := e.cache.Get(cacheKey); hit {
+			out.Shadow.Tier4LLM = "cache:" + string(entry.Verdict)
+			if !e.cfg.ShadowMode && entry.Verdict == cache.VerdictAllow {
+				out.Verdict = Allow
+				out.Tier = "cache"
+				out.Rule = entry.Tier + "/" + entry.Provider
+				out.Reason = entry.Reason
+				out.Latency = time.Since(start)
+				e.record(in, out)
+				return out
+			}
+			// Shadow mode or non-allow verdict: skip to default.
+			out.Latency = time.Since(start)
+			e.record(in, out)
+			return out
+		}
+	}
 
 	// Tier 4: LLM classifier (approve-only).
 	if e.llm != nil {
 		llmVerdict := e.runLLMTier(in)
 		out.Shadow.Tier4LLM = llmVerdict.shadow
+		// Cache safe verdicts so the next identical command is instant.
+		if e.cache != nil && cacheKey != "" && llmVerdict.allow {
+			_ = e.cache.Put(cacheKey, cache.Entry{
+				Verdict:  cache.VerdictAllow,
+				Reason:   llmVerdict.reason,
+				Tier:     "llm",
+				Provider: e.llm.Provider(),
+				Model:    e.llm.Model(),
+			}, 90*24*time.Hour)
+		}
 		if !e.cfg.ShadowMode && llmVerdict.allow {
 			out.Verdict = Allow
 			out.Tier = "llm"
