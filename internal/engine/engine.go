@@ -11,6 +11,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -459,14 +460,17 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 				newState = s
 			}
 		}
+		category := categorizeLLMError(err)
 		e.appLog().Warn("llm_error",
 			"err", err.Error(),
+			"category", category,
 			"provider", e.llm.Provider(),
 			"model", e.llm.Model(),
 			"breaker_state", newState,
+			"command_preview", previewCommand(in.Command),
 			"tool_use_id", in.ToolUseID,
 		)
-		return llmCallResult{shadow: "error"}
+		return llmCallResult{shadow: "error:" + category}
 	}
 
 	// Success — close the circuit if it was tracking failures.
@@ -500,6 +504,48 @@ func (e *Engine) appLog() *slog.Logger {
 		return e.app
 	}
 	return slog.New(slog.DiscardHandler)
+}
+
+// categorizeLLMError classifies an error into a short tag for shadow
+// trace and stats. The full error stays in the app log; the category
+// is what shows up in `monitor` output and decision records.
+func categorizeLLMError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var rl *breaker.RateLimitError
+	if errors.As(err, &rl) {
+		return "rate_limited"
+	}
+	var srv *breaker.ServerError
+	if errors.As(err, &srv) {
+		return "server_5xx"
+	}
+	var to *breaker.TimeoutError
+	if errors.As(err, &to) {
+		return "timeout"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "not JSON"):
+		return "parse_error"
+	case strings.Contains(msg, "API "):
+		return "api_4xx"
+	case strings.Contains(msg, "missing API key"):
+		return "missing_key"
+	default:
+		return "unknown"
+	}
+}
+
+// previewCommand returns the first 80 chars of a command, ellipsized.
+// Used in app-log entries so a quick `monitor --file app` shows what
+// the LLM was being asked about without dumping the full text.
+func previewCommand(cmd string) string {
+	if len(cmd) <= 80 {
+		return cmd
+	}
+	return cmd[:77] + "…"
 }
 
 // spawnVerification fires off a goroutine that calls the verifier

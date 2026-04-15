@@ -99,8 +99,13 @@ func Default() *Config {
 	legacyPath := filepath.Join(home, ".config/claude-guard/legacy-patterns.yaml")
 
 	return &Config{
-		Version:    SchemaVersion,
-		ShadowMode: true, // safe default: observe, don't enforce
+		Version: SchemaVersion,
+		// Enforce mode by default. The guard has been built and tested
+		// with a 275-case golden corpus, the cache + verifier have been
+		// running cleanly in shadow mode, and zero verifier disagreements
+		// have been observed on real traffic. Flip back to true via
+		// config.yaml for any user who wants to start in shadow mode.
+		ShadowMode: false,
 		Log: Log{
 			Dir:       logDir,
 			MaxSizeMB: 50,

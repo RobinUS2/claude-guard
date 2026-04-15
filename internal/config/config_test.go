@@ -11,8 +11,9 @@ func TestDefault(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("Default returned nil")
 	}
-	if !cfg.ShadowMode {
-		t.Error("default should have shadow_mode=true")
+	// Default is enforce mode now (post-shadow-validation).
+	if cfg.ShadowMode {
+		t.Error("default should have shadow_mode=false (enforce)")
 	}
 	if cfg.LLM.Enabled {
 		t.Error("default should have LLM disabled in Phase 1")
@@ -101,9 +102,12 @@ shadow_mod: false
 	if len(result.Config.InstantBlock) == 0 {
 		t.Error("default block rules must remain after a config error")
 	}
-	// Shadow mode should be the default (true) since the YAML failed to parse.
-	if !result.Config.ShadowMode {
-		t.Error("after YAML parse failure, ShadowMode should be the safe default (true)")
+	// ShadowMode after parse failure follows whatever Default() returns;
+	// the safety guarantee is that the deny rules are still loaded, not
+	// that we silently re-enable shadow mode.
+	if result.Config.ShadowMode != Default().ShadowMode {
+		t.Errorf("after parse failure, ShadowMode should match Default(): got %v, want %v",
+			result.Config.ShadowMode, Default().ShadowMode)
 	}
 }
 
