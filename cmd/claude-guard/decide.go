@@ -4,19 +4,18 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/engine"
 	"github.com/RobinUS2/claude-guard/internal/hook"
+	clog "github.com/RobinUS2/claude-guard/internal/log"
 )
 
 // cmdDecide is the PreToolUse hook entrypoint.
 //
-// It reads a PreToolUse request from stdin, runs it through the engine,
-// and writes a hook response on stdout. It never returns non-zero for
-// business-logic reasons — only for its own internal errors (which Claude
-// Code ignores as non-blocking per Phase 0 verification). This ensures
-// a guard bug can never block the user.
-func cmdDecide(args []string) int {
-	// Recover from any panic and fall through to "no verdict".
-	// A crashing guard must not crash the session.
+// Must NEVER block the user from a crash, a config bug, or a logging bug.
+// Every error path returns Continue (empty JSON response) and exits with
+// code 1 for telemetry — exit 1 is non-blocking per Phase 0 verification.
+func cmdDecide(_ []string) int {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "claude-guard: panic: %v\n", r)
@@ -24,23 +23,73 @@ func cmdDecide(args []string) int {
 		}
 	}()
 
-	req, err := hook.ReadRequest(os.Stdin)
-	if err != nil {
-		// Malformed input is a bug somewhere, not a user-facing issue.
-		// Log to stderr (Claude will show it), but return Continue so we never block.
-		fmt.Fprintf(os.Stderr, "claude-guard: %v\n", err)
-		_ = hook.WriteResponse(os.Stdout, hook.Continue())
-		return 1 // non-blocking per Phase 0 verification
+	// Load config first — if it fails, we still get defaults with tier 1/2.
+	result := config.Load("")
+	if result.Warning != nil {
+		fmt.Fprintf(os.Stderr, "claude-guard: %v\n", result.Warning)
+	}
+	cfg := result.Config
+
+	// Open logger (best-effort). Nil logger is OK — engine handles it.
+	var logger *clog.Logger
+	if cfg.Log.Path != "" {
+		lg, err := clog.Open(cfg.Log.Path, cfg.Log.MaxSizeBytes, cfg.Log.KeepFiles)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: open log: %v\n", err)
+		} else {
+			logger = lg
+		}
 	}
 
-	// Only act on Bash for v1. Other tools fall through.
+	// Parse the PreToolUse payload from stdin.
+	req, err := hook.ReadRequest(os.Stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "claude-guard: %v\n", err)
+		_ = hook.WriteResponse(os.Stdout, hook.Continue())
+		return 1
+	}
+
+	// Only act on Bash for v1.
 	if req.ToolName != "Bash" {
 		_ = hook.WriteResponse(os.Stdout, hook.Continue())
 		return 0
 	}
 
-	// TODO(phase1): dispatch to internal/engine here.
-	// For now: always continue (Phase 1 scaffolding stage).
-	_ = hook.WriteResponse(os.Stdout, hook.Continue())
+	// Extract the Bash command + description.
+	bi, err := req.Bash()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "claude-guard: %v\n", err)
+		_ = hook.WriteResponse(os.Stdout, hook.Continue())
+		return 1
+	}
+
+	// Run the engine.
+	eng := engine.New(cfg, logger)
+	out := eng.Decide(engine.Input{
+		ToolName:    req.ToolName,
+		Command:     bi.Command,
+		Description: bi.Description,
+		CWD:         req.CWD,
+		SessionID:   req.SessionID,
+		ToolUseID:   req.ToolUseID,
+		AgentID:     req.AgentID,
+		AgentType:   req.AgentType,
+	})
+
+	// Translate engine verdict to hook response.
+	var resp hook.Response
+	switch out.Verdict {
+	case engine.Allow:
+		resp = hook.Allow(fmt.Sprintf("tier=%s rule=%s", out.Tier, out.Rule))
+	case engine.Deny:
+		resp = hook.Deny(fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule))
+	default:
+		resp = hook.Continue()
+	}
+
+	if err := hook.WriteResponse(os.Stdout, resp); err != nil {
+		fmt.Fprintf(os.Stderr, "claude-guard: write response: %v\n", err)
+		return 1
+	}
 	return 0
 }

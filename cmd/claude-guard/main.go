@@ -20,6 +20,7 @@ Usage:
 Subcommands:
   decide              hook entrypoint (reads PreToolUse JSON on stdin, emits decision on stdout)
   test <command>      dry-run a command through the tiers (use --live to hit the real LLM)
+  monitor [--since N] live-tail the decisions log with pretty-printing
   explain [-n N]      last N decisions from the log
   replay <log-id>     re-run a historical decision with the current config
   stats               tier-hit counts, cache hit rate, LLM latency
@@ -49,6 +50,8 @@ func run(args []string) int {
 		return cmdDecide(args[1:])
 	case "test":
 		return cmdTest(args[1:])
+	case "monitor", "tail":
+		return cmdMonitor(args[1:])
 	case "explain":
 		return cmdExplain(args[1:])
 	case "replay":

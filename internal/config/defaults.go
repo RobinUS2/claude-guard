@@ -1,0 +1,213 @@
+package config
+
+import "github.com/RobinUS2/claude-guard/internal/rules"
+
+// DefaultBlockRules returns the compiled-in tier 1 rule set.
+// These are evaluated first, unconditionally, against every Bash call.
+// They are written directly in Go so a broken YAML config cannot disable them.
+func DefaultBlockRules() []rules.Rule {
+	return []rules.Rule{
+		// sudo/doas/su always require user review
+		&rules.ProgramIs{
+			RuleName: "sudo-anything",
+			Programs: []string{"sudo", "doas", "su"},
+			Reason:   "sudo/doas/su requires explicit user approval",
+		},
+
+		// rm -rf on system or home directories
+		&rules.BlockedCommand{
+			RuleName: "rm-rf-system",
+			Programs: []string{"rm"},
+			RequireFlagsAny: [][]string{
+				{"-r", "-R", "--recursive"},
+				{"-f", "--force"},
+			},
+			TargetPaths: []string{
+				"/",
+				"/etc", "/usr", "/var", "/opt",
+				"/bin", "/sbin",
+				"/home", "/Users",
+				"/System", "/Library", // macOS
+				"/boot", "/lib", "/root",
+			},
+			Reason: "rm -rf on system/home directory",
+		},
+
+		// find with -delete on protected directories
+		&rules.BlockedCommand{
+			RuleName: "find-delete-system",
+			Programs: []string{"find"},
+			// find uses long-form -delete; require it at all, no flag-group needed
+			// (BlockedCommand will match if RequireFlagsAny is empty, so we use
+			// a single-group spec that accepts any of the destructive flags)
+			RequireFlagsAny: [][]string{
+				{"-delete", "-exec"},
+			},
+			TargetPaths: []string{"/", "/etc", "/usr", "/var", "/home", "/Users", "/System", "/Library"},
+			Reason:      "find -delete/-exec on system/home directory",
+		},
+
+		// curl | sh and variants
+		&rules.PipeToShell{
+			RuleName:       "curl-pipe-sh",
+			SourcePrograms: []string{"curl", "wget", "fetch", "http", "httpie"},
+			SinkPrograms:   []string{"sh", "bash", "zsh", "fish", "dash", "ksh", "/bin/sh", "/bin/bash"},
+			Reason:         "remote code execution via pipe to shell",
+		},
+
+		// bash <(curl ...) and variants
+		&rules.ProcSubToShell{
+			RuleName:     "procsub-to-shell",
+			SinkPrograms: []string{"sh", "bash", "zsh", "fish", "dash", "ksh"},
+			Reason:       "remote code execution via process substitution",
+		},
+
+		// force push to protected branches
+		&rules.GitForcePush{
+			RuleName:          "git-force-push-protected",
+			ProtectedBranches: []string{"main", "master", "production", "prod", "release", "develop", "trunk"},
+			Reason:            "force push to protected branch",
+		},
+
+		// SSH private key access from non-ssh programs
+		&rules.PathAccess{
+			RuleName:        "ssh-private-key",
+			Paths:           []string{"~/.ssh/id_*", "**/.ssh/id_*"},
+			ExcludePrograms: []string{"ssh", "ssh-add", "ssh-keygen", "ssh-copy-id", "git"},
+			Reason:          "access to SSH private key outside of ssh-family tools",
+		},
+
+		// GPG/AWS/GCP credential file access
+		&rules.PathAccess{
+			RuleName:        "credential-files",
+			Paths:           []string{"~/.aws/credentials", "~/.gnupg/secring.gpg", "~/.config/gcloud/application_default_credentials.json"},
+			ExcludePrograms: []string{"aws", "gpg", "gpg2", "gcloud"},
+			Reason:          "access to cloud/pgp credential file",
+		},
+
+		// System credential files
+		&rules.PathAccess{
+			RuleName: "system-credentials",
+			Paths:    []string{"/etc/shadow", "/etc/master.passwd", "/etc/sudoers", "/etc/sudoers.d/*"},
+			Reason:   "access to system credential file",
+		},
+	}
+}
+
+// DefaultAllowRules returns the compiled-in tier 2 rule set. These are
+// AST-anchored allow rules — they only match when the command has no
+// redirections, pipes, subshells, or command substitution, AND the
+// program is fully resolved to a literal.
+func DefaultAllowRules() []rules.Rule {
+	return []rules.Rule{
+		// Read-only POSIX and text tools
+		&rules.AnchoredCommand{
+			RuleName: "posix-readonly",
+			Programs: []string{
+				"ls", "cat", "head", "tail", "wc", "sort", "uniq",
+				"grep", "rg", "ripgrep", "ack", "ag",
+				"find", "tree", "file", "stat",
+				"du", "df",
+				"which", "whereis", "type",
+				"env", "printenv", "id", "whoami", "hostname", "uname", "pwd",
+				"echo", "printf", "date",
+				"jq", "yq",
+				"cmp", "diff",
+				"tar", "zcat", "gzcat",
+				"xxd", "od", "hexdump",
+				"awk", "sed",
+			},
+			ForbidFlags: []string{
+				// awk/sed with inplace flags actually write; exclude them
+				"-i", "--in-place",
+			},
+		},
+
+		// find — safe when no destructive flag
+		&rules.AnchoredCommand{
+			RuleName:    "find-readonly",
+			Programs:    []string{"find"},
+			ForbidFlags: []string{"-delete", "-exec", "-execdir"},
+		},
+
+		// git read-only subcommands
+		&rules.AnchoredCommand{
+			RuleName:         "git-readonly",
+			Programs:         []string{"git"},
+			RequireSubcmdAny: []string{"status", "log", "diff", "show", "branch", "remote", "blame", "rev-parse", "ls-files", "ls-tree", "describe", "config"},
+		},
+
+		// gcloud read-only (list/describe/get)
+		&rules.AnchoredCommand{
+			RuleName: "gcloud-readonly",
+			Programs: []string{"gcloud"},
+		},
+		// Note: gcloud has deeply nested subcommands (gcloud run services list),
+		// so anchored_command can't express "first positional is list/describe".
+		// For v1 we rely on the LLM tier to refine gcloud; the anchored rule
+		// above only matches gcloud invocations that actually pass the
+		// no-redirect/no-pipe constraint, which still covers most cases. A
+		// nested-subcommand matcher is Phase 2 work.
+
+		// bq (BigQuery) read-only
+		&rules.AnchoredCommand{
+			RuleName:         "bq-readonly",
+			Programs:         []string{"bq"},
+			RequireSubcmdAny: []string{"show", "ls", "query", "head"},
+		},
+
+		// terraform read-only
+		&rules.AnchoredCommand{
+			RuleName:         "terraform-readonly",
+			Programs:         []string{"terraform"},
+			RequireSubcmdAny: []string{"plan", "validate", "fmt", "show", "version", "state", "output", "console", "workspace"},
+		},
+
+		// docker read-only
+		&rules.AnchoredCommand{
+			RuleName:         "docker-readonly",
+			Programs:         []string{"docker", "podman"},
+			RequireSubcmdAny: []string{"ps", "images", "inspect", "logs", "port", "top", "stats", "version", "info", "history", "events"},
+		},
+
+		// kubectl read-only
+		&rules.AnchoredCommand{
+			RuleName:         "kubectl-readonly",
+			Programs:         []string{"kubectl", "oc"},
+			RequireSubcmdAny: []string{"get", "describe", "logs", "top", "version", "cluster-info", "api-resources", "explain"},
+		},
+
+		// go read-only / safe
+		&rules.AnchoredCommand{
+			RuleName:         "go-readonly",
+			Programs:         []string{"go"},
+			RequireSubcmdAny: []string{"version", "env", "list", "vet", "fmt", "doc", "help"},
+		},
+
+		// npm/yarn/pnpm read-only
+		&rules.AnchoredCommand{
+			RuleName:         "node-pm-readonly",
+			Programs:         []string{"npm", "yarn", "pnpm"},
+			RequireSubcmdAny: []string{"list", "ls", "view", "outdated", "audit", "config", "whoami", "why", "info", "version"},
+		},
+
+		// gh read-only
+		&rules.AnchoredCommand{
+			RuleName:         "gh-readonly",
+			Programs:         []string{"gh"},
+			RequireSubcmdAny: []string{"pr", "issue", "repo", "run", "api", "auth", "release", "search", "status", "version", "help"},
+			// Note: "gh pr view" is safe but "gh pr merge" is not. We restrict to the
+			// outer subcommand here; the LLM tier refines this.
+		},
+
+		// curl with only -I / --head / -o /dev/null (HEAD and discard-body reads)
+		// is tricky to express with flag constraints, so it falls through to LLM.
+
+		// make read-only targets
+		&rules.AnchoredCommand{
+			RuleName:         "make-readonly",
+			Programs:         []string{"make"},
+			RequireSubcmdAny: []string{"help", "list", "test", "check", "lint", "vet", "fmt", "typecheck", "build"},
+		},
+	}
+}
