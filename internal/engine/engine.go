@@ -35,14 +35,29 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/version"
 )
 
-// Tier 4 (LLM) hard timeout. Per-call timeout. Anything longer should
-// not block a synchronous hook — long retries belong in the cross-
-// invocation breaker, not in the hook path. Cache hits bypass this
-// entirely (~1ms file read).
+// Tier 4 (LLM) sync deadline. User-visible wait — the hook blocks up
+// to this long for a classifier verdict. Inner providers have tighter
+// per-call caps (Anthropic 3s, Gemini Flash 6s) so this is the engine
+// ceiling. Cache hits bypass it entirely (~1ms file read).
 //
-// 7s is the engine ceiling. The Gemini client itself has a tighter
-// 6s budget for fast models so this is mostly a backstop.
-const llmDeadline = 7 * time.Second
+// Declared as var (not const) so tests can reduce it to milliseconds
+// for timing-based cases. Production code never mutates it after
+// package init.
+var llmDeadline = 7 * time.Second
+
+// Tier 4 async deadline. When llmDeadline fires mid-classification,
+// the hook returns "continue" to unblock the user, but the in-flight
+// LLM call keeps running under this longer ctx. If it eventually
+// returns "safe", the verdict is written to cache so the next
+// identical command hits the cache path instead of paying another
+// full LLM wait. If it doesn't complete within llmAsyncDeadline, the
+// goroutine is abandoned and the call counts as a breaker failure
+// (matches today's sync-timeout semantics).
+//
+// Must be accommodated by cmd/claude-guard/decide.go's
+// AwaitVerifications cap PLUS the verifier's 15s budget — otherwise
+// a late async verdict lands with no time left for the verifier.
+var llmAsyncDeadline = 30 * time.Second
 
 // Verdict is the engine's final output. Matches the three Claude Code
 // outcomes: continue (fall through), allow (auto-approve), deny (block).
@@ -459,97 +474,32 @@ func (e *Engine) Decide(in Input) Output {
 
 	// Tier 4: LLM classifier (approve-only).
 	if e.llm != nil {
-		llmVerdict := e.runLLMTier(in)
+		llmVerdict := e.runLLMTier(in, keyInputs, globalKey, projectKey)
 		out.Shadow.Tier4LLM = llmVerdict.shadow
 		// Cache safe verdicts so the next identical command is instant.
-		// The cache key is chosen by the LLM-decided scope.
+		// persistLLMAllow handles scope selection, canonical-form
+		// caching, and verifier spawn. Shared with the async timeout
+		// path in runLLMTier — a timeout that eventually returns
+		// "safe" calls persistLLMAllow from its background goroutine.
 		if e.cache != nil && llmVerdict.allow {
-			storeKey := projectKey
-			scopeStr := "project"
+			e.persistLLMAllow(in, llmVerdict, keyInputs, globalKey, projectKey)
 			if llmVerdict.scope == llm.ScopeGlobal {
-				storeKey = globalKey
-				scopeStr = "global"
+				out.Shadow.Tier4LLM = "safe:global"
+			} else {
+				out.Shadow.Tier4LLM = "safe:project"
 			}
-			_ = e.cache.Put(storeKey, cache.Entry{
-				Verdict:  cache.VerdictAllow,
-				Reason:   llmVerdict.reason,
-				Tier:     "llm",
-				Provider: e.llm.Provider(),
-				Model:    e.llm.Model(),
-				Command:  in.Command,
-				CWD:      in.CWD,
-			}, 90*24*time.Hour)
-			out.Shadow.Tier4LLM = "safe:" + scopeStr
-
-			// Canonicalization: if the LLM returned variable slots, try
-			// to produce a normalized form and cache it as a second
-			// entry. Future commands matching the canonical hit the
-			// cache without an LLM call. Done BEFORE spawning the
-			// verifier so spawnVerification can receive the canonical
-			// key and invalidate BOTH entries on disagreement.
-			canonKey := ""
-			if len(llmVerdict.slots) > 0 {
-				canonicalForm, dropped, nerr := normalize.Normalize(in.Command, toNormalizeSlots(llmVerdict.slots))
-				if len(dropped) > 0 {
-					// Bundle per-decision (M4) — one log line carrying
-					// every dropped slot rather than N lines.
-					positions := make([]string, 0, len(dropped))
-					types := make([]string, 0, len(dropped))
-					reasons := make([]string, 0, len(dropped))
-					for _, d := range dropped {
-						positions = append(positions, d.Slot.Position)
-						types = append(types, string(d.Slot.Type))
-						reasons = append(reasons, d.Reason)
-					}
-					e.appLog().Info("normalize_slots_dropped",
-						"count", len(dropped),
-						"positions", strings.Join(positions, ","),
-						"types", strings.Join(types, ","),
-						"reasons", strings.Join(reasons, ","),
-						"tool_use_id", in.ToolUseID,
-					)
-				}
-				if nerr != nil {
-					e.appLog().Warn("normalize_error", "err", nerr.Error(),
-						"tool_use_id", in.ToolUseID)
-				}
-				if canonicalForm != "" {
-					program := normalize.FirstProgram(in.Command)
-					canonKeyInputs := keyInputs
-					canonKeyInputs.Command = canonicalForm
-					if llmVerdict.scope == llm.ScopeGlobal {
-						canonKey = cache.GlobalKey(canonKeyInputs)
-					} else {
-						canonKey = cache.Key(canonKeyInputs)
-					}
-					_ = e.cache.Put(canonKey, cache.Entry{
-						Verdict:       cache.VerdictAllow,
-						Reason:        llmVerdict.reason,
-						Tier:          "llm",
-						Provider:      e.llm.Provider(),
-						Model:         e.llm.Model(),
-						Command:       in.Command, // the first concrete command we saw
-						CWD:           in.CWD,
-						CanonicalForm: canonicalForm,
-						Program:       program,
-						MatchCount:    1,
-					}, 90*24*time.Hour)
-				}
+		}
+		// Populate Reason and Rule from the LLM result so the
+		// decision log has the WHY. Skip for the async timeout path —
+		// no verdict has arrived yet; setting out.Rule to
+		// provider/model would misleadingly imply the LLM approved.
+		if llmVerdict.shadow != "timeout-async-pending" {
+			if llmVerdict.reason != "" {
+				out.Reason = llmVerdict.reason
 			}
-			// Spawn the async verifier (cross-provider second opinion).
-			// Passing canonKey lets the verifier invalidate the canonical
-			// sibling entry too when it disagrees with the fast path —
-			// otherwise the canonical would keep allowing new concrete
-			// commands forever (CTO review C1).
-			e.spawnVerification(storeKey, canonKey, in)
-		}
-		// Always populate Reason and Rule from the LLM result so the
-		// decision log has the WHY, even on fall-through.
-		if llmVerdict.reason != "" {
-			out.Reason = llmVerdict.reason
-		}
-		if e.llm != nil {
-			out.Rule = e.llm.Provider() + "/" + e.llm.Model()
+			if e.llm != nil {
+				out.Rule = e.llm.Provider() + "/" + e.llm.Model()
+			}
 		}
 		if !e.cfg.ShadowMode && llmVerdict.allow {
 			out.Verdict = Allow
@@ -609,7 +559,19 @@ func toNormalizeSlots(xs []llm.VariableSlot) []normalize.Slot {
 // runLLMTier handles redaction, circuit breaker check, and the actual
 // LLM call. Always returns; never panics. All errors are logged to the
 // app log and the engine falls through.
-func (e *Engine) runLLMTier(in Input) llmCallResult {
+//
+// The classifier call runs under asyncCtx (llmAsyncDeadline, 30s) and
+// races against a llmDeadline-length sync timer. On sync-wins, today's
+// behavior: map the outcome and return. On timer-wins, hand the
+// in-flight goroutine to pendingVerifies: it continues running, and
+// on eventual "safe" verdict writes to cache just as the sync path
+// would have. keyInputs/globalKey/projectKey are captured into the
+// async closure for cache-write scope selection.
+func (e *Engine) runLLMTier(
+	in Input,
+	keyInputs cache.KeyInputs,
+	globalKey, projectKey string,
+) llmCallResult {
 	// Pre-LLM redaction (tier 0).
 	if e.redactor != nil {
 		res := e.redactor.Scan(in.Command)
@@ -639,19 +601,128 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 		}
 	}
 
-	// Actual LLM call. Pass project context so the model can reason
-	// about commands like 'npm run build' that execute project scripts.
-	ctx, cancel := context.WithTimeout(context.Background(), llmDeadline)
-	defer cancel()
+	// Start the classifier under a generous async ctx. The sync wait
+	// is governed by the separate timer in the select below. If the
+	// call finishes within llmDeadline, we use the result now; if
+	// not, the goroutine keeps running under asyncCtx and writes to
+	// cache on arrival.
+	asyncCtx, asyncCancel := context.WithTimeout(context.Background(), llmAsyncDeadline)
 	projCtx := projectctx.Context(in.CWD, in.Command)
-	dec, err := e.llm.Classify(ctx, llm.ClassifyInput{
+	input := llm.ClassifyInput{
 		Command:        in.Command,
 		Description:    in.Description,
 		CWD:            in.CWD,
 		ProjectContext: projCtx,
-	})
+	}
+
+	type outcome struct {
+		dec *llm.Decision
+		err error
+	}
+	resultCh := make(chan outcome, 1)
+	go func() {
+		dec, err := e.llm.Classify(asyncCtx, input)
+		resultCh <- outcome{dec: dec, err: err}
+	}()
+
+	select {
+	case o := <-resultCh:
+		// Sync path — arrived within llmDeadline. Unchanged behavior.
+		asyncCancel()
+		return e.mapLLMOutcome(o.dec, o.err, in)
+
+	case <-time.After(llmDeadline):
+		// Sync timer fired. Hand the classifier goroutine off to a
+		// background persister.
+		//
+		// CRITICAL ORDERING: pendingVerifies.Add(1) MUST be called
+		// synchronously on the caller goroutine (here), BEFORE the
+		// `go func() { … }()` below. Otherwise AwaitVerifications
+		// (in cmd/claude-guard/decide.go, called after stdout flush)
+		// could begin its Wait with counter=0 and return before the
+		// goroutine has registered itself. Matches the ordering in
+		// spawnVerification below.
+		e.pendingVerifies.Add(1)
+		go func() {
+			defer e.pendingVerifies.Done()
+			defer asyncCancel()
+			var o outcome
+			select {
+			case o = <-resultCh:
+			case <-asyncCtx.Done():
+				// Absolute deadline hit without a result. Record to
+				// the breaker so a cascade of hung LLMs opens the
+				// circuit, matching today's sync-timeout semantics.
+				if e.breaker != nil {
+					_, _ = e.breaker.RecordFailure(&breaker.TimeoutError{
+						After: llmAsyncDeadline,
+					})
+				}
+				e.appLog().Info("async_llm_abandoned",
+					"reason", "absolute_deadline",
+					"command_preview", previewCommand(in.Command),
+					"tool_use_id", in.ToolUseID,
+				)
+				return
+			}
+			if o.err != nil {
+				if e.breaker != nil {
+					_, _ = e.breaker.RecordFailure(o.err)
+				}
+				e.appLog().Warn("async_llm_error",
+					"err", o.err.Error(),
+					"category", categorizeLLMError(o.err),
+					"provider", e.llm.Provider(),
+					"model", e.llm.Model(),
+					"command_preview", previewCommand(in.Command),
+					"tool_use_id", in.ToolUseID,
+				)
+				return
+			}
+			if e.breaker != nil {
+				_ = e.breaker.RecordSuccess()
+			}
+			if o.dec.Verdict != llm.VerdictSafe {
+				// Match the sync path: non-safe verdicts are not
+				// cached (LLM is approve-only).
+				e.appLog().Info("async_llm_completed",
+					"verdict", string(o.dec.Verdict),
+					"reason", o.dec.Reason,
+					"command_preview", previewCommand(in.Command),
+					"tool_use_id", in.ToolUseID,
+				)
+				return
+			}
+			scope := o.dec.Scope
+			if scope != llm.ScopeGlobal && scope != llm.ScopeProject {
+				scope = llm.ScopeProject
+			}
+			v := llmCallResult{
+				allow:  true,
+				shadow: "async:safe",
+				reason: o.dec.Reason,
+				scope:  scope,
+				slots:  o.dec.VariableSlots,
+			}
+			e.persistLLMAllow(in, v, keyInputs, globalKey, projectKey)
+			e.appLog().Info("async_llm_completed",
+				"verdict", "safe",
+				"scope", string(scope),
+				"command_preview", previewCommand(in.Command),
+				"tool_use_id", in.ToolUseID,
+			)
+		}()
+		return llmCallResult{shadow: "timeout-async-pending"}
+	}
+}
+
+// mapLLMOutcome translates a (*Decision, error) pair into an
+// llmCallResult with side-effects: breaker update, app-log events.
+// Extracted from runLLMTier so the sync path can call it. The async
+// goroutine handles its own logging inline because its event names
+// (async_llm_error/completed/abandoned) differ from the sync path.
+func (e *Engine) mapLLMOutcome(dec *llm.Decision, err error, in Input) llmCallResult {
 	if err != nil {
-		// Record failure for the breaker; log to app.
 		var newState any
 		if e.breaker != nil {
 			s, _ := e.breaker.RecordFailure(err)
@@ -669,10 +740,6 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 			"command_preview", previewCommand(in.Command),
 			"tool_use_id", in.ToolUseID,
 		}
-		// Surface structured parse-failure detail when we have it: the
-		// raw length and a "looks truncated" flag distinguish MAX_TOKENS
-		// cutoff from schema violations. Useful for tuning max_tokens
-		// or spotting model regressions.
 		var pe *llm.ParseError
 		if errors.As(err, &pe) {
 			logArgs = append(logArgs,
@@ -685,7 +752,6 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 		return llmCallResult{shadow: "error:" + category}
 	}
 
-	// Success — close the circuit if it was tracking failures.
 	if e.breaker != nil {
 		_ = e.breaker.RecordSuccess()
 	}
@@ -715,6 +781,99 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 	default:
 		return llmCallResult{shadow: "unsure", reason: dec.Reason}
 	}
+}
+
+// persistLLMAllow writes a safe verdict to cache (plus the optional
+// canonical-form sibling entry), then spawns the async verifier.
+// Callable from both the sync path in Decide and the async timeout
+// goroutine in runLLMTier. No-op when e.cache is nil or v.allow is
+// false.
+//
+// Shared responsibility: scope selection, canonical-form
+// normalization + telemetry, verifier spawn. Keeping one definition
+// means both paths behave identically — a late async verdict
+// populates cache the same way an on-time sync verdict would have.
+func (e *Engine) persistLLMAllow(
+	in Input,
+	v llmCallResult,
+	keyInputs cache.KeyInputs,
+	globalKey, projectKey string,
+) {
+	if e.cache == nil || !v.allow {
+		return
+	}
+	storeKey := projectKey
+	if v.scope == llm.ScopeGlobal {
+		storeKey = globalKey
+	}
+	_ = e.cache.Put(storeKey, cache.Entry{
+		Verdict:  cache.VerdictAllow,
+		Reason:   v.reason,
+		Tier:     "llm",
+		Provider: e.llm.Provider(),
+		Model:    e.llm.Model(),
+		Command:  in.Command,
+		CWD:      in.CWD,
+	}, 90*24*time.Hour)
+
+	// Canonicalization: if the LLM returned variable slots, try to
+	// produce a normalized form and cache it as a second entry.
+	// Future commands matching the canonical hit the cache without
+	// an LLM call. Done BEFORE spawning the verifier so
+	// spawnVerification can invalidate BOTH entries on disagreement.
+	canonKey := ""
+	if len(v.slots) > 0 {
+		canonicalForm, dropped, nerr := normalize.Normalize(in.Command, toNormalizeSlots(v.slots))
+		if len(dropped) > 0 {
+			// Bundle per-decision (M4) — one log line carrying every
+			// dropped slot rather than N lines.
+			positions := make([]string, 0, len(dropped))
+			types := make([]string, 0, len(dropped))
+			reasons := make([]string, 0, len(dropped))
+			for _, d := range dropped {
+				positions = append(positions, d.Slot.Position)
+				types = append(types, string(d.Slot.Type))
+				reasons = append(reasons, d.Reason)
+			}
+			e.appLog().Info("normalize_slots_dropped",
+				"count", len(dropped),
+				"positions", strings.Join(positions, ","),
+				"types", strings.Join(types, ","),
+				"reasons", strings.Join(reasons, ","),
+				"tool_use_id", in.ToolUseID,
+			)
+		}
+		if nerr != nil {
+			e.appLog().Warn("normalize_error", "err", nerr.Error(),
+				"tool_use_id", in.ToolUseID)
+		}
+		if canonicalForm != "" {
+			program := normalize.FirstProgram(in.Command)
+			canonKeyInputs := keyInputs
+			canonKeyInputs.Command = canonicalForm
+			if v.scope == llm.ScopeGlobal {
+				canonKey = cache.GlobalKey(canonKeyInputs)
+			} else {
+				canonKey = cache.Key(canonKeyInputs)
+			}
+			_ = e.cache.Put(canonKey, cache.Entry{
+				Verdict:       cache.VerdictAllow,
+				Reason:        v.reason,
+				Tier:          "llm",
+				Provider:      e.llm.Provider(),
+				Model:         e.llm.Model(),
+				Command:       in.Command, // the first concrete command we saw
+				CWD:           in.CWD,
+				CanonicalForm: canonicalForm,
+				Program:       program,
+				MatchCount:    1,
+			}, 90*24*time.Hour)
+		}
+	}
+	// Spawn the async verifier (cross-provider second opinion).
+	// Passing canonKey lets the verifier invalidate the canonical
+	// sibling entry too when it disagrees with the fast path.
+	e.spawnVerification(storeKey, canonKey, in)
 }
 
 // loadProjectConfig resolves the per-project .claude-guard.yml for

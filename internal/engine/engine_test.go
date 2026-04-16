@@ -1,9 +1,14 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -812,4 +817,413 @@ func countLines(s string) int {
 		}
 	}
 	return n
+}
+
+// --- Tier 4 async persistence on timeout ---
+//
+// These tests verify that when the tier-4 sync deadline fires
+// mid-classify, the in-flight LLM call continues in a detached
+// goroutine and writes to cache on eventual "safe" verdict. The
+// user-visible sync path is unchanged — a command whose LLM call
+// times out still falls through to tier 5/6 on that invocation; the
+// benefit is the NEXT identical command hits cache.
+
+// slowClassifier sleeps for a configurable delay before returning.
+// Honors ctx cancellation so asyncCtx expiry halts the "work".
+type slowClassifier struct {
+	delay   time.Duration
+	verdict llm.Verdict
+	err     error
+	calls   atomic.Int32
+}
+
+func (s *slowClassifier) Provider() string { return "slow" }
+func (s *slowClassifier) Model() string    { return "slow-1" }
+func (s *slowClassifier) Classify(ctx context.Context, in llm.ClassifyInput) (*llm.Decision, error) {
+	s.calls.Add(1)
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &llm.Decision{Verdict: s.verdict, Reason: "slow"}, nil
+}
+
+// hangingClassifier sleeps purely on wall-clock time, ignoring ctx.
+// Used by the absolute-deadline test to guarantee the goroutine's
+// inner select wakes on `<-asyncCtx.Done()` (not via resultCh receiving
+// a ctx-err outcome, which would race-win under Go's random select
+// and flip the test to the error-log path).
+type hangingClassifier struct {
+	delay   time.Duration
+	verdict llm.Verdict
+}
+
+func (h *hangingClassifier) Provider() string { return "hanging" }
+func (h *hangingClassifier) Model() string    { return "hanging-1" }
+func (h *hangingClassifier) Classify(ctx context.Context, in llm.ClassifyInput) (*llm.Decision, error) {
+	time.Sleep(h.delay)
+	return &llm.Decision{Verdict: h.verdict, Reason: "hanging"}, nil
+}
+
+// newEngineForAsync sets up an engine with cache + buffered app log
+// so tests can assert on both cache state and app-log events.
+func newEngineForAsync(t *testing.T, classifier llm.Classifier) (*Engine, *cache.Cache, *bytes.Buffer) {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	handler := slog.NewJSONHandler(buf, nil)
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	dir := t.TempDir()
+	cch := cache.New(dir)
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      classifier,
+		Cache:    cch,
+		AppLog:   slog.New(handler),
+	})
+	return e, cch, buf
+}
+
+// withLLMDeadlines temporarily overrides the package-level deadlines
+// for timing-based tests, restoring originals on test cleanup.
+func withLLMDeadlines(t *testing.T, sync, async time.Duration) {
+	t.Helper()
+	origSync := llmDeadline
+	origAsync := llmAsyncDeadline
+	llmDeadline = sync
+	llmAsyncDeadline = async
+	t.Cleanup(func() {
+		llmDeadline = origSync
+		llmAsyncDeadline = origAsync
+	})
+}
+
+// TestAsync_SyncArrivalUnchanged: classifier responds within sync
+// window — today's behavior must be preserved, no async goroutine
+// spawned, cache populated synchronously.
+func TestAsync_SyncArrivalUnchanged(t *testing.T) {
+	stub := &slowClassifier{delay: 10 * time.Millisecond, verdict: llm.VerdictSafe}
+	withLLMDeadlines(t, 500*time.Millisecond, 2*time.Second)
+	e, cch, _ := newEngineForAsync(t, stub)
+
+	// Use a command without tier-1/2 match so the LLM tier fires.
+	cmd := "cat /etc/hosts | grep localhost"
+	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+
+	if out.Verdict != Allow {
+		t.Fatalf("Verdict = %v (tier=%s), want Allow", out.Verdict, out.Tier)
+	}
+	if out.Tier != "llm" {
+		t.Errorf("Tier = %q, want llm", out.Tier)
+	}
+	if !strings.HasPrefix(out.Shadow.Tier4LLM, "safe:") {
+		t.Errorf("Shadow.Tier4LLM = %q, want safe:*", out.Shadow.Tier4LLM)
+	}
+	// Cache should already have the entry synchronously.
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); !hit {
+		t.Error("cache entry missing; sync path should have written it")
+	}
+}
+
+// TestAsync_TimeoutThenSafe: classifier exceeds sync deadline, lands
+// after — hook returns Continue, goroutine writes cache on arrival.
+func TestAsync_TimeoutThenSafe(t *testing.T) {
+	stub := &slowClassifier{delay: 400 * time.Millisecond, verdict: llm.VerdictSafe}
+	withLLMDeadlines(t, 100*time.Millisecond, 2*time.Second)
+	e, cch, logBuf := newEngineForAsync(t, stub)
+
+	cmd := "cat /etc/hosts | grep localhost"
+	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+
+	if out.Verdict != Continue {
+		t.Fatalf("Verdict = %v, want Continue (async pending)", out.Verdict)
+	}
+	if out.Shadow.Tier4LLM != "timeout-async-pending" {
+		t.Errorf("Shadow.Tier4LLM = %q", out.Shadow.Tier4LLM)
+	}
+	// Rule must NOT be set for timeout-pending — no verdict yet.
+	if out.Rule != "" {
+		t.Errorf("Rule = %q, want empty for timeout-async-pending", out.Rule)
+	}
+
+	// Cache should NOT have the entry yet (goroutine still running).
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); hit {
+		t.Error("cache has entry before AwaitVerifications; async should still be in flight")
+	}
+
+	// Wait for the goroutine to finish.
+	if ok := e.AwaitVerifications(5 * time.Second); !ok {
+		t.Fatal("AwaitVerifications did not complete within 5s")
+	}
+
+	// Now cache should be populated.
+	entry, hit := cch.Get(key)
+	if !hit {
+		t.Fatal("cache entry missing after AwaitVerifications; async goroutine should have populated it")
+	}
+	if entry.Verdict != cache.VerdictAllow {
+		t.Errorf("cache verdict = %v, want Allow", entry.Verdict)
+	}
+
+	// App log should contain async_llm_completed.
+	if !strings.Contains(logBuf.String(), "async_llm_completed") {
+		t.Errorf("app log missing async_llm_completed: %s", logBuf.String())
+	}
+}
+
+// TestAsync_TimeoutThenUnsafe: classifier exceeds sync deadline, lands
+// with unsafe verdict — goroutine logs but does NOT populate cache.
+func TestAsync_TimeoutThenUnsafe(t *testing.T) {
+	stub := &slowClassifier{delay: 400 * time.Millisecond, verdict: llm.VerdictUnsafe}
+	withLLMDeadlines(t, 100*time.Millisecond, 2*time.Second)
+	e, cch, logBuf := newEngineForAsync(t, stub)
+
+	cmd := "cat /etc/hosts | grep localhost"
+	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+
+	if out.Verdict != Continue {
+		t.Fatalf("Verdict = %v, want Continue", out.Verdict)
+	}
+	if out.Shadow.Tier4LLM != "timeout-async-pending" {
+		t.Errorf("Shadow.Tier4LLM = %q", out.Shadow.Tier4LLM)
+	}
+
+	if ok := e.AwaitVerifications(5 * time.Second); !ok {
+		t.Fatal("AwaitVerifications did not complete within 5s")
+	}
+
+	// Cache must remain empty — unsafe verdicts are not cached.
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); hit {
+		t.Error("cache has entry; unsafe verdict should not be cached")
+	}
+
+	// App log should contain async_llm_completed with unsafe.
+	logs := logBuf.String()
+	if !strings.Contains(logs, "async_llm_completed") {
+		t.Errorf("app log missing async_llm_completed: %s", logs)
+	}
+	if !strings.Contains(logs, `"verdict":"unsafe"`) {
+		t.Errorf("app log missing unsafe verdict field: %s", logs)
+	}
+}
+
+// TestAsync_TimeoutThenError: classifier exceeds sync deadline, then
+// returns an error — goroutine calls breaker.RecordFailure and logs.
+func TestAsync_TimeoutThenError(t *testing.T) {
+	stub := &slowClassifier{
+		delay:   400 * time.Millisecond,
+		verdict: llm.VerdictSafe,
+		err:     errors.New("simulated provider 5xx"),
+	}
+	withLLMDeadlines(t, 100*time.Millisecond, 2*time.Second)
+
+	// Build engine with a breaker so we can verify RecordFailure is called.
+	br := breaker.New(t.TempDir() + "/breaker.json")
+	buf := &bytes.Buffer{}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	cch := cache.New(t.TempDir())
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      stub,
+		Cache:    cch,
+		Breaker:  br,
+		AppLog:   slog.New(slog.NewJSONHandler(buf, nil)),
+	})
+
+	cmd := "cat /etc/hosts | grep localhost"
+	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+
+	if ok := e.AwaitVerifications(5 * time.Second); !ok {
+		t.Fatal("AwaitVerifications did not complete within 5s")
+	}
+
+	// Cache must remain empty.
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); hit {
+		t.Error("cache has entry; error path should not cache")
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "async_llm_error") {
+		t.Errorf("app log missing async_llm_error: %s", logs)
+	}
+}
+
+// TestAsync_AbsoluteDeadlineAbandon: classifier sleeps past
+// llmAsyncDeadline — goroutine is abandoned, breaker records a
+// timeout failure.
+//
+// Uses hangingClassifier (not slowClassifier) so the inner select
+// provably wakes on `<-asyncCtx.Done()`. A ctx-honoring classifier
+// would return ctx.Err() via resultCh at roughly the same moment
+// asyncCtx fires, and Go's random-select would occasionally pick the
+// resultCh branch and log `async_llm_error` instead of
+// `async_llm_abandoned` — test flake.
+func TestAsync_AbsoluteDeadlineAbandon(t *testing.T) {
+	stub := &hangingClassifier{delay: 2 * time.Second, verdict: llm.VerdictSafe}
+	withLLMDeadlines(t, 100*time.Millisecond, 400*time.Millisecond)
+
+	br := breaker.New(t.TempDir() + "/breaker.json")
+	buf := &bytes.Buffer{}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	cch := cache.New(t.TempDir())
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      stub,
+		Cache:    cch,
+		Breaker:  br,
+		AppLog:   slog.New(slog.NewJSONHandler(buf, nil)),
+	})
+
+	cmd := "cat /etc/hosts | grep localhost"
+	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+
+	// AwaitVerifications should return once the goroutine cleans up,
+	// which happens when asyncCtx expires (~400ms).
+	start := time.Now()
+	if ok := e.AwaitVerifications(5 * time.Second); !ok {
+		t.Fatal("AwaitVerifications did not complete within 5s")
+	}
+	elapsed := time.Since(start)
+	if elapsed > 2*time.Second {
+		t.Errorf("AwaitVerifications took %v; expected early exit on asyncCtx cancellation", elapsed)
+	}
+
+	// Cache must remain empty.
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); hit {
+		t.Error("cache has entry; abandoned call should not cache")
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "async_llm_abandoned") {
+		t.Errorf("app log missing async_llm_abandoned: %s", logs)
+	}
+}
+
+// TestAsync_AwaitVerifications_EarlyDeadlineDoesNotLeak: first call to
+// AwaitVerifications with a short deadline returns false; a second
+// call with enough time returns true and cache is populated. Ensures
+// the goroutine is properly tracked and doesn't leak.
+//
+// Delay is set to 600ms (not 300ms) so that after the 100ms sync
+// deadline fires, the async goroutine still has 500ms of work
+// remaining when the test calls AwaitVerifications(10ms) — ample
+// headroom over CI scheduling jitter.
+func TestAsync_AwaitVerifications_EarlyDeadlineDoesNotLeak(t *testing.T) {
+	stub := &slowClassifier{delay: 600 * time.Millisecond, verdict: llm.VerdictSafe}
+	withLLMDeadlines(t, 100*time.Millisecond, 3*time.Second)
+	e, cch, _ := newEngineForAsync(t, stub)
+
+	cmd := "cat /etc/hosts | grep localhost"
+	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+
+	// First: short deadline — goroutine still running, returns false.
+	if ok := e.AwaitVerifications(10 * time.Millisecond); ok {
+		t.Error("AwaitVerifications(10ms) returned true; goroutine should still be running")
+	}
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); hit {
+		t.Error("cache populated prematurely")
+	}
+
+	// Second: enough time — goroutine completes, cache populated.
+	if ok := e.AwaitVerifications(5 * time.Second); !ok {
+		t.Fatal("AwaitVerifications(5s) returned false; goroutine should have completed")
+	}
+	if _, hit := cch.Get(key); !hit {
+		t.Error("cache not populated after AwaitVerifications succeeded")
+	}
+}
+
+// TestAsync_ConcurrentDecideCalls: 10 parallel Decides, each hitting
+// async-timeout. All goroutines tracked; all complete cleanly; cache
+// populated for each. Verifies no race conditions under -race.
+func TestAsync_ConcurrentDecideCalls(t *testing.T) {
+	stub := &slowClassifier{delay: 300 * time.Millisecond, verdict: llm.VerdictSafe}
+	withLLMDeadlines(t, 50*time.Millisecond, 2*time.Second)
+	e, cch, _ := newEngineForAsync(t, stub)
+
+	const n = 10
+	cmds := make([]string, n)
+	for i := 0; i < n; i++ {
+		cmds[i] = "echo concurrent" + string(rune('A'+i)) + " | wc -l"
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(cmd string) {
+			defer wg.Done()
+			_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+		}(cmds[i])
+	}
+	wg.Wait()
+
+	// All Decide calls have returned; async goroutines still spinning.
+	if ok := e.AwaitVerifications(5 * time.Second); !ok {
+		t.Fatal("AwaitVerifications timed out; some goroutines didn't complete")
+	}
+
+	// Each command should have a cache entry.
+	missing := 0
+	for _, cmd := range cmds {
+		key := keyForCmd(e, cmd, "/tmp")
+		if _, hit := cch.Get(key); !hit {
+			missing++
+		}
+	}
+	if missing != 0 {
+		t.Errorf("%d of %d cache entries missing after concurrent async decides", missing, n)
+	}
+}
+
+// TestAsync_SyncWinsRaceRegression: when the classifier lands before
+// the sync deadline, the async goroutine must NEVER be spawned. Locks
+// in the select semantics against a refactor that could duplicate
+// cache writes.
+func TestAsync_SyncWinsRaceRegression(t *testing.T) {
+	stub := &slowClassifier{delay: 20 * time.Millisecond, verdict: llm.VerdictSafe}
+	withLLMDeadlines(t, 500*time.Millisecond, 2*time.Second)
+	e, cch, logBuf := newEngineForAsync(t, stub)
+
+	cmd := "cat /etc/hosts | grep localhost"
+	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+
+	if out.Verdict != Allow {
+		t.Fatalf("Verdict = %v, want Allow (sync path)", out.Verdict)
+	}
+	if out.Shadow.Tier4LLM == "timeout-async-pending" {
+		t.Error("Shadow.Tier4LLM should not be timeout-async-pending when sync wins")
+	}
+
+	// AwaitVerifications here waits only for the verifier (none in
+	// this test — no verifier configured — so returns immediately).
+	// Validates no extra async goroutine was spawned.
+	if ok := e.AwaitVerifications(500 * time.Millisecond); !ok {
+		t.Error("AwaitVerifications timed out; unexpected pending goroutine")
+	}
+
+	// Cache should have exactly one entry (the exact one). No
+	// duplicate writes from async path.
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); !hit {
+		t.Error("cache missing sync-path entry")
+	}
+	// No async events in log.
+	if strings.Contains(logBuf.String(), "async_llm_completed") {
+		t.Errorf("log contains async event for sync-wins case: %s", logBuf.String())
+	}
 }

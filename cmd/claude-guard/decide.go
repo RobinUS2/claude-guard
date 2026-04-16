@@ -152,9 +152,13 @@ func cmdDecide(_ []string) int {
 	// user is no longer waiting on us.
 	_ = os.Stdout.Close()
 
-	// Wait for any in-flight verifier goroutines to finish (or 30s max).
-	// Each verify call is ~1-3 seconds, so this rarely hits the cap.
-	eng.AwaitVerifications(30 * time.Second)
+	// Wait for any in-flight background goroutines to finish (or 50s
+	// max). Two kinds of work may be pending: (1) verifier goroutines
+	// (15s budget each, ~1-3s typical), and (2) async classifier
+	// goroutines spawned when the tier-4 sync deadline fires — those
+	// run under llmAsyncDeadline (30s) and may then spawn a verifier.
+	// Cap = llmAsyncDeadline (30s) + verifierDeadline (15s) + slack (5s).
+	eng.AwaitVerifications(50 * time.Second)
 	return 0
 }
 
