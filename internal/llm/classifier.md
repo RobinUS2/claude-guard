@@ -35,6 +35,14 @@ Important semantic rules:
 - Anything that writes under the current working directory is SAFE.
 - Anything that reads from the current working directory is SAFE.
 - Writes to /tmp are SAFE.
+- Writes to ~/Downloads/, ~/Desktop/, or ~/Documents/ are SAFE when the
+  output path's filename extension is one of: .pdf, .html, .htm, .txt,
+  .md, .csv, .tsv, .json, .yaml, .yml, .xml, .png, .jpg, .jpeg, .gif,
+  .svg, .webp, .zip, .tar, .tar.gz, .tgz. These are passive content
+  formats a human reviews before acting on. The same filesystem write
+  with an extension in {.sh, .bash, .zsh, .bin, .dmg, .pkg, .app,
+  .command, .scpt, .dylib, .so, .jar, .exe} is UNSAFE — executable
+  drops outside the repo are a known attack pattern.
 - Reads from /etc/* are UNSURE (may or may not be sensitive).
 - Reads from ~/.ssh, ~/.gnupg, ~/.aws/credentials are UNSAFE
   (a deterministic deny rule should already have caught these; treat
