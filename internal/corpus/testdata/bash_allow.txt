@@ -164,3 +164,5 @@ git remote
 git remote -v
 git remote show origin
 git remote get-url origin
+
+# --- blocker 3: ssh-add regression — ssh family still reads keys ---

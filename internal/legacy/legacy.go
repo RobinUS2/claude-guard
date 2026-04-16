@@ -65,9 +65,74 @@ type AllowList struct {
 	Patterns []Pattern
 }
 
+// unsafeLegacyPrograms are first-word programs whose blanket tier-5
+// allow would undo tighter tier-2 / tier-1 rules added in the 2026-04
+// hardening. Patterns whose Prefix starts with any of these are
+// silently dropped at Load time and at migration time. Defense in
+// depth: even if `claude-guard migrate` re-runs against an old
+// settings.json, these entries never materialize into tier-5 allows.
+//
+// Rationale per program:
+//   - awk/sed/find/env — system() / getline / -exec / wrapper shapes
+//     with built-in shell escapes (red-team C-1, C-2; plan steps 8-9)
+//   - make — target names are user-defined; target body is arbitrary
+//     shell (red-team C-6; plan step 10)
+//   - bash/sh/zsh/… — `<shell> -c '…'` opaque script (plan step 13)
+//   - python/python3/perl/ruby/node — same `-c`/`-e` opaque-script
+//     shape (red-team C-7 #12 found python3 escaped legacy)
+var unsafeLegacyPrograms = map[string]struct{}{
+	"awk": {}, "sed": {}, "find": {}, "env": {},
+	"make": {},
+	"bash": {}, "sh": {}, "zsh": {}, "fish": {}, "dash": {},
+	"ksh": {}, "tcsh": {}, "csh": {},
+	"python": {}, "python3": {}, "perl": {}, "ruby": {}, "node": {},
+}
+
+// unsafeLegacyPrefixes are multi-word Prefix starts that should be
+// dropped. Used for shapes like `docker exec <container> sh` where
+// the program (`docker`) is legitimate in isolation but the (noun,
+// verb) combo in legacy subsumes a tier-1-enforced deny.
+var unsafeLegacyPrefixes = []string{
+	"docker exec",         // shell into running container
+	"docker run",          // arbitrary image execution (red-team)
+	"terraform init",      // also handled by tier-1 state rules
+	"terraform import",    // mutates state; tier-1 denies now
+}
+
+// isUnsafeLegacy reports whether the given legacy prefix should be
+// filtered out. Called from both parseEntry (fresh migration) and
+// Load (existing YAML), so old migrations get sanitized without
+// requiring users to re-run `claude-guard migrate`.
+func isUnsafeLegacy(prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return true
+	}
+	// First-word program check.
+	first := prefix
+	if i := strings.IndexByte(prefix, ' '); i >= 0 {
+		first = prefix[:i]
+	}
+	if _, bad := unsafeLegacyPrograms[first]; bad {
+		return true
+	}
+	// Multi-word prefix check.
+	for _, up := range unsafeLegacyPrefixes {
+		if prefix == up || strings.HasPrefix(prefix, up+" ") {
+			return true
+		}
+	}
+	return false
+}
+
 // Load reads a migrated legacy YAML file from disk and compiles its
 // patterns. Returns an empty (matches-nothing) AllowList if the file
 // is missing — that's the desired fail-open behavior, not an error.
+//
+// Patterns matching isUnsafeLegacy are dropped at load time, even if
+// the file was generated before the 2026-04 hardening. This means the
+// live binary applies the post-hardening tier-5 shape regardless of
+// when the legacy YAML was last migrated.
 func Load(path string) (*AllowList, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -82,6 +147,9 @@ func Load(path string) (*AllowList, error) {
 	}
 	out := make([]Pattern, 0, len(f.Patterns))
 	for _, p := range f.Patterns {
+		if isUnsafeLegacy(p.Prefix) {
+			continue
+		}
 		if err := p.compile(); err == nil {
 			out = append(out, p)
 		}
@@ -171,6 +239,11 @@ func parseEntry(entry string) (Pattern, bool) {
 	p := Pattern{
 		Source: entry,
 		Prefix: inner,
+	}
+	// Drop programs / prefixes that the 2026-04 hardening moved out
+	// of tier 2 — keeping them in tier 5 would undo the hardening.
+	if isUnsafeLegacy(inner) {
+		return Pattern{}, false
 	}
 	// Reject patterns that contain shell metachars we can't safely
 	// match prefix-style — e.g. complete commands with embedded

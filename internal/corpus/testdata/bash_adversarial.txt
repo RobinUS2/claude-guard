@@ -226,3 +226,11 @@ echo evil > /Users/robin/.bashrc
 echo evil > /Users/robin/.zshrc
 printf evil > /etc/hosts
 cat /tmp/x > /etc/hosts
+
+# --- blocker 2: script interpreter inline-code shapes (py/perl/ruby/node) ---
+python -c 'import os; os.system("id")'
+python3 -c 'import os; os.system("id")'
+perl -e 'system("id")'
+ruby -e 'system("id")'
+node -e 'require("child_process").execSync("id")'
+node --eval 'require("fs").readFileSync("/etc/passwd")'

@@ -85,12 +85,29 @@ func DefaultBlockRules() []rules.Rule {
 			Reason:            "force push to protected branch",
 		},
 
-		// SSH private key access from non-ssh programs
+		// SSH file access from non-ssh programs — covers private keys
+		// AND auxiliary SSH files (authorized_keys, known_hosts,
+		// config) because an attacker writing to authorized_keys
+		// establishes persistence just as surely as exfiling a
+		// private key. ExcludePrograms covers the SSH tool family
+		// that legitimately reads these (`ssh-add ~/.ssh/id_rsa`,
+		// `git` reading ~/.ssh/config for deploy keys, etc.).
+		//
+		// NOTE: this rule supersedes a narrower `~/.ssh/*` entry
+		// previously in `extended-credentials`, which lacked
+		// ExcludePrograms and broke ssh-add. Keeping the rule name
+		// `ssh-private-key` for log-continuity even though it now
+		// covers more than just private keys.
 		&rules.PathAccess{
-			RuleName:        "ssh-private-key",
-			Paths:           []string{"~/.ssh/id_*", "**/.ssh/id_*"},
-			ExcludePrograms: []string{"ssh", "ssh-add", "ssh-keygen", "ssh-copy-id", "git"},
-			Reason:          "access to SSH private key outside of ssh-family tools",
+			RuleName: "ssh-private-key",
+			Paths: []string{
+				"~/.ssh/id_*", "**/.ssh/id_*",
+				"~/.ssh/authorized_keys", "**/.ssh/authorized_keys",
+				"~/.ssh/known_hosts", "**/.ssh/known_hosts",
+				"~/.ssh/config", "**/.ssh/config",
+			},
+			ExcludePrograms: []string{"ssh", "ssh-add", "ssh-keygen", "ssh-copy-id", "git", "gh"},
+			Reason:          "access to SSH file outside of ssh-family tools",
 		},
 
 		// GPG/AWS/GCP credential file access
@@ -156,9 +173,11 @@ func DefaultBlockRules() []rules.Rule {
 				// Git config often contains credential.helper / signing
 				// key; .git-credentials is plaintext store.
 				"~/.gitconfig", "~/.git-credentials",
-				// SSH — widen from id_* to the whole .ssh dir so
-				// known_hosts/config/authorized_keys are also covered.
-				"~/.ssh/*",
+				// SSH files are covered by the dedicated
+				// `ssh-private-key` rule above (which has
+				// ExcludePrograms for ssh-add, ssh-keygen etc.).
+				// Leaving ~/.ssh/* OUT of extended-credentials
+				// avoids blocking `ssh-add ~/.ssh/id_rsa`.
 				// AWS — widen. `config` holds MFA ARNs, `sso/cache`
 				// holds short-lived creds.
 				"~/.aws/*",
@@ -228,6 +247,17 @@ func DefaultBlockRules() []rules.Rule {
 			RuleName: "shell-dash-c",
 			Shells:   []string{"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"},
 			Reason:   "shell -c wraps an opaque script string that isn't AST-analyzable",
+		},
+
+		// Script interpreters with inline-code flags — same opaque-script
+		// risk as `bash -c`, just different flag conventions. Python
+		// uses `-c`, Perl/Ruby/Node use `-e` (Node also accepts
+		// `--eval`).
+		&rules.ScriptInterpreterExec{
+			RuleName:     "script-interpreter-exec",
+			Interpreters: []string{"python", "python3", "perl", "ruby", "node"},
+			ExecFlags:    []string{"-c", "-e", "--eval"},
+			Reason:       "script interpreter with inline code (-c / -e) wraps opaque code",
 		},
 
 		// git config writes — tier-2 `git-readonly` allows `git config`

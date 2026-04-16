@@ -370,6 +370,52 @@ func (r *ShellDashC) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// --- ScriptInterpreterExec: block rule for script interpreters
+// invoked with an inline-code flag. Semantically identical to
+// `bash -c '…'` but with different flag conventions: Python uses
+// `-c`, Perl/Ruby/Node use `-e`. The inline string is arbitrary code
+// the AST can't analyze, so we treat it like ShellDashC.
+
+// ScriptInterpreterExec blocks `<interp> <exec-flag> '<code>'` shapes.
+type ScriptInterpreterExec struct {
+	RuleName     string
+	Interpreters []string // python, python3, perl, ruby, node, etc.
+	// ExecFlags trigger the deny when present alongside a positional.
+	// Common values: "-c" (python), "-e" (perl/ruby/node).
+	ExecFlags []string
+	Reason    string
+}
+
+func (r *ScriptInterpreterExec) Name() string { return r.RuleName }
+func (r *ScriptInterpreterExec) Kind() string { return "script_interpreter_exec" }
+
+func (r *ScriptInterpreterExec) Eval(p *shellparse.Parsed) (Verdict, string) {
+	for _, c := range p.Calls {
+		if c.Nesting != shellparse.NestTopLevel {
+			continue
+		}
+		if !stringIn(baseProgram(c.Program), r.Interpreters) && !stringIn(c.Program, r.Interpreters) {
+			continue
+		}
+		hasExecFlag := false
+		for _, f := range c.Flags {
+			for _, want := range r.ExecFlags {
+				if f == want {
+					hasExecFlag = true
+					break
+				}
+			}
+			if hasExecFlag {
+				break
+			}
+		}
+		if hasExecFlag && len(c.Positional) > 0 {
+			return Match, r.Reason
+		}
+	}
+	return NoMatch, ""
+}
+
 // --- NestedSubcommand: a block rule for tools with a two-level
 // subcommand tree (e.g. `gh pr merge`, `terraform state rm`,
 // `git remote add`) where the outer noun is tier-2 allowed but

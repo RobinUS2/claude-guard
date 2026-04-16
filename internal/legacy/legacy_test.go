@@ -16,7 +16,8 @@ func TestParseEntry_BasicBash(t *testing.T) {
 		{"Bash(ls:*)", "ls", true},
 		{"Bash(git status:*)", "git status", true},
 		{"Bash(gcloud builds list:*)", "gcloud builds list", true},
-		{"Bash(make test*:*)", "make test*", true},
+		// `make test*` is now filtered (make is unsafe-legacy post-hardening).
+		{"Bash(make test*:*)", "", false},
 		{"Bash(npm run test:unit:*)", "npm run test:unit", true},
 		{"Bash()", "", false},                  // empty
 		{"Read(/foo)", "", false},              // not Bash
@@ -24,6 +25,19 @@ func TestParseEntry_BasicBash(t *testing.T) {
 		{"mcp__atlassian__getJiraIssue", "", false},
 		{"Bash(curl ... | sh)", "", false},     // pipe — skipped
 		{"Bash(echo $(date))", "", false},      // command sub — skipped
+		// Unsafe-legacy filter: these are dropped because the
+		// corresponding tier-2 rules were removed in the 2026-04
+		// hardening, and a blanket tier-5 allow would undo that.
+		{"Bash(awk:*)", "", false},
+		{"Bash(sed:*)", "", false},
+		{"Bash(env:*)", "", false},
+		{"Bash(find:*)", "", false},
+		{"Bash(bash:*)", "", false},
+		{"Bash(python3:*)", "", false},
+		{"Bash(docker exec:*)", "", false},
+		{"Bash(docker run alpine:*)", "", false},
+		{"Bash(terraform init:*)", "", false},
+		{"Bash(terraform import:*)", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.entry, func(t *testing.T) {
@@ -39,10 +53,12 @@ func TestParseEntry_BasicBash(t *testing.T) {
 }
 
 func TestPattern_MatchPrefix(t *testing.T) {
+	// Use `yarn build*` instead of the old `make test*` since
+	// `make` is now unsafe-legacy and gets dropped.
 	patterns, skipped := ParseSettingsAllowList([]string{
 		"Bash(ls:*)",
 		"Bash(git status:*)",
-		"Bash(make test*:*)",
+		"Bash(yarn build*:*)",
 		"Bash(gcloud builds list:*)",
 		"Bash(npm run lint)",
 	})
@@ -61,10 +77,10 @@ func TestPattern_MatchPrefix(t *testing.T) {
 		{"git status", true},
 		{"git status --short", true},
 		{"git push", false}, // no matching pattern
-		{"make test", true},
-		{"make testfoo", true},      // glob
-		{"make test-thing-x", true}, // glob
-		{"make build", false},
+		{"yarn build", true},
+		{"yarn buildfoo", true},       // glob
+		{"yarn build-thing-x", true},  // glob
+		{"yarn install", false},
 		{"gcloud builds list --limit=5", true},
 		{"gcloud builds describe abc", false}, // describe ≠ list
 		{"npm run lint", true},
@@ -148,10 +164,12 @@ func TestWriteAndLoad_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "legacy.yaml")
 
+	// Use `yarn build*` for the glob test since `make *` is now
+	// unsafe-legacy-filtered.
 	patterns, _ := ParseSettingsAllowList([]string{
 		"Bash(ls:*)",
 		"Bash(git status:*)",
-		"Bash(make test*:*)",
+		"Bash(yarn build*:*)",
 	})
 	in := &File{
 		Version:  SchemaVersion,
@@ -174,12 +192,15 @@ func TestWriteAndLoad_RoundTrip(t *testing.T) {
 	if loaded.Match("ls -la") == nil {
 		t.Error("loaded pattern should match")
 	}
-	if loaded.Match("make test-fast") == nil {
+	if loaded.Match("yarn build-fast") == nil {
 		t.Error("loaded glob pattern should match")
 	}
 }
 
 func TestMigrateSettingsJSON(t *testing.T) {
+	// Two allow shapes: a legit one (`Bash(ls:*)`), a unsafe-legacy
+	// one that post-hardening is filtered (`make *`), and an
+	// orthogonal Read entry that's skipped regardless.
 	json := []byte(`{
   "permissions": {
     "allow": [
@@ -198,11 +219,13 @@ func TestMigrateSettingsJSON(t *testing.T) {
 	if f.Version != SchemaVersion {
 		t.Errorf("Version = %d", f.Version)
 	}
-	if len(f.Patterns) != 3 {
-		t.Errorf("Patterns = %d, want 3", len(f.Patterns))
+	// 2 patterns: Bash(ls:*), Bash(git status:*). `make test*` dropped
+	// by unsafe-legacy filter; `Read(/foo)` skipped as non-Bash.
+	if len(f.Patterns) != 2 {
+		t.Errorf("Patterns = %d, want 2", len(f.Patterns))
 	}
-	if len(f.Skipped) != 1 {
-		t.Errorf("Skipped = %d, want 1 (Read entry)", len(f.Skipped))
+	if len(f.Skipped) != 2 {
+		t.Errorf("Skipped = %d, want 2 (Read entry + unsafe make)", len(f.Skipped))
 	}
 	if !strings.Contains(strings.Join(f.Skipped, " "), "Read(/foo)") {
 		t.Errorf("Skipped should contain Read(/foo): %v", f.Skipped)
@@ -256,5 +279,114 @@ func TestWriteFile_AtomicWrite(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
 		t.Error("leftover tmp file")
+	}
+}
+
+// --- unsafe-legacy filter (2026-04 hardening) ---
+
+func TestIsUnsafeLegacy(t *testing.T) {
+	cases := []struct {
+		prefix string
+		want   bool
+	}{
+		// Unsafe programs dropped.
+		{"awk", true},
+		{"awk -F:", true},
+		{"sed -i", true},
+		{"env", true},
+		{"env PATH=/bin", true},
+		{"find /tmp", true},
+		{"make", true},
+		{"make test", true},
+		{"make test-fast", true},
+		{"bash", true},
+		{"bash -c", true},
+		{"python", true},
+		{"python3 -c", true},
+		{"perl -e", true},
+		{"ruby -e", true},
+		{"node -e", true},
+		// Unsafe multi-word prefixes.
+		{"docker exec", true},
+		{"docker exec container bash", true},
+		{"docker run", true},
+		{"docker run alpine sh", true},
+		{"terraform init", true},
+		{"terraform import", true},
+		// Safe programs still pass.
+		{"ls", false},
+		{"ls -la", false},
+		{"git status", false},
+		{"gcloud builds list", false},
+		{"npm run lint", false},
+		{"yarn build", false},
+		{"docker ps", false},
+		{"docker images", false}, // docker alone (no exec/run) OK
+		{"terraform plan", false},
+		{"terraform apply", false}, // not on unsafe prefix list (yet)
+		{"kubectl get pods", false},
+		// Edge cases.
+		{"", true},        // empty prefix dropped
+		{"  ", true},      // whitespace-only dropped
+		{"makefoo", false}, // `makefoo` is not `make`; don't false-match
+	}
+	for _, tc := range cases {
+		t.Run(tc.prefix, func(t *testing.T) {
+			if got := isUnsafeLegacy(tc.prefix); got != tc.want {
+				t.Errorf("isUnsafeLegacy(%q) = %v, want %v", tc.prefix, got, tc.want)
+			}
+		})
+	}
+}
+
+// Load must drop unsafe patterns even when they're already written
+// in the YAML file (migration happened before hardening).
+func TestLoad_DropsUnsafeLegacyEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.yaml")
+	// Craft a File that looks like a pre-hardening migration.
+	pre := &File{
+		Version: SchemaVersion,
+		Source:  "test",
+		Patterns: []Pattern{
+			{Source: "Bash(ls:*)", Prefix: "ls"},
+			{Source: "Bash(make test:*)", Prefix: "make test"},
+			{Source: "Bash(awk:*)", Prefix: "awk"},
+			{Source: "Bash(python3:*)", Prefix: "python3"},
+			{Source: "Bash(docker exec:*)", Prefix: "docker exec"},
+			{Source: "Bash(git status:*)", Prefix: "git status"},
+		},
+	}
+	if err := WriteFile(path, pre); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only `ls` and `git status` should survive.
+	if len(loaded.Patterns) != 2 {
+		t.Errorf("loaded %d patterns, want 2 (only ls + git status should survive)", len(loaded.Patterns))
+		for _, p := range loaded.Patterns {
+			t.Logf("  survived: %q", p.Prefix)
+		}
+	}
+	if loaded.Match("make test") != nil {
+		t.Error("make test should NOT match after unsafe-legacy filter")
+	}
+	if loaded.Match("awk 'BEGIN{}'") != nil {
+		t.Error("awk should NOT match after unsafe-legacy filter")
+	}
+	if loaded.Match("python3 -c 'import os'") != nil {
+		t.Error("python3 should NOT match after unsafe-legacy filter")
+	}
+	if loaded.Match("docker exec container sh") != nil {
+		t.Error("docker exec should NOT match after unsafe-legacy filter")
+	}
+	if loaded.Match("ls -la") == nil {
+		t.Error("ls must still match")
+	}
+	if loaded.Match("git status") == nil {
+		t.Error("git status must still match")
 	}
 }
