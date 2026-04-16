@@ -93,3 +93,11 @@ rm -rf "$HOME"
 rm -rf "${HOME}"
 rm -rf $PWD
 rm -rf "$PWD"
+
+# --- step 2: terraform state mutation ---
+terraform state rm aws_instance.foo
+terraform state mv a b
+terraform state push ./state.tfstate
+terraform state replace-provider hashicorp/aws evil/aws
+terraform state rename a b
+terraform import aws_s3_bucket.foo bar

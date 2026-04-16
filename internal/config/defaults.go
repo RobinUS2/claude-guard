@@ -107,6 +107,28 @@ func DefaultBlockRules() []rules.Rule {
 			Paths:    []string{"/etc/shadow", "/etc/master.passwd", "/etc/sudoers", "/etc/sudoers.d/*"},
 			Reason:   "access to system credential file",
 		},
+
+		// terraform state mutations — `state rm`, `state mv`, etc.
+		// mutate state without touching infrastructure, which then
+		// causes the next `terraform apply` to recreate resources
+		// (data loss). `terraform import` is also a state mutation.
+		// The outer `terraform-readonly` tier-2 rule approves reads
+		// (`terraform plan`, `terraform state list`). This deny list
+		// carves out the specific destructive verbs so they prompt
+		// the user even though tier-2 would otherwise approve them.
+		&rules.NestedSubcommand{
+			RuleName: "terraform-state-mutation",
+			Program:  "terraform",
+			Destructive: []string{
+				"state/rm",
+				"state/mv",
+				"state/push",
+				"state/replace-provider",
+				"state/rename",
+				"import", // any `terraform import` args = deny
+			},
+			Reason: "terraform state mutation requires user approval",
+		},
 	}
 }
 
@@ -173,10 +195,17 @@ func DefaultAllowRules() []rules.Rule {
 		},
 
 		// terraform read-only
+		//
+		// `state` is intentionally NOT in this list — the subcommand
+		// tree is too deep for AnchoredCommand (cannot distinguish
+		// `state list` from `state rm`). `terraform state ...` falls
+		// to the LLM tier which reasons about the full command.
+		// Tier-1 `terraform-state-mutation` still denies the
+		// destructive verbs regardless of tier 2.
 		&rules.AnchoredCommand{
 			RuleName:         "terraform-readonly",
 			Programs:         []string{"terraform"},
-			RequireSubcmdAny: []string{"plan", "validate", "fmt", "show", "version", "state", "output", "console", "workspace"},
+			RequireSubcmdAny: []string{"plan", "validate", "fmt", "show", "version", "output", "console", "workspace"},
 		},
 
 		// docker read-only

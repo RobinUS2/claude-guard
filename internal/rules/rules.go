@@ -317,6 +317,74 @@ func (r *ProcSubToShell) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// --- NestedSubcommand: a block rule for tools with a two-level
+// subcommand tree (e.g. `gh pr merge`, `terraform state rm`,
+// `git remote add`) where the outer noun is tier-2 allowed but
+// specific (noun, verb) pairs need tier-1 denies.
+//
+// Matches when the call's program is Program AND the first positional
+// matches a known noun/verb pair in Destructive. Pair formats:
+//   - "noun/verb"  — exact pair; both positionals must match
+//   - "noun/*"     — any verb under this noun triggers the match
+//   - "noun"       — noun alone; matches when positional[0] == noun
+//                    regardless of subsequent positionals (used for
+//                    "terraform import <anything>")
+//
+// Only runs against top-level calls — a nested `$(gh pr merge)` is
+// handled by the outer call's shell mechanics, not by this rule.
+
+// NestedSubcommand matches (program, noun[, verb]) destructive triples.
+type NestedSubcommand struct {
+	RuleName    string
+	Program     string
+	Destructive []string
+	Reason      string
+}
+
+func (r *NestedSubcommand) Name() string { return r.RuleName }
+func (r *NestedSubcommand) Kind() string { return "nested_subcommand" }
+
+func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
+	for _, c := range p.Calls {
+		if c.Nesting != shellparse.NestTopLevel {
+			continue
+		}
+		if baseProgram(c.Program) != r.Program && c.Program != r.Program {
+			continue
+		}
+		if len(c.Positional) == 0 {
+			continue
+		}
+		noun := c.Positional[0]
+		verb := ""
+		if len(c.Positional) >= 2 {
+			verb = c.Positional[1]
+		}
+		for _, spec := range r.Destructive {
+			// "noun" alone: match on noun regardless of verb.
+			if !strings.Contains(spec, "/") {
+				if spec == noun {
+					return Match, r.Reason
+				}
+				continue
+			}
+			// "noun/verb" or "noun/*"
+			slash := strings.IndexByte(spec, '/')
+			specNoun, specVerb := spec[:slash], spec[slash+1:]
+			if specNoun != noun {
+				continue
+			}
+			if specVerb == "*" {
+				return Match, r.Reason
+			}
+			if specVerb == verb {
+				return Match, r.Reason
+			}
+		}
+	}
+	return NoMatch, ""
+}
+
 // --- GitForcePush: block rule for force pushes to protected branches.
 
 // GitForcePush blocks `git push --force`-family commands to protected branches.

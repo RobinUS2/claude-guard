@@ -62,3 +62,8 @@ find . -name "*.go" | xargs wc -l
 
 # --- Variable-wrapped rm bypass attempts (tier 1 conservative on unresolved) ---
 R=rm; $R -rf /
+
+# --- step 2: terraform state reads (now fall through to LLM) ---
+terraform state list
+terraform state show aws_instance.foo
+terraform state pull

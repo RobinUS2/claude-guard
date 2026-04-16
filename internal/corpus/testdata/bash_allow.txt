@@ -83,7 +83,6 @@ terraform validate
 terraform fmt
 terraform show
 terraform version
-terraform state
 terraform output
 terraform workspace
 terraform console
