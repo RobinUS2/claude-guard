@@ -148,6 +148,13 @@ type KeyInputs struct {
 	PromptVersion     string // sha256 of the classifier prompt
 	RulesHash         string // sha256 of the active rule set
 	ProjectConfigHash string // sha256 of the project .claude-guard.yml (empty if absent)
+	// MakefileHash is an optional content hash of a companion file
+	// (Makefile, GNUmakefile) relevant to the command. When
+	// populated, it participates in the key so a Makefile edit
+	// invalidates the cached verdict even when cwd+branch+command
+	// are unchanged. Populated by the engine for `make <target>`
+	// shapes; empty for all other commands.
+	MakefileHash string
 }
 
 // SchemaVersion is part of every cache key. Bump it when the KeyInputs
@@ -161,7 +168,9 @@ type KeyInputs struct {
 //     entries are keyed by normalize.Normalize() output — one entry
 //     serves many concrete commands with matching variable-slot
 //     tokens. See internal/normalize.
-const SchemaVersion = "5"
+// v6: added MakefileHash dimension so Makefile edits invalidate
+//     cached `make <target>` verdicts.
+const SchemaVersion = "6"
 
 // MaxCommandInEntry caps how many bytes of a command we persist in
 // an entry. Commands occasionally include multi-KB heredocs or
@@ -207,6 +216,8 @@ func keyWithDimensions(in KeyInputs, includeProject bool) string {
 	b.WriteString(in.RulesHash)
 	b.WriteByte('\x00')
 	b.WriteString(in.ProjectConfigHash)
+	b.WriteByte('\x00')
+	b.WriteString(in.MakefileHash)
 
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])

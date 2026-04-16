@@ -196,3 +196,124 @@ func TestExtractNpmScriptName(t *testing.T) {
 		}
 	}
 }
+
+// --- MakefileHash ---
+
+func TestMakefileHash_NoMakefile(t *testing.T) {
+	dir := t.TempDir()
+	if h := MakefileHash(dir, "make test"); h != "" {
+		t.Errorf("MakefileHash with no Makefile = %q, want empty", h)
+	}
+}
+
+func TestMakefileHash_NonMakeCommand(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte("test:\n\techo ok\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if h := MakefileHash(dir, "go test ./..."); h != "" {
+		t.Errorf("MakefileHash for go command = %q, want empty", h)
+	}
+}
+
+func TestMakefileHash_SimpleMake(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte("test:\n\techo ok\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h1 := MakefileHash(dir, "make test")
+	if h1 == "" {
+		t.Fatal("expected non-empty hash")
+	}
+	if len(h1) != 16 {
+		t.Errorf("hash len = %d, want 16", len(h1))
+	}
+	// Different target, same Makefile → same hash.
+	h2 := MakefileHash(dir, "make build")
+	if h2 != h1 {
+		t.Errorf("hash changed for different target on same Makefile: %q vs %q", h1, h2)
+	}
+}
+
+func TestMakefileHash_ContentChangeInvalidates(t *testing.T) {
+	dir := t.TempDir()
+	mfPath := filepath.Join(dir, "Makefile")
+	if err := os.WriteFile(mfPath, []byte("test:\n\techo ok\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h1 := MakefileHash(dir, "make test")
+	if err := os.WriteFile(mfPath, []byte("test:\n\techo changed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h2 := MakefileHash(dir, "make test")
+	if h1 == h2 {
+		t.Errorf("hash should change after Makefile edit; both = %q", h1)
+	}
+}
+
+func TestMakefileHash_BailOnMinusF(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte("test:\n\techo ok\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if h := MakefileHash(dir, "make -f other.mk target"); h != "" {
+		t.Errorf("MakefileHash with -f should bail, got %q", h)
+	}
+}
+
+func TestMakefileHash_BailOnMinusC(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte("test:\n\techo ok\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if h := MakefileHash(dir, "make -C other-dir target"); h != "" {
+		t.Errorf("MakefileHash with -C should bail, got %q", h)
+	}
+}
+
+func TestMakefileHash_BailOnVarAssignment(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte("test:\n\techo $FOO\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if h := MakefileHash(dir, "make FOO=bar test"); h != "" {
+		t.Errorf("MakefileHash with VAR= should bail, got %q", h)
+	}
+}
+
+func TestMakefileHash_RefuseSymlink(t *testing.T) {
+	dir := t.TempDir()
+	realPath := filepath.Join(dir, "real-mk")
+	if err := os.WriteFile(realPath, []byte("test:\n\techo ok\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realPath, filepath.Join(dir, "Makefile")); err != nil {
+		t.Fatal(err)
+	}
+	if h := MakefileHash(dir, "make test"); h != "" {
+		t.Errorf("MakefileHash should refuse symlink, got %q", h)
+	}
+}
+
+func TestMakefileHash_GNUmakefilePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte("from-Makefile"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "GNUmakefile"), []byte("from-GNUmakefile"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// GNU make prefers GNUmakefile > makefile > Makefile; verify we
+	// hash GNUmakefile when both exist.
+	h := MakefileHash(dir, "make test")
+	expected := MakefileHash(dir, "make test") // recompute to ensure stable
+	if h == "" || h != expected {
+		t.Errorf("unstable GNUmakefile hash: %q vs %q", h, expected)
+	}
+	// Delete GNUmakefile and confirm hash changes to Makefile content.
+	os.Remove(filepath.Join(dir, "GNUmakefile"))
+	h2 := MakefileHash(dir, "make test")
+	if h == h2 {
+		t.Errorf("hash should differ between GNUmakefile and Makefile content; both = %q", h)
+	}
+}

@@ -19,6 +19,8 @@
 package projectctx
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -151,6 +153,95 @@ func isYarnBuiltin(name string) bool {
 		return true
 	}
 	return false
+}
+
+// MaxMakefileHashBytes caps the size of a Makefile we'll hash. Bigger
+// files fall through (empty hash). Prevents pathological multi-MB
+// Makefiles from slowing the hot path.
+const MaxMakefileHashBytes = 1 * 1024 * 1024
+
+// MakefileHash returns a stable short hash (first 16 hex chars of
+// SHA-256) of the Makefile content that would govern the given
+// command, when the command is a simple `make <target>` shape.
+// Returns "" in any of these cases:
+//
+//   - command's first word isn't `make`
+//   - command uses `-f <file>`, `-C <dir>`, or `VAR=value` args —
+//     can't trust content of a user-specified file / different cwd
+//   - no Makefile / GNUmakefile / makefile found within cwd walk
+//   - the file is a symlink (TOCTOU / attacker-controlled target;
+//     refused via os.Lstat)
+//   - file size > MaxMakefileHashBytes
+//   - read error
+//
+// The returned hash feeds into cache.KeyInputs.MakefileHash so a
+// cached verdict for `make test` invalidates when the Makefile
+// changes. Approvals persist across branches with the same Makefile.
+func MakefileHash(cwd, command string) string {
+	if cwd == "" || command == "" {
+		return ""
+	}
+	cmd := strings.TrimSpace(command)
+	if firstWord(cmd) != "make" {
+		return ""
+	}
+	// Bail on -f / -C / VAR= arg shapes: the command can reference a
+	// non-default Makefile path or chdir before running, so our
+	// cwd-local hash isn't the right scope. Let LLM decide without a
+	// content-hash cache scope.
+	fields := strings.Fields(cmd)
+	for i := 1; i < len(fields); i++ {
+		f := fields[i]
+		if f == "-f" || f == "-C" || strings.HasPrefix(f, "-f=") || strings.HasPrefix(f, "-C=") {
+			return ""
+		}
+		if strings.Contains(f, "=") && !strings.HasPrefix(f, "-") {
+			return ""
+		}
+	}
+
+	for _, name := range []string{"GNUmakefile", "makefile", "Makefile"} {
+		if data, ok := readMakefileForHash(cwd, name); ok {
+			sum := sha256.Sum256(data)
+			return hex.EncodeToString(sum[:])[:16]
+		}
+	}
+	return ""
+}
+
+// readMakefileForHash is a symlink-refusing variant of readNearbyFile.
+// Walks cwd up looking for `name`; returns file content if it's a
+// regular file (via os.Lstat — refuses symlinks). Size-caps to
+// MaxMakefileHashBytes.
+func readMakefileForHash(cwd, name string) ([]byte, bool) {
+	dir := cwd
+	for i := 0; i < 16; i++ {
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err == nil {
+			// Refuse symlinks — TOCTOU and attacker-swap risk.
+			if info.Mode()&os.ModeSymlink != 0 {
+				return nil, false
+			}
+			if info.IsDir() {
+				return nil, false
+			}
+			if info.Size() > MaxMakefileHashBytes {
+				return nil, false
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, false
+			}
+			return data, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil, false
+		}
+		dir = parent
+	}
+	return nil, false
 }
 
 // --- make: read Makefile and find the matching target ---

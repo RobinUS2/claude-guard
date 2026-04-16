@@ -367,6 +367,10 @@ func (e *Engine) Decide(in Input) Output {
 		PromptVersion:     e.promptVersion,
 		RulesHash:         e.rulesHash,
 		ProjectConfigHash: projHash,
+		// MakefileHash: populated for `make <target>` shapes so a
+		// cached LLM verdict invalidates when the Makefile content
+		// changes. Empty for all other commands.
+		MakefileHash: projectctx.MakefileHash(in.CWD, in.Command),
 	}
 	var globalKey, projectKey string
 	if e.cache != nil && e.llm != nil {
