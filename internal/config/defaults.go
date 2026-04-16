@@ -108,6 +108,15 @@ func DefaultBlockRules() []rules.Rule {
 			Reason:   "access to system credential file",
 		},
 
+		// `<shell> -c '<script>'` — the inner script is opaque to the
+		// outer AST parser, so no matcher can reason about what will
+		// actually execute. Always prompt the user.
+		&rules.ShellDashC{
+			RuleName: "shell-dash-c",
+			Shells:   []string{"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"},
+			Reason:   "shell -c wraps an opaque script string that isn't AST-analyzable",
+		},
+
 		// terraform state mutations — `state rm`, `state mv`, etc.
 		// mutate state without touching infrastructure, which then
 		// causes the next `terraform apply` to recreate resources

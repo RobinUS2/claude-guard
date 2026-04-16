@@ -317,6 +317,45 @@ func (r *ProcSubToShell) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// --- ShellDashC: block rule for `<shell> -c '…'` — the inner script
+// string is not AST-analyzable by the outer parser, so every tier-1
+// matcher looking at the wrapper sees `bash`, not the wrapped command.
+// `sudo-anything` blocks sudo but not `bash -c 'sudo rm …'`; ProcSubToShell
+// blocks `bash <(curl)` but not `bash -c '$(curl)'`. This rule fills
+// the gap by denying `<shell> -c` with any positional script.
+
+// ShellDashC blocks `<shell> -c '<script>'` shapes.
+type ShellDashC struct {
+	RuleName string
+	Shells   []string
+	Reason   string
+}
+
+func (r *ShellDashC) Name() string { return r.RuleName }
+func (r *ShellDashC) Kind() string { return "shell_dash_c" }
+
+func (r *ShellDashC) Eval(p *shellparse.Parsed) (Verdict, string) {
+	for _, c := range p.Calls {
+		if c.Nesting != shellparse.NestTopLevel {
+			continue
+		}
+		if !stringIn(baseProgram(c.Program), r.Shells) && !stringIn(c.Program, r.Shells) {
+			continue
+		}
+		hasC := false
+		for _, f := range c.Flags {
+			if f == "-c" {
+				hasC = true
+				break
+			}
+		}
+		if hasC && len(c.Positional) > 0 {
+			return Match, r.Reason
+		}
+	}
+	return NoMatch, ""
+}
+
 // --- NestedSubcommand: a block rule for tools with a two-level
 // subcommand tree (e.g. `gh pr merge`, `terraform state rm`,
 // `git remote add`) where the outer noun is tier-2 allowed but

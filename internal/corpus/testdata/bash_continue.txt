@@ -67,3 +67,6 @@ R=rm; $R -rf /
 terraform state list
 terraform state show aws_instance.foo
 terraform state pull
+
+# --- step 13: shell without -c still falls through to LLM ---
+bash script.sh
