@@ -823,11 +823,28 @@ func flagsMatchGroup(flags, group []string) bool {
 //
 // The match is conservative — it only covers paths we can resolve statically.
 // A literal string starting with ~ is expanded to $HOME if set, else to /root.
+//
+// Because normalizePath folds a literal home prefix (`/Users/robin`)
+// into the symbolic `$HOME` form, a path like `/Users/robin` that
+// should match a `/Users` parent-dir rule would miss. To preserve both
+// intents — rules written with `~/` matching expanded literals AND
+// rules written with `/Users` matching subpaths — we try the match
+// against BOTH forms: the fully-normalized arg AND the arg with only
+// lexical (filepath.Clean) normalization applied.
 func pathMatchesAny(arg string, paths []string) bool {
 	normArg := normalizePath(arg)
+	lexArg := arg
+	if strings.HasPrefix(lexArg, "/") {
+		lexArg = filepath.Clean(lexArg)
+	}
 	for _, p := range paths {
 		normP := normalizePath(p)
 		if matchGlobOrPrefix(normArg, normP) {
+			return true
+		}
+		// Fallback: match the lexically-cleaned (non-home-folded) arg.
+		// Ensures `/Users/<user>` still matches a `/Users` pattern.
+		if lexArg != normArg && matchGlobOrPrefix(lexArg, normP) {
 			return true
 		}
 	}
