@@ -781,10 +781,27 @@ func (e *Engine) mapLLMOutcome(dec *llm.Decision, err error, in Input) llmCallRe
 			"category", dec.Category,
 			"tool_use_id", in.ToolUseID,
 		)
-		return llmCallResult{shadow: "unsafe", reason: dec.Reason}
+		return llmCallResult{shadow: shadowWithReason("unsafe", dec.Reason), reason: dec.Reason}
 	default:
-		return llmCallResult{shadow: "unsure", reason: dec.Reason}
+		return llmCallResult{shadow: shadowWithReason("unsure", dec.Reason), reason: dec.Reason}
 	}
+}
+
+// shadowWithReason formats a shadow-trace value that includes a
+// brief reason snippet, so `claude-guard monitor` surfaces WHY a
+// decision was unsafe/unsure without forcing the operator to dig
+// into app.jsonl. Format: `<tag>: <first-80-chars-of-reason>`.
+// When reason is empty, returns just the tag unchanged.
+func shadowWithReason(tag, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return tag
+	}
+	const maxReasonLen = 80
+	if len(reason) > maxReasonLen {
+		reason = reason[:maxReasonLen-1] + "…"
+	}
+	return tag + ": " + reason
 }
 
 // persistLLMAllow writes a safe verdict to cache (plus the optional

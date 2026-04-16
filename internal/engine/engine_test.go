@@ -221,8 +221,15 @@ func TestEngine_LLM_UnsafeFallsThrough(t *testing.T) {
 	if out.Verdict != Continue {
 		t.Errorf("Verdict = %v, want Continue (unsafe → fall-through)", out.Verdict)
 	}
-	if out.Shadow.Tier4LLM != "unsafe" {
-		t.Errorf("Shadow.Tier4LLM = %q", out.Shadow.Tier4LLM)
+	// Shadow trace now includes the reason snippet so operators can
+	// see WHY the LLM said unsafe without digging into app.jsonl.
+	// Format: "unsafe: <brief reason>". The stubClassifier returns
+	// reason="stub", so expect "unsafe: stub".
+	if !strings.HasPrefix(out.Shadow.Tier4LLM, "unsafe") {
+		t.Errorf("Shadow.Tier4LLM = %q, want prefix 'unsafe'", out.Shadow.Tier4LLM)
+	}
+	if !strings.Contains(out.Shadow.Tier4LLM, "stub") {
+		t.Errorf("Shadow.Tier4LLM = %q, want it to contain the reason", out.Shadow.Tier4LLM)
 	}
 }
 
