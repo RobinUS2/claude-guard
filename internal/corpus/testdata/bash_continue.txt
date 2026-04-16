@@ -70,3 +70,24 @@ terraform state pull
 
 # --- step 13: shell without -c still falls through to LLM ---
 bash script.sh
+
+# --- steps 8-10: env, make, awk, sed moved from allow to LLM ---
+env
+env FOO=bar cmd
+make help
+make test
+make build
+make install
+awk '{print $1}' /tmp/f
+sed 's/a/b/g' /tmp/f
+
+# --- step 9: awk/sed system-escape shapes (LLM-only; tier-2 posix-readonly
+# no longer catches these. LLM is expected to classify unsafe → continue.)
+awk 'BEGIN{system("id")}'
+sed -n 'e echo hi' /tmp/f
+
+# --- step 8: env wrapping destructive cmd (LLM-only; tier-1 rm-rf-system
+# sees Program=env not rm, falls through)
+env rm -rf /etc
+env -- rm -rf /etc
+env PATH=/bin rm -rf /etc

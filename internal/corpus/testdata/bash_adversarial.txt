@@ -110,3 +110,12 @@ fish -c 'cat ~/.ssh/id_rsa'
 dash -c 'whatever'
 ksh -c 'echo pwned'
 bash -c 'id'
+
+# --- step 9: find destructive flag variants targeting protected dirs.
+# tier-1 find-delete-system catches -delete/-exec — extending coverage
+# to -fprint/-fprintf/-fls (write-to-file family) would need adding them
+# to find-delete-system's RequireFlagsAny. Until then these fall through;
+# tracked as known-residual. See plan non-goals.
+# rm -rf via env wrapper — rm-rf-system sees Program=env not rm.
+# Same residual; step 8 Part B (EnvWrapper recursion) would close it.
+
