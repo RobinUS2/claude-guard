@@ -71,3 +71,25 @@ sudo -i
 doas pkg_add foo
 su -
 su root
+
+# --- step 4: path normalization + darwin /private + case + ~/$HOME ---
+rm -rf /private/etc
+rm -rf /private/var
+rm -rf /private/tmp
+rm -rf /private/var/root
+rm -rf /tmp/../etc
+rm -rf /etc/../etc
+rm -rf //etc
+rm -rf /etc/
+rm -rf /Etc
+rm -rf /ETC
+rm -rf /USR
+rm -rf /eTc
+rm -rf ~
+rm -rf ~/
+rm -rf $HOME
+rm -rf ${HOME}
+rm -rf "$HOME"
+rm -rf "${HOME}"
+rm -rf $PWD
+rm -rf "$PWD"

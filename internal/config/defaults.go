@@ -29,6 +29,18 @@ func DefaultBlockRules() []rules.Rule {
 				"/home", "/Users",
 				"/System", "/Library", // macOS
 				"/boot", "/lib", "/root",
+				// Darwin canonical paths — /etc, /var, /tmp are
+				// symlinks into /private on macOS. Listed explicitly
+				// so `rm -rf /private/etc` is also blocked (the
+				// literal prefix check doesn't follow symlinks).
+				"/private/etc", "/private/var", "/private/tmp",
+				"/private/var/root", // root's home on darwin
+				// `~` normalizes to `$HOME`. BlockedCommand.Eval also
+				// consults HasEnvVarArg("HOME","PWD") when any TargetPath
+				// starts with `$HOME`, catching `rm -rf "$HOME"` /
+				// `rm -rf $HOME` / `rm -rf "$PWD"` which have empty
+				// positional slots due to unresolvable ParamExp.
+				"~",
 			},
 			Reason: "rm -rf on system/home directory",
 		},
@@ -43,8 +55,12 @@ func DefaultBlockRules() []rules.Rule {
 			RequireFlagsAny: [][]string{
 				{"-delete", "-exec"},
 			},
-			TargetPaths: []string{"/", "/etc", "/usr", "/var", "/home", "/Users", "/System", "/Library"},
-			Reason:      "find -delete/-exec on system/home directory",
+			TargetPaths: []string{
+				"/", "/etc", "/usr", "/var", "/home", "/Users", "/System", "/Library",
+				"/private/etc", "/private/var", "/private/tmp", "/private/var/root",
+				"~",
+			},
+			Reason: "find -delete/-exec on system/home directory",
 		},
 
 		// curl | sh and variants

@@ -13,6 +13,7 @@ package rules
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/RobinUS2/claude-guard/internal/shellparse"
@@ -212,6 +213,19 @@ func (r *BlockedCommand) Name() string { return r.RuleName }
 func (r *BlockedCommand) Kind() string { return "blocked_command" }
 
 func (r *BlockedCommand) Eval(p *shellparse.Parsed) (Verdict, string) {
+	// Does this rule's TargetPaths include a home-like token? If so,
+	// we must also check for ParamExp args targeting $HOME / $PWD —
+	// the positional slot is empty for unresolvable expansions and
+	// would otherwise bypass the check.
+	watchesHome := false
+	for _, tp := range r.TargetPaths {
+		n := normalizePath(tp)
+		if n == "$HOME" || strings.HasPrefix(n, "$HOME/") {
+			watchesHome = true
+			break
+		}
+	}
+
 	for _, c := range p.Calls {
 		if !stringIn(baseProgram(c.Program), r.Programs) && !stringIn(c.Program, r.Programs) {
 			continue
@@ -226,6 +240,12 @@ func (r *BlockedCommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 			if pathMatchesAny(pos, r.TargetPaths) {
 				return Match, r.Reason
 			}
+		}
+		// ParamExp catch: `rm -rf "$HOME"`, `rm -rf $HOME`, `rm -rf $PWD`.
+		// Only consulted when the rule is actually watching a home path;
+		// avoids spurious matches on unrelated rules.
+		if watchesHome && c.HasEnvVarArg("HOME", "PWD") {
+			return Match, r.Reason
 		}
 	}
 	return NoMatch, ""
@@ -469,7 +489,21 @@ func pathMatchesAny(arg string, paths []string) bool {
 	return false
 }
 
+// normalizePath canonicalizes a path arg or pattern for comparison:
+//   - tilde expansion: `~` and `~/foo` → `$HOME` / `$HOME/foo`
+//   - lexical cleanup (absolute paths only): `/tmp/../etc` → `/etc`,
+//     `/./etc` → `/etc`, `//etc` → `/etc`
+//
+// Relative paths and tilde-prefixed paths are not run through
+// filepath.Clean because Clean strips leading `./` and can mangle
+// glob-bearing patterns like `~/.ssh/id_*`.
 func normalizePath(p string) string {
+	if p == "" {
+		return p
+	}
+	if strings.HasPrefix(p, "/") {
+		p = filepath.Clean(p)
+	}
 	if strings.HasPrefix(p, "~/") {
 		// Treat ~ as $HOME symbolically. Matchers compare symbolic forms.
 		return "$HOME/" + p[2:]
@@ -510,8 +544,16 @@ func matchGlobOrPrefix(arg, pattern string) bool {
 		}
 		return false
 	}
-	// literal prefix (so "/etc/shadow" matches "/etc/shadow" and doesn't need exact equality)
-	return arg == pattern || strings.HasPrefix(arg, pattern+"/") || arg == pattern
+	// literal prefix match. On darwin the default APFS system volume is
+	// case-insensitive, so `rm -rf /Etc` and `rm -rf /ETC` resolve to
+	// the same inode as `/etc` at the kernel layer — compare in lower-
+	// case so our safety rules agree. On Linux, keep exact-case match
+	// (ext4/xfs default to case-sensitive).
+	if runtime.GOOS == "darwin" {
+		la, lp := strings.ToLower(arg), strings.ToLower(pattern)
+		return la == lp || strings.HasPrefix(la, lp+"/")
+	}
+	return arg == pattern || strings.HasPrefix(arg, pattern+"/")
 }
 
 func trimStar(s string) string {

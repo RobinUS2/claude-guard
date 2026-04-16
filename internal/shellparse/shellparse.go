@@ -108,6 +108,58 @@ type Call struct {
 	Expr *syntax.CallExpr
 }
 
+// HasEnvVarArg returns true when any of this call's arguments (NOT the
+// program slot) expands a shell variable whose name is in `names`.
+// Examples: for `rm -rf "$HOME"`, HasEnvVarArg("HOME") returns true.
+//
+// Used by BlockedCommand to catch shapes like `rm -rf $HOME` or
+// `rm -rf "$PWD"` where resolveWord returns an empty string (because
+// the expansion is unresolvable at parse time), causing the positional
+// slot to be empty and bypassing the TargetPaths check.
+//
+// Inspects ParamExp directly (both bare `$HOME` and inside
+// DblQuoted `"$HOME"` or `"${HOME}"` shapes). Does NOT follow
+// CmdSubst, ArithmExp, or ExtGlob.
+func (c *Call) HasEnvVarArg(names ...string) bool {
+	if c.Expr == nil || len(c.Expr.Args) < 2 {
+		return false
+	}
+	nameSet := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		nameSet[n] = struct{}{}
+	}
+	// Skip index 0 (program slot); scan arg words only.
+	for _, arg := range c.Expr.Args[1:] {
+		if arg == nil {
+			continue
+		}
+		for _, part := range arg.Parts {
+			if wordPartHasParam(part, nameSet) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func wordPartHasParam(part syntax.WordPart, nameSet map[string]struct{}) bool {
+	switch p := part.(type) {
+	case *syntax.ParamExp:
+		if p.Param != nil {
+			if _, ok := nameSet[p.Param.Value]; ok {
+				return true
+			}
+		}
+	case *syntax.DblQuoted:
+		for _, inner := range p.Parts {
+			if wordPartHasParam(inner, nameSet) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Parse parses a single shell command string (which may be multi-line and
 // contain any number of statements, pipelines, or compound commands).
 //
