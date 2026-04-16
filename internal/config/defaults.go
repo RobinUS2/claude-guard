@@ -108,6 +108,119 @@ func DefaultBlockRules() []rules.Rule {
 			Reason:   "access to system credential file",
 		},
 
+		// Persistence / tamper paths — shell init files and system
+		// DNS that, when written, establish attacker persistence
+		// (next login runs the malicious line) or redirect traffic
+		// (hosts file override). Reads are fine; writes via redir
+		// target are what matters and step 5's redir-aware PathAccess
+		// catches them.
+		&rules.PathAccess{
+			RuleName: "persistence-tamper",
+			Paths: []string{
+				"~/.bashrc", "~/.bash_profile", "~/.bash_login", "~/.profile",
+				"~/.zshrc", "~/.zprofile", "~/.zlogin", "~/.zshenv",
+				"~/.config/fish/config.fish",
+				"~/.tmux.conf",
+				"~/.vimrc", "~/.config/nvim/init.vim", "~/.config/nvim/init.lua",
+				"/etc/hosts", "/etc/resolv.conf",
+				"/private/etc/hosts", "/private/etc/resolv.conf",
+			},
+			WriteOnly: true, // reading these files is fine; only writes establish persistence
+			Reason:    "write to shell init / dns / editor config would establish persistence",
+		},
+
+		// Extended credential file coverage — red-team report H-1
+		// enumerates ~10 path shapes not covered by the legacy rules.
+		// ExcludePrograms intentionally narrow: vendor tools reading
+		// their OWN config via a flag (e.g. `kubectl config view`)
+		// don't mention the path in args and won't match PathAccess
+		// anyway. A direct `cat ~/.kube/config` — which is what an
+		// exfil attempt looks like — is blocked by this rule.
+		&rules.PathAccess{
+			RuleName: "extended-credentials",
+			Paths: []string{
+				// macOS
+				"~/Library/Keychains/*", "~/Library/Keychains/**",
+				"~/Library/Cookies/*", "~/Library/Cookies/**",
+				// GitHub CLI OAuth token
+				"~/.config/gh/hosts.yml", "~/.config/gh/*",
+				// Basic-auth + machine creds (curl/wget/ftp read this
+				// implicitly — DIRECT read is the exfil vector)
+				"~/.netrc",
+				// Docker registry tokens
+				"~/.docker/config.json", "~/.docker/*",
+				// Kubernetes — contexts, cluster creds, tokens
+				"~/.kube/config", "~/.kube/*",
+				// PyPI upload tokens
+				"~/.pypirc",
+				// Git config often contains credential.helper / signing
+				// key; .git-credentials is plaintext store.
+				"~/.gitconfig", "~/.git-credentials",
+				// SSH — widen from id_* to the whole .ssh dir so
+				// known_hosts/config/authorized_keys are also covered.
+				"~/.ssh/*",
+				// AWS — widen. `config` holds MFA ARNs, `sso/cache`
+				// holds short-lived creds.
+				"~/.aws/*",
+				// gcloud — widen beyond ADC json.
+				"~/.config/gcloud/*",
+			},
+			Reason: "access to vendor/user credential file",
+		},
+
+		// Vendor-config write subcommands — these write to ~/.kube/,
+		// ~/.docker/, etc. without the path appearing in the command
+		// text, so PathAccess alone can't see them. Tier-1 denies
+		// the specific mutating sub-verbs; legitimate auth flows
+		// (gh auth login etc.) prompt the user.
+		&rules.NestedSubcommand{
+			RuleName: "kubectl-config-write",
+			Program:  "kubectl",
+			Destructive: []string{
+				"config/set", "config/set-cluster", "config/set-context",
+				"config/set-credentials", "config/unset",
+				"config/delete-cluster", "config/delete-context",
+				"config/rename-context",
+			},
+			Reason: "kubectl config mutation writes ~/.kube/config",
+		},
+		&rules.NestedSubcommand{
+			RuleName: "oc-config-write",
+			Program:  "oc",
+			Destructive: []string{
+				"config/set", "config/set-cluster", "config/set-context",
+				"config/set-credentials", "config/unset",
+				"config/delete-cluster", "config/delete-context",
+				"config/rename-context",
+			},
+			Reason: "oc config mutation",
+		},
+		&rules.NestedSubcommand{
+			RuleName: "aws-configure-write",
+			Program:  "aws",
+			Destructive: []string{
+				"configure/set", "configure/import",
+			},
+			Reason: "aws configure writes ~/.aws/",
+		},
+		&rules.NestedSubcommand{
+			RuleName: "gcloud-auth-write",
+			Program:  "gcloud",
+			Destructive: []string{
+				"auth/login", "auth/application-default", "auth/revoke",
+				"config/set", "config/unset",
+			},
+			Reason: "gcloud auth/config mutation",
+		},
+		&rules.NestedSubcommand{
+			RuleName: "docker-login",
+			Program:  "docker",
+			Destructive: []string{
+				"login", "logout",
+			},
+			Reason: "docker login writes ~/.docker/config.json",
+		},
+
 		// `<shell> -c '<script>'` — the inner script is opaque to the
 		// outer AST parser, so no matcher can reason about what will
 		// actually execute. Always prompt the user.

@@ -114,7 +114,16 @@ func (p *Pattern) compile() error {
 	quoted := regexp.QuoteMeta(p.Prefix)
 	expanded := strings.ReplaceAll(quoted, `\*`, `.*`)
 	// Anchor at start; the entry is a prefix match.
-	re, err := regexp.Compile(`^` + expanded + `($|[\s|;&<>])`)
+	//
+	// Trailing-char class deliberately does NOT include `<` or `>`:
+	// a legacy allow like `Bash(echo:*)` must NOT match
+	// `echo evil > /etc/hosts` — redirects change semantics by
+	// writing/reading a path, which needs fresh safety evaluation.
+	// Step 5's redir-aware PathAccess + step 6's extended-credentials
+	// rules catch the dangerous targets. Pipes (`|`), sequences
+	// (`;`), and background (`&`) stay in the class to preserve
+	// benign shapes like `ls | head`.
+	re, err := regexp.Compile(`^` + expanded + `($|[\s|;&])`)
 	if err != nil {
 		return fmt.Errorf("compile pattern %q: %w", p.Prefix, err)
 	}

@@ -12,12 +12,26 @@
 package rules
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/RobinUS2/claude-guard/internal/shellparse"
 )
+
+// userHome is the current user's home directory, resolved at package
+// init. Used by normalizePath to fold literal expansions like
+// `/Users/robin/.ssh/id_rsa` back into the symbolic `$HOME/...` form
+// so PathAccess rules written with `~` match both spellings.
+// Empty when the lookup fails (rare; harmless — just means we skip
+// the expanded-form fold-in).
+var userHome = func() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return ""
+}()
 
 // Verdict is the result of evaluating a single rule against a parsed script.
 type Verdict int
@@ -655,6 +669,14 @@ type PathAccess struct {
 	Paths           []string // glob-like; supports ~, *, **
 	ExcludePrograms []string // programs allowed to access these paths (e.g. ssh, git)
 	Reason          string
+
+	// WriteOnly restricts the rule to fire ONLY when the path appears
+	// as the TARGET of a redirection (`> path`, `>> path`, or a
+	// ProcSubst target). Positional args and redirect SOURCES are
+	// ignored. Used for persistence-tamper-style rules where reading
+	// the path (`cat ~/.bashrc`) is harmless but writing
+	// (`echo evil > ~/.bashrc`) establishes attacker persistence.
+	WriteOnly bool
 }
 
 func (r *PathAccess) Name() string { return r.RuleName }
@@ -662,18 +684,71 @@ func (r *PathAccess) Kind() string { return "path_access" }
 
 func (r *PathAccess) Eval(p *shellparse.Parsed) (Verdict, string) {
 	for _, c := range p.Calls {
-		if c.HasUnresolved {
-			continue // conservative
-		}
 		if stringIn(baseProgram(c.Program), r.ExcludePrograms) {
 			continue
 		}
-		for _, arg := range c.Positional {
-			if arg == "" {
+		// Positional args — existing behavior. Only consulted when
+		// the call's positionals are fully resolved (conservative)
+		// AND the rule is not WriteOnly (positional args are often
+		// read targets for cat/grep/less etc.).
+		if !r.WriteOnly && !c.HasUnresolved {
+			for _, arg := range c.Positional {
+				if arg == "" {
+					continue
+				}
+				if pathMatchesAny(arg, r.Paths) {
+					return Match, r.Reason
+				}
+			}
+		}
+		// Redirection words (Stmt.Redirs). `cat < ~/.ssh/id_rsa`
+		// puts id_rsa here, not in Positional. In WriteOnly mode,
+		// only target-direction redirs (`>`, `>>`) match — source
+		// redirs (`<`) are reads.
+		for _, rw := range c.RedirWords {
+			if !rw.Resolved {
 				continue
 			}
-			if pathMatchesAny(arg, r.Paths) {
+			if r.WriteOnly && rw.Direction != shellparse.RedirTarget {
+				continue
+			}
+			if pathMatchesAny(rw.Path, r.Paths) {
 				return Match, r.Reason
+			}
+		}
+		// ProcSubst-derived redirs. `tee >(cat > /etc/shadow)` writes
+		// to /etc/shadow from inside the ProcSubst — flattened here.
+		for _, rw := range c.DerivedRedirs {
+			if !rw.Resolved {
+				continue
+			}
+			if r.WriteOnly && rw.Direction != shellparse.RedirTarget {
+				continue
+			}
+			if pathMatchesAny(rw.Path, r.Paths) {
+				return Match, r.Reason
+			}
+		}
+		// ProcSubst-derived inner calls. `diff <(cat ~/.ssh/id_rsa) /tmp/a`
+		// has an inner `cat ~/.ssh/id_rsa` whose positional we need
+		// to inspect. In WriteOnly mode, skip — inner positional
+		// args are almost always read targets.
+		if !r.WriteOnly {
+			for _, dc := range c.DerivedCalls {
+				if dc == nil || dc.HasUnresolved {
+					continue
+				}
+				if stringIn(baseProgram(dc.Program), r.ExcludePrograms) {
+					continue
+				}
+				for _, arg := range dc.Positional {
+					if arg == "" {
+						continue
+					}
+					if pathMatchesAny(arg, r.Paths) {
+						return Match, r.Reason
+					}
+				}
 			}
 		}
 	}
@@ -761,6 +836,10 @@ func pathMatchesAny(arg string, paths []string) bool {
 
 // normalizePath canonicalizes a path arg or pattern for comparison:
 //   - tilde expansion: `~` and `~/foo` → `$HOME` / `$HOME/foo`
+//   - literal-home fold-in: `/Users/robin/foo` → `$HOME/foo` (when
+//     the current process's home dir prefix matches). Catches shell-
+//     expanded forms; a rule written as `~/.bashrc` also matches
+//     `/Users/<user>/.bashrc`.
 //   - lexical cleanup (absolute paths only): `/tmp/../etc` → `/etc`,
 //     `/./etc` → `/etc`, `//etc` → `/etc`
 //
@@ -780,6 +859,18 @@ func normalizePath(p string) string {
 	}
 	if p == "~" {
 		return "$HOME"
+	}
+	// Fold-in: `/Users/robin/.bashrc` → `$HOME/.bashrc` so rules
+	// written with `~/` catch shell-expanded literal paths too. Done
+	// AFTER filepath.Clean so `/Users/robin/../other` has been
+	// resolved to `/Users/other` first (which won't fold in).
+	if userHome != "" {
+		if p == userHome {
+			return "$HOME"
+		}
+		if strings.HasPrefix(p, userHome+"/") {
+			return "$HOME" + p[len(userHome):]
+		}
 	}
 	return p
 }

@@ -77,6 +77,38 @@ const (
 	NestProcSub
 )
 
+// RedirDirection classifies a shell redirection as reading FROM a path
+// or writing TO a path. Both directions are security-relevant: reading
+// from ~/.ssh/id_rsa is an exfil shape; writing to /etc/hosts is a
+// tamper shape.
+type RedirDirection int
+
+const (
+	// RedirSource: the redirection reads FROM the target word
+	// (`<`, `<<`, `<<-`, `<<<`, `<&`).
+	RedirSource RedirDirection = iota
+	// RedirTarget: the redirection writes TO the target word
+	// (`>`, `>>`, `>|`, `&>`, `&>>`, `>&`, `<>` - bidirectional counts
+	// as Target since it can write).
+	RedirTarget
+)
+
+// RedirWord is a single redirection target captured during parse.
+// Matchers iterate a Call's RedirWords and DerivedRedirs to check
+// paths against the PathAccess block list.
+type RedirWord struct {
+	// Path is the literal path the redirection refers to. Empty and
+	// Resolved=false when the word is an unresolvable expansion
+	// (ParamExp, CmdSubst, etc.).
+	Path string
+	// Direction classifies source vs target.
+	Direction RedirDirection
+	// Resolved is false when Path couldn't be statically resolved;
+	// matchers must ignore such entries (same conservatism as
+	// HasUnresolved on Call).
+	Resolved bool
+}
+
 // Call describes one command invocation.
 type Call struct {
 	// Program is the best-effort literal program name. Empty if the program
@@ -106,6 +138,26 @@ type Call struct {
 	// Expr is the underlying syntax node. Matchers that need finer detail
 	// (e.g. redirection targets of this specific call) can inspect it.
 	Expr *syntax.CallExpr
+
+	// RedirWords are the redirection sources/targets attached to this
+	// Call's enclosing Stmt (if any). Populated during extract().
+	// Tier-1 PathAccess walks this so `cat < ~/.ssh/id_rsa` catches
+	// id_rsa as a source even though it's not in Positional.
+	RedirWords []RedirWord
+
+	// DerivedRedirs are redirections found INSIDE process-substitution
+	// arguments to this Call. `tee >(cat > /etc/evil)` parses with
+	// /etc/evil buried inside a ProcSubst's inner Stmt.Redirs — we
+	// flatten it out here so PathAccess can treat it like a direct
+	// redirection target.
+	DerivedRedirs []RedirWord
+
+	// DerivedCalls are inner CallExprs found inside process-substitution
+	// args. For `tee >(cat /etc/shadow)`, DerivedCalls contains a Call
+	// for `cat /etc/shadow` so PathAccess can walk its positionals.
+	// Only immediate inner calls; deeply nested ProcSubsts not
+	// recursively flattened (rare; would fall to LLM).
+	DerivedCalls []*Call
 }
 
 // HasEnvVarArg returns true when any of this call's arguments (NOT the
@@ -286,6 +338,99 @@ func (p *Parsed) extract() {
 	if p.Features.HasMultiStmt {
 		p.Features.HasBinaryOp = true
 	}
+
+	// Post-pass: attach Stmt.Redirs to each Call via CallExpr pointer
+	// identity. Redirs live on syntax.Stmt, Calls carry syntax.CallExpr,
+	// and collectFromCmd doesn't see the enclosing Stmt — so we walk
+	// once at the end and match them up.
+	redirByCallExpr := map[*syntax.CallExpr][]RedirWord{}
+	syntax.Walk(p.File, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok || len(stmt.Redirs) == 0 || stmt.Cmd == nil {
+			return true
+		}
+		// Find the CallExpr this Stmt dispatches to. Pipelines nest
+		// inside BinaryCmd; recurse into them and attach to whichever
+		// sub-Stmt owned the redir. mvdan stores redirs on the
+		// innermost Stmt actually, so the common case is stmt.Cmd is
+		// a CallExpr. BinaryCmd case: stmt.Redirs is empty (each side
+		// of the pipe has its own Stmt.Redirs).
+		if ce, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+			redirByCallExpr[ce] = append(redirByCallExpr[ce], redirWordsFromStmt(stmt)...)
+		}
+		return true
+	})
+	for i := range p.Calls {
+		if p.Calls[i].Expr == nil {
+			continue
+		}
+		if rw, ok := redirByCallExpr[p.Calls[i].Expr]; ok {
+			p.Calls[i].RedirWords = rw
+		}
+	}
+
+	// Post-pass: walk each Call's args for ProcSubst. For each one
+	// found, pull the inner Stmt.Redirs and inner CallExprs up into
+	// the outer Call as DerivedRedirs/DerivedCalls. Only inspects
+	// immediate ProcSubst children; nested ProcSubst-in-ProcSubst
+	// falls through to the LLM tier (rare shape).
+	for i := range p.Calls {
+		c := &p.Calls[i]
+		if c.Expr == nil {
+			continue
+		}
+		for _, arg := range c.Expr.Args {
+			if arg == nil {
+				continue
+			}
+			for _, part := range arg.Parts {
+				ps, ok := part.(*syntax.ProcSubst)
+				if !ok {
+					continue
+				}
+				for _, innerStmt := range ps.Stmts {
+					if innerStmt == nil {
+						continue
+					}
+					c.DerivedRedirs = append(c.DerivedRedirs, redirWordsFromStmt(innerStmt)...)
+					if innerCall, ok := innerStmt.Cmd.(*syntax.CallExpr); ok {
+						derived := resolveCall(innerCall)
+						derived.Nesting = NestProcSub
+						c.DerivedCalls = append(c.DerivedCalls, &derived)
+					}
+				}
+			}
+		}
+	}
+}
+
+// redirWordsFromStmt converts a syntax.Stmt's Redirs into RedirWord
+// values, resolving each word to a literal when possible. Unresolvable
+// redirs (e.g. `< $FILE`) are still returned with Resolved=false so
+// matchers can see "this Stmt has a redir we couldn't analyze" and
+// make a conservative decision.
+func redirWordsFromStmt(stmt *syntax.Stmt) []RedirWord {
+	if stmt == nil || len(stmt.Redirs) == 0 {
+		return nil
+	}
+	out := make([]RedirWord, 0, len(stmt.Redirs))
+	for _, r := range stmt.Redirs {
+		if r == nil || r.Word == nil {
+			continue
+		}
+		path, ok := resolveWord(r.Word)
+		dir := RedirTarget
+		switch r.Op {
+		case syntax.RdrIn, syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc, syntax.DplIn:
+			dir = RedirSource
+		}
+		out = append(out, RedirWord{
+			Path:      path,
+			Direction: dir,
+			Resolved:  ok,
+		})
+	}
+	return out
 }
 
 // collectFromStmt walks a single statement, building Pipelines and Calls.

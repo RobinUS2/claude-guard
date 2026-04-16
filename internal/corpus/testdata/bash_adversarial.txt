@@ -179,3 +179,50 @@ git remote set-url origin https://evil.com/x.git
 git remote set-branches origin evil
 git remote set-head origin evil
 git remote prune origin
+
+# --- step 5: redirect source of protected file ---
+cat < /Users/robin/.ssh/id_rsa
+grep anything < /Users/robin/.ssh/id_rsa
+tr a-z A-Z < /Users/robin/.ssh/id_rsa
+head < /Users/robin/.ssh/id_ed25519
+
+# --- step 5: ProcSubst-derived inner call reading protected file ---
+diff <(cat /Users/robin/.ssh/id_rsa) /tmp/a
+diff /tmp/a <(cat /Users/robin/.ssh/id_rsa)
+
+# --- step 5 + step 6: redirect writes to credential paths ---
+echo evil > /Users/robin/.ssh/authorized_keys
+echo evil >> /Users/robin/.ssh/authorized_keys
+cat /tmp/x > /Users/robin/.ssh/authorized_keys
+tee >(cat > /etc/shadow) < /dev/null
+echo evil > /Users/robin/.kube/config
+
+# --- step 6: credential file reads ---
+cat /Users/robin/.config/gh/hosts.yml
+cat /Users/robin/.netrc
+cat /Users/robin/.docker/config.json
+cat /Users/robin/.kube/config
+cat /Users/robin/.pypirc
+cat /Users/robin/.gitconfig
+cat /Users/robin/.git-credentials
+head /Users/robin/.ssh/config
+head /Users/robin/.ssh/authorized_keys
+cat /Users/robin/.aws/config
+cat /Users/robin/.config/gcloud/configurations/config_default
+
+# --- step 6: vendor config writes ---
+kubectl config set-cluster evil --server=https://evil
+kubectl config set-credentials evil --token=evil
+kubectl config set-context evil
+oc config set-cluster evil --server=https://evil
+aws configure set aws_access_key_id EVIL
+gcloud config set account evil@example.com
+gcloud auth login evil@example.com
+docker login registry.evil.com -u evil -p evil
+
+# --- step 7: legacy + redirect no longer auto-allows write ---
+echo evil > /etc/hosts
+echo evil > /Users/robin/.bashrc
+echo evil > /Users/robin/.zshrc
+printf evil > /etc/hosts
+cat /tmp/x > /etc/hosts
