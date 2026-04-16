@@ -185,7 +185,8 @@ func prettyPrint(rec clog.ReadRecord) {
 		tier = fmt.Sprintf("%s/%s", rec.Tier, rec.Rule)
 	}
 
-	fmt.Printf("%s %s [%-28s] %s\n", ts, verdictMark, tier, cmd)
+	fmt.Printf("%s %s %-10s [%-28s] %s\n",
+		ts, verdictMark, formatLatency(rec.LatencyUS), tier, cmd)
 
 	if rec.Shadow != nil {
 		if rec.Shadow.Tier1Block != "" {
@@ -203,6 +204,24 @@ func prettyPrint(rec clog.ReadRecord) {
 	}
 	if rec.Description != "" {
 		fmt.Printf("         desc:   %s\n", rec.Description)
+	}
+}
+
+// formatLatency renders a µs latency compactly for human tailing:
+//   <1ms   → "  123µs"
+//   <1s    → " 47ms"
+//   >=1s   → " 2.4s"
+// Right-padded inside a 10-char slot so tier/command columns stay aligned.
+func formatLatency(us int64) string {
+	switch {
+	case us == 0:
+		return ""
+	case us < 1000:
+		return fmt.Sprintf("%dµs", us)
+	case us < 1_000_000:
+		return fmt.Sprintf("%dms", us/1000)
+	default:
+		return fmt.Sprintf("%.1fs", float64(us)/1_000_000)
 	}
 }
 
