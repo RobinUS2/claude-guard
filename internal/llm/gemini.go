@@ -39,9 +39,11 @@ type GeminiClassifier struct {
 //   - flash:      6s  (slower but still in the synchronous hook budget)
 //   - pro:        20s (verifier only, runs in background)
 //
-// MaxTokens 1500: even with strict responseSchema, Gemini sometimes
-// generates more tokens than expected (long reason fields with
-// backslash-escaped quotes blow up the token count fast).
+// MaxTokens 3000: even with the tightened reason schema (20-word cap)
+// Gemini occasionally produces verbose JSON for complex pipelines. The
+// cap is only a ceiling — actual billing is for tokens emitted — so
+// over-provisioning has no cost impact and prevents the parse_error
+// failure mode we saw for long bq/SQL commands.
 func NewGemini(apiKey, model string) *GeminiClassifier {
 	if model == "" {
 		model = DefaultGeminiModel
@@ -55,7 +57,7 @@ func NewGemini(apiKey, model string) *GeminiClassifier {
 		ModelName:    model,
 		BaseURL:      "https://generativelanguage.googleapis.com",
 		Timeout:      timeout,
-		MaxTokens:    1500,
+		MaxTokens:    3000,
 		SystemPrompt: DefaultSystemPrompt(),
 		HTTP:         &http.Client{Timeout: timeout},
 	}
@@ -218,7 +220,7 @@ var classifierResponseSchema = &geminiResponseSchema{
 		},
 		"reason": {
 			Type:        "string",
-			Description: "1-2 sentence plain-English explanation",
+			Description: "one short sentence, max 20 words, plain English",
 		},
 		"variable_slots": {
 			Type:        "array",

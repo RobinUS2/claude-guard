@@ -41,7 +41,7 @@ func NewAnthropic(apiKey, model string) *AnthropicClassifier {
 		ModelName:    model,
 		BaseURL:      "https://api.anthropic.com",
 		Timeout:      3 * time.Second,
-		MaxTokens:    200,
+		MaxTokens:    400,
 		SystemPrompt: DefaultSystemPrompt(),
 		HTTP:         &http.Client{Timeout: 3 * time.Second},
 	}

@@ -52,7 +52,7 @@ schema:
 {
   "decision": "safe" | "unsafe" | "unsure",
   "category": "read_only_query" | "file_read" | "file_write_scoped" | "external_write" | "destructive" | "exfil" | "unknown",
-  "reason": "1-2 sentence plain-English explanation"
+  "reason": "one short sentence, max 20 words, plain English"
 }
 
 The reason field MUST NOT quote secrets, tokens, passwords, or
