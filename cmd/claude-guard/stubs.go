@@ -14,10 +14,8 @@ func stub(name string) int {
 	return 64
 }
 
-// cmdTest, cmdDoctor, cmdMigrate live in their own files now.
-func cmdExplain(_ []string) int    { return stub("explain") }
-func cmdReplay(_ []string) int     { return stub("replay") }
-func cmdStats(_ []string) int      { return stub("stats") }
-func cmdLint(_ []string) int       { return stub("lint") }
+// cmdTest, cmdDoctor, cmdMigrate, cmdBackup, cmdStats, cmdExplain,
+// cmdLint, cmdTrust live in their own files.
+func cmdReplay(args []string) int  { return cmdExplain(args) } // replay is an alias
 func cmdEvalPrompt(_ []string) int { return stub("eval-prompt") }
 func cmdBench(_ []string) int      { return stub("bench") }

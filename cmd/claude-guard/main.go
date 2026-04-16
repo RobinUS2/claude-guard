@@ -27,6 +27,10 @@ Subcommands:
   doctor              health check: config, schema, API key, hook wiring
   migrate             settings.json allow-list → legacy-patterns.yaml
   backup [--dest D]   copy logs + cache + config to backup destination (default: Google Drive)
+  stats [--since T]   aggregate decisions.jsonl: verdicts, tiers, latency, cache hit rate
+  explain <id|--last> re-run a historical decision against the current rules
+  lint                validate config + run the adversarial corpus as self-tests
+  trust "<cmd>"       override a verifier disagreement (future cache hits ALLOW)
   lint                validate config.yaml and run bundled rule tests
   eval-prompt         run the classifier against the eval corpus
   bench               engine latency against a corpus (no LLM)
@@ -65,6 +69,8 @@ func run(args []string) int {
 		return cmdMigrate(args[1:])
 	case "backup":
 		return cmdBackup(args[1:])
+	case "trust":
+		return cmdTrust(args[1:])
 	case "lint":
 		return cmdLint(args[1:])
 	case "eval-prompt":

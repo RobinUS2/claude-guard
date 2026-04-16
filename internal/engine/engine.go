@@ -182,6 +182,13 @@ func (e *Engine) AwaitVerifications(deadline time.Duration) bool {
 	}
 }
 
+// GitBranchOf is the exported name used by cmd/claude-guard/trust.go
+// so subcommand code can reconstruct the same cache key the engine
+// would compute. Keeping the implementation in engine.go means the
+// definition of "git branch for cache key purposes" lives with the
+// rest of the cache key composition logic.
+func GitBranchOf(cwd string) string { return gitBranchOf(cwd) }
+
 // gitBranchOf returns a coarse branch identity for cache key purposes.
 // It does NOT exec `git` — that would be too slow on the hot path
 // (~10ms per call) and the answer would be wrong inside subshells anyway.
@@ -390,6 +397,8 @@ func (e *Engine) Decide(in Input) Output {
 				Tier:     "llm",
 				Provider: e.llm.Provider(),
 				Model:    e.llm.Model(),
+				Command:  in.Command,
+				CWD:      in.CWD,
 			}, 90*24*time.Hour)
 			out.Shadow.Tier4LLM = "safe:" + scopeStr
 			// Spawn the async verifier (cross-provider second opinion).

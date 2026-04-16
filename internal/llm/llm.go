@@ -154,6 +154,10 @@ func AutoSelect(prefer string, getenv func(string) string) Classifier {
 				return NewAnthropic(v, DefaultAnthropicModel)
 			}
 		}
+		// Last resort: try token-vault. Bounded timeout; silent on miss.
+		if v := lookupTokenVaultAnthropic(); v != "" {
+			return NewAnthropic(v, DefaultAnthropicModel)
+		}
 		return nil
 	}
 	tryGemini := func() Classifier {

@@ -61,6 +61,18 @@ type Entry struct {
 	StoredAt  time.Time `json:"stored_at"`
 	ExpiresAt time.Time `json:"expires_at"`
 
+	// Command is the literal command text this entry was created for.
+	// Stored so operator-facing tooling (`trust "<cmd>"`, `--list`)
+	// can look up an entry without needing to rebuild the exact cache
+	// key (which depends on engine-internal state like RulesHash).
+	// Truncated to 2KB on write.
+	Command string `json:"command,omitempty"`
+
+	// CWD is the directory the command was run in (for project-scoped
+	// entries). Empty for global-scope entries. Carried for audit and
+	// disambiguation in `trust --list` output.
+	CWD string `json:"cwd,omitempty"`
+
 	// Verification fields — populated asynchronously by a slower model
 	// (typically the cross-provider one). Verified means "another model
 	// has reviewed this entry"; Disagreement means "the verifier said
@@ -76,6 +88,17 @@ type Entry struct {
 	VerifierVerdict  Verdict   `json:"verifier_verdict,omitempty"`
 	VerifierReason   string    `json:"verifier_reason,omitempty"`
 	Disagreement     bool      `json:"disagreement,omitempty"`
+
+	// TrustedAt is set by `claude-guard trust "<cmd>"` when a user
+	// explicitly overrides a verifier disagreement. Preserved on the
+	// entry so an auditor can answer "which cached allows did a
+	// human override?" without grep'ing logs. Zero time means no
+	// explicit trust action was ever taken.
+	TrustedAt time.Time `json:"trusted_at,omitempty"`
+
+	// TrustedReason is an optional note the user passed with --reason
+	// when calling `trust`. Empty when trust was invoked without one.
+	TrustedReason string `json:"trusted_reason,omitempty"`
 }
 
 // EffectiveVerdict returns the verdict that should be applied to a
@@ -110,7 +133,15 @@ type KeyInputs struct {
 // shape changes in a way that should invalidate existing entries.
 //
 // v2: added scope-aware keys (global key strips cwd + branch).
-const SchemaVersion = "2"
+// v3: added Command + CWD + TrustedAt/TrustedReason fields on Entry.
+//     Schema bump invalidates v2 entries — old cache is orphaned (no
+//     negative consequence: new entries are written as v3 on next miss).
+const SchemaVersion = "3"
+
+// MaxCommandInEntry caps how many bytes of a command we persist in
+// an entry. Commands occasionally include multi-KB heredocs or
+// embedded JSON payloads; truncating here keeps per-entry files small.
+const MaxCommandInEntry = 2048
 
 // Key returns the deterministic project-scoped cache key for these
 // inputs. Project keys include cwd + git_branch — they apply only to
@@ -199,6 +230,10 @@ func (c *Cache) Put(key string, e Entry, ttl time.Duration) error {
 	}
 	if ttl > 0 {
 		e.ExpiresAt = e.StoredAt.Add(ttl)
+	}
+	// Truncate oversized command text so per-entry files stay small.
+	if len(e.Command) > MaxCommandInEntry {
+		e.Command = e.Command[:MaxCommandInEntry-3] + "..."
 	}
 
 	data, err := json.MarshalIndent(&e, "", "  ")

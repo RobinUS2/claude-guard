@@ -2,48 +2,38 @@ package engine
 
 import (
 	"bufio"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/corpus"
 )
 
-// Golden corpus tests — feed every command from testdata/ files
-// through the engine and assert the verdict matches the file label.
+// Golden corpus tests — feed every command from the embedded corpus
+// (internal/corpus) through the engine and assert the verdict matches
+// the file label.
 //
 // Run on every `make test`. Catches regressions when rule changes
 // silently shift behavior. The corpus is exercise of tier 1 + tier 2
 // only — no LLM, no cache, no legacy. Engine in enforce mode.
 //
-// To add a case: edit testdata/bash_<verdict>.txt and re-run tests.
-// To debug a failure: the test reports the line number, command, and
-// the actual verdict + tier + rule that fired.
+// To add a case: edit internal/corpus/testdata/bash_<verdict>.txt and
+// re-run tests. The CLI `lint` subcommand runs the same corpus via the
+// same embedded strings, so a green `go test` implies a green `lint`.
 
-func loadCorpus(t *testing.T, name string) []string {
+// loadCorpusString splits an embedded corpus string into commands,
+// skipping blank lines and lines starting with '#'.
+func loadCorpusString(t *testing.T, content string) []string {
 	t.Helper()
-	_, thisFile, _, _ := runtime.Caller(0)
-	root := filepath.Dir(filepath.Dir(filepath.Dir(thisFile))) // ../../.. → repo root
-	path := filepath.Join(root, "testdata", name)
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("open corpus %s: %v", path, err)
-	}
-	defer f.Close()
-
 	var commands []string
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 1<<16), 1<<20)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		commands = append(commands, line)
-	}
-	if err := scanner.Err(); err != nil {
-		t.Fatalf("scan corpus %s: %v", path, err)
 	}
 	return commands
 }
@@ -57,7 +47,7 @@ func goldenEngine(t *testing.T) *Engine {
 
 func TestGoldenCorpus_BashAllow(t *testing.T) {
 	e := goldenEngine(t)
-	cmds := loadCorpus(t, "bash_allow.txt")
+	cmds := loadCorpusString(t, corpus.Allow)
 	if len(cmds) == 0 {
 		t.Fatal("empty corpus")
 	}
@@ -75,7 +65,7 @@ func TestGoldenCorpus_BashAllow(t *testing.T) {
 
 func TestGoldenCorpus_BashDeny(t *testing.T) {
 	e := goldenEngine(t)
-	cmds := loadCorpus(t, "bash_deny.txt")
+	cmds := loadCorpusString(t, corpus.Deny)
 	if len(cmds) == 0 {
 		t.Fatal("empty corpus")
 	}
@@ -93,7 +83,7 @@ func TestGoldenCorpus_BashDeny(t *testing.T) {
 
 func TestGoldenCorpus_BashContinue(t *testing.T) {
 	e := goldenEngine(t)
-	cmds := loadCorpus(t, "bash_continue.txt")
+	cmds := loadCorpusString(t, corpus.Continue)
 	if len(cmds) == 0 {
 		t.Fatal("empty corpus")
 	}
@@ -114,7 +104,7 @@ func TestGoldenCorpus_BashContinue(t *testing.T) {
 // attempts. A regression here is a security incident.
 func TestGoldenCorpus_BashAdversarial(t *testing.T) {
 	e := goldenEngine(t)
-	cmds := loadCorpus(t, "bash_adversarial.txt")
+	cmds := loadCorpusString(t, corpus.Adversarial)
 	if len(cmds) == 0 {
 		t.Fatal("empty adversarial corpus")
 	}
