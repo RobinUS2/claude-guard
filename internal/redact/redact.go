@@ -118,8 +118,24 @@ func (r *Redactor) Scan(command string) Result {
 	out := command
 	var kinds []string
 	for _, p := range r.replace {
-		if p.Regex.MatchString(out) {
-			out = p.Regex.ReplaceAllString(out, p.Placeholder)
+		replaced := false
+		out = p.Regex.ReplaceAllStringFunc(out, func(match string) string {
+			// Shell-var references (api_key=$VAR) contain no secret in
+			// the literal text — preserve the literal so the LLM sees
+			// the shell-var shape, not an opaque placeholder.
+			if isShellVarReference(match) {
+				return match
+			}
+			replaced = true
+			// If the pattern has a capture group, prepend it to the
+			// placeholder so the key name is preserved for the LLM
+			// (api_key=realvalue → api_key=<REDACTED-API-KEY>).
+			if subs := p.Regex.FindStringSubmatch(match); len(subs) >= 2 {
+				return subs[1] + p.Placeholder
+			}
+			return p.Placeholder
+		})
+		if replaced {
 			kinds = append(kinds, p.Name)
 		}
 	}
@@ -240,12 +256,6 @@ func DefaultSkipPatterns() []Pattern {
 		// Google API keys
 		{Name: "google-api-key", Regex: `AIza[0-9A-Za-z\-_]{35}`},
 
-		// Generic api_key=, password=, token=, secret=
-		{Name: "generic-api-key", Regex: `(?i)\bapi[_-]?key\s*[:=]\s*[^\s'"]+`},
-		{Name: "generic-password", Regex: `(?i)\bpassword\s*[:=]\s*[^\s'"]+`},
-		{Name: "generic-token", Regex: `(?i)\btoken\s*[:=]\s*[^\s'"]+`},
-		{Name: "generic-secret", Regex: `(?i)\bsecret\s*[:=]\s*[^\s'"]+`},
-
 		// Database connection strings with credentials
 		{Name: "postgres-uri-creds", Regex: `postgres(?:ql)?://[^:/\s]+:[^@\s]+@`},
 		{Name: "mysql-uri-creds", Regex: `mysql://[^:/\s]+:[^@\s]+@`},
@@ -281,6 +291,49 @@ func DefaultReplacePatterns() []Pattern {
 			Name:        "uuid",
 			Regex:       `[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}`,
 			Placeholder: "<REDACTED-UUID>",
+		},
+		// Generic credential-shape assignments: api_key=…, password=…,
+		// token=…, secret=…. REPLACE rather than SKIP so the LLM can
+		// still see the command structure and approve safe shapes
+		// (e.g. curl to localhost with an X-API-Key header). The VALUE
+		// never leaves the machine — only the placeholder does.
+		//
+		// Two capture groups per pattern:
+		//   $1 = prefix (optional opening quote + key + optional
+		//        closing quote + separator + optional opening quote)
+		//   $2 = value (one or more chars that are not whitespace or
+		//        quote — quotes around the value sit OUTSIDE the
+		//        match so they are preserved in the output)
+		//
+		// Scan()'s REPLACE loop substitutes the match with $1 plus
+		// the placeholder, so "api_key=realvalue" → "api_key=<REDACTED-API-KEY>",
+		// api_key="realvalue" → api_key="<REDACTED-API-KEY>" (closing
+		// quote preserved because it's outside the match), and
+		// "api_key":"realvalue" (JSON) → "api_key":"<REDACTED-API-KEY>".
+		//
+		// Specific high-entropy patterns (anthropic-key, github-pat,
+		// aws-access-key, jwt, …) remain in SKIP and run first, so
+		// real tokens embedded in a generic shape still never reach
+		// the LLM.
+		{
+			Name:        "generic-api-key",
+			Regex:       `(?i)\b(["']?api[_-]?key["']?\s*[:=]\s*["']?)([^"'\s]+)`,
+			Placeholder: "<REDACTED-API-KEY>",
+		},
+		{
+			Name:        "generic-password",
+			Regex:       `(?i)\b(["']?password["']?\s*[:=]\s*["']?)([^"'\s]+)`,
+			Placeholder: "<REDACTED-PASSWORD>",
+		},
+		{
+			Name:        "generic-token",
+			Regex:       `(?i)\b(["']?token["']?\s*[:=]\s*["']?)([^"'\s]+)`,
+			Placeholder: "<REDACTED-TOKEN>",
+		},
+		{
+			Name:        "generic-secret",
+			Regex:       `(?i)\b(["']?secret["']?\s*[:=]\s*["']?)([^"'\s]+)`,
+			Placeholder: "<REDACTED-SECRET>",
 		},
 	})
 }

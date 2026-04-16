@@ -68,17 +68,248 @@ func TestSkip_PostgresURI(t *testing.T) {
 	}
 }
 
-func TestSkip_GenericKeyValue(t *testing.T) {
+func TestReplace_GenericKeyValue(t *testing.T) {
+	r := New(nil, nil)
+	cases := []struct {
+		cmd             string
+		wantKind        string
+		wantPlaceholder string
+		wantPrefix      string // key prefix that must be preserved
+		wantLeak        string // value that must NOT appear in redacted
+	}{
+		{
+			cmd:             `curl -d "api_key=secretvalue123" https://api.example.com`,
+			wantKind:        "generic-api-key",
+			wantPlaceholder: "<REDACTED-API-KEY>",
+			wantPrefix:      "api_key=",
+			wantLeak:        "secretvalue123",
+		},
+		{
+			cmd:             `curl -d "password=hunter2"`,
+			wantKind:        "generic-password",
+			wantPlaceholder: "<REDACTED-PASSWORD>",
+			wantPrefix:      "password=",
+			wantLeak:        "hunter2",
+		},
+		{
+			cmd:             `TOKEN=abcdef ./run`,
+			wantKind:        "generic-token",
+			wantPlaceholder: "<REDACTED-TOKEN>",
+			wantPrefix:      "TOKEN=",
+			wantLeak:        "abcdef",
+		},
+		{
+			cmd:             `SECRET=topsecret123 ./run`,
+			wantKind:        "generic-secret",
+			wantPlaceholder: "<REDACTED-SECRET>",
+			wantPrefix:      "SECRET=",
+			wantLeak:        "topsecret123",
+		},
+		{
+			cmd:             `curl -H "X-API-Key: test-api-key-12345" http://localhost:8090/mcp`,
+			wantKind:        "generic-api-key",
+			wantPlaceholder: "<REDACTED-API-KEY>",
+			wantPrefix:      "API-Key:",
+			wantLeak:        "test-api-key-12345",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			res := r.Scan(tc.cmd)
+			if res.Decision != Send {
+				t.Fatalf("Decision = %v (reason=%q), want Send", res.Decision, res.SkipReason)
+			}
+			if !strings.Contains(res.Redacted, tc.wantPlaceholder) {
+				t.Errorf("Redacted = %q (missing %s)", res.Redacted, tc.wantPlaceholder)
+			}
+			if !strings.Contains(res.Redacted, tc.wantPrefix) {
+				t.Errorf("Redacted = %q (missing prefix %q — key name should be preserved)", res.Redacted, tc.wantPrefix)
+			}
+			if strings.Contains(res.Redacted, tc.wantLeak) {
+				t.Errorf("Redacted = %q (leaked %q)", res.Redacted, tc.wantLeak)
+			}
+			found := false
+			for _, k := range res.ReplacedKinds {
+				if k == tc.wantKind {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("ReplacedKinds = %v, missing %q", res.ReplacedKinds, tc.wantKind)
+			}
+		})
+	}
+}
+
+// Regression: high-entropy tokens embedded in a generic key=value shape
+// must still Skip (specific SKIP pattern runs before generic REPLACE).
+func TestSpecificPatternsSkipInsideGenericShape(t *testing.T) {
 	r := New(nil, nil)
 	cases := []string{
-		`curl -d "api_key=secretvalue123" https://api.example.com`,
-		`curl -d "password=hunter2"`,
-		`SECRET=topsecret123 ./run`,
+		`curl -d "api_key=sk-ant-api03-realtokenaaabbbcccdddeee"`,   // anthropic inside api_key=
+		`curl -d "token=ghp_1234567890abcdefghijklmnopqr"`,           // github PAT inside token=
+		`curl -d "secret=AKIAIOSFODNN7EXAMPLE"`,                      // AWS inside secret=
+		`curl -d "password=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.sig-abc-def-ghi"`, // JWT inside password=
 	}
 	for _, cmd := range cases {
 		t.Run(cmd, func(t *testing.T) {
-			if r.Scan(cmd).Decision != Skip {
-				t.Errorf("expected Skip")
+			res := r.Scan(cmd)
+			if res.Decision != Skip {
+				t.Errorf("Decision = %v (redacted=%q), want Skip — specific pattern should have fired before generic", res.Decision, res.Redacted)
+			}
+		})
+	}
+}
+
+// Custom proprietary token that doesn't match any specific high-entropy
+// pattern. Previously SKIP via generic-api-key, now REPLACE: value must
+// not leak to the LLM.
+func TestReplace_CustomHighEntropyToken_NotLeaked(t *testing.T) {
+	r := New(nil, nil)
+	leak := "acme_live_a7f3b2c1d4e5f6a7b8c9d0e1f2a3b4c5"
+	cmd := `curl -H "X-API-Key: ` + leak + `" https://api.example.com`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	if strings.Contains(res.Redacted, leak) {
+		t.Errorf("Redacted = %q — leaked proprietary token %q", res.Redacted, leak)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-API-KEY>") {
+		t.Errorf("Redacted = %q — missing placeholder", res.Redacted)
+	}
+}
+
+func TestReplace_MultipleGenericMatches(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `./cli --api_key=alpha123 --password=beta456 --token=gamma789`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	for _, leak := range []string{"alpha123", "beta456", "gamma789"} {
+		if strings.Contains(res.Redacted, leak) {
+			t.Errorf("Redacted = %q — leaked %q", res.Redacted, leak)
+		}
+	}
+	for _, kind := range []string{"generic-api-key", "generic-password", "generic-token"} {
+		found := false
+		for _, k := range res.ReplacedKinds {
+			if k == kind {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ReplacedKinds = %v, missing %q", res.ReplacedKinds, kind)
+		}
+	}
+}
+
+// Quoted value forms — the regex must handle shell-quoted values
+// (api_key="val", api_key='val') and JSON-style ("api_key":"val").
+// Without quote support in the regex, the value leaks to the LLM
+// because [^\s'"]+ cannot match the opening quote and the whole
+// pattern fails.
+func TestReplace_QuotedValues(t *testing.T) {
+	r := New(nil, nil)
+	cases := []struct {
+		cmd  string
+		leak string
+	}{
+		{`api_key="secretvalue123"`, "secretvalue123"},
+		{`api_key='secretvalue123'`, "secretvalue123"},
+		{`curl -d '{"api_key":"secretvalue123"}' https://api.example.com`, "secretvalue123"},
+		{`curl -d "{'api_key':'secretvalue123'}" https://api.example.com`, "secretvalue123"},
+		{`api_key: "secretvalue123"`, "secretvalue123"},
+		{`password="hunter2supersecret"`, "hunter2supersecret"},
+		{`{"password": "hunter2supersecret"}`, "hunter2supersecret"},
+		{`TOKEN="literal-token-value-xyz"`, "literal-token-value-xyz"},
+		{`secret='topsecret-with-dashes'`, "topsecret-with-dashes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			res := r.Scan(tc.cmd)
+			if res.Decision != Send {
+				t.Fatalf("Decision = %v (reason=%q), want Send", res.Decision, res.SkipReason)
+			}
+			if strings.Contains(res.Redacted, tc.leak) {
+				t.Errorf("Redacted = %q — LEAKED value %q", res.Redacted, tc.leak)
+			}
+			if !strings.Contains(res.Redacted, "<REDACTED-") {
+				t.Errorf("Redacted = %q — no placeholder substituted", res.Redacted)
+			}
+		})
+	}
+}
+
+// Shell-var refs inside quoted shapes must still be preserved, not
+// replaced. The LLM sees $VAR, not a placeholder.
+func TestReplace_QuotedShellVarRefPreserved(t *testing.T) {
+	r := New(nil, nil)
+	cases := []struct {
+		cmd     string
+		wantVar string
+	}{
+		{`api_key="$MY_KEY"`, "$MY_KEY"},
+		{`api_key="${MY_KEY}"`, "${MY_KEY}"},
+		{`curl -d '{"api_key":"$MY_KEY"}'`, "$MY_KEY"},
+		{`password="$PW"`, "$PW"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			res := r.Scan(tc.cmd)
+			if res.Decision != Send {
+				t.Fatalf("Decision = %v, want Send", res.Decision)
+			}
+			if !strings.Contains(res.Redacted, tc.wantVar) {
+				t.Errorf("Redacted = %q — literal %q should be preserved", res.Redacted, tc.wantVar)
+			}
+			if strings.Contains(res.Redacted, "<REDACTED-") {
+				t.Errorf("Redacted = %q — should NOT substitute shell-var ref", res.Redacted)
+			}
+		})
+	}
+}
+
+// When the only match in a command is a shell-var ref (which we
+// preserve), the kind must NOT appear in ReplacedKinds — nothing was
+// actually redacted.
+func TestReplace_OnlyShellVarRef_KindNotRecorded(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `curl -d "api_key=$MY_KEY" https://api.example.com`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	for _, k := range res.ReplacedKinds {
+		if k == "generic-api-key" {
+			t.Errorf("ReplacedKinds = %v — should NOT include generic-api-key when only a shell-var ref matched", res.ReplacedKinds)
+		}
+	}
+}
+
+// The (?i) flag and [_-]? class must handle API_KEY, API-KEY, api_key, apiKey.
+func TestReplace_CaseAndSeparatorVariants(t *testing.T) {
+	r := New(nil, nil)
+	cases := []string{
+		`API_KEY=abc123`,
+		`API-KEY=abc123`,
+		`apikey=abc123`,
+		`ApiKey=abc123`,
+	}
+	for _, cmd := range cases {
+		t.Run(cmd, func(t *testing.T) {
+			res := r.Scan(cmd)
+			if res.Decision != Send {
+				t.Fatalf("Decision = %v, want Send", res.Decision)
+			}
+			if strings.Contains(res.Redacted, "abc123") {
+				t.Errorf("Redacted = %q — leaked value", res.Redacted)
+			}
+			if !strings.Contains(res.Redacted, "<REDACTED-API-KEY>") {
+				t.Errorf("Redacted = %q — missing placeholder", res.Redacted)
 			}
 		})
 	}
@@ -214,6 +445,36 @@ func TestShellVarRef_GenericKeyWithVar_NotSkipped(t *testing.T) {
 	}
 }
 
+// Shell-var refs through REPLACE: value portion is just $VAR, no secret
+// in literal text. Must NOT be substituted — the literal is safer and
+// more informative for the LLM than a placeholder.
+func TestShellVarRef_GenericKey_LiteralPreserved(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `curl -d "api_key=$MY_KEY" https://api.example.com`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	if !strings.Contains(res.Redacted, "$MY_KEY") {
+		t.Errorf("Redacted = %q — literal $MY_KEY should be preserved (no secret in literal text)", res.Redacted)
+	}
+	if strings.Contains(res.Redacted, "<REDACTED-API-KEY>") {
+		t.Errorf("Redacted = %q — should NOT substitute shell-var ref", res.Redacted)
+	}
+}
+
+func TestShellVarRef_GenericKey_Braces_LiteralPreserved(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `curl -d "api_key=${MY_KEY}" https://api.example.com`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	if !strings.Contains(res.Redacted, "${MY_KEY}") {
+		t.Errorf("Redacted = %q — literal ${MY_KEY} should be preserved", res.Redacted)
+	}
+}
+
 func TestShellVarRef_RealBearerStillSkipped(t *testing.T) {
 	// Regression: the real token case must still be skipped.
 	r := New(nil, nil)
@@ -224,11 +485,24 @@ func TestShellVarRef_RealBearerStillSkipped(t *testing.T) {
 	}
 }
 
-func TestShellVarRef_RealApiKeyStillSkipped(t *testing.T) {
+// Previously SKIP; now REPLACE must substitute the literal value so it
+// never reaches the LLM. This is the core guarantee of the change:
+// real secret values are redacted, not sent as literals.
+func TestReplace_RealApiKeyLiteralRedactedNotLeaked(t *testing.T) {
 	r := New(nil, nil)
 	cmd := `curl -d "api_key=literal-value-12345" https://api.example.com`
-	if r.Scan(cmd).Decision != Skip {
-		t.Error("real api_key literal must be skipped")
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	if strings.Contains(res.Redacted, "literal-value-12345") {
+		t.Errorf("Redacted = %q — literal value MUST be substituted", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-API-KEY>") {
+		t.Errorf("Redacted = %q — missing placeholder", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "api_key=") {
+		t.Errorf("Redacted = %q — key prefix should be preserved", res.Redacted)
 	}
 }
 
