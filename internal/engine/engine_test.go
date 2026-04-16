@@ -1234,3 +1234,141 @@ func TestAsync_SyncWinsRaceRegression(t *testing.T) {
 		t.Errorf("log contains async event for sync-wins case: %s", logBuf.String())
 	}
 }
+
+// --- Unsafe-review (verifier flips false-positive unsafes) ---
+
+// TestUnsafeReview_VerifierFlipsToSafe: fast classifier returns
+// Unsafe → spawnUnsafeReview runs verifier → verifier says Safe →
+// cache gets an allow entry → next identical call hits cache.
+func TestUnsafeReview_VerifierFlipsToSafe(t *testing.T) {
+	fast := &stubClassifier{verdict: llm.VerdictUnsafe}
+	verifier := &stubClassifier{verdict: llm.VerdictSafe}
+
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	cch := cache.New(t.TempDir())
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      fast,
+		Verifier: verifier,
+		Cache:    cch,
+		AppLog:   slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)),
+	})
+
+	cmd := "cat /etc/hosts | grep -i localhost"
+	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+
+	// This call falls through to user (fast said unsafe).
+	if out.Verdict != Continue {
+		t.Errorf("first-call Verdict = %v, want Continue", out.Verdict)
+	}
+
+	// Cache should not yet have an entry — goroutine still running.
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); hit {
+		t.Error("cache entry exists prematurely; expected after AwaitVerifications")
+	}
+
+	// Wait for the unsafe-review goroutine.
+	if ok := e.AwaitVerifications(5 * time.Second); !ok {
+		t.Fatal("AwaitVerifications did not complete within 5s")
+	}
+
+	// Now cache should contain an allow entry.
+	entry, hit := cch.Get(key)
+	if !hit {
+		t.Fatal("cache missing allow entry after verifier-flip")
+	}
+	if entry.Verdict != cache.VerdictAllow {
+		t.Errorf("cache verdict = %v, want Allow", entry.Verdict)
+	}
+
+	// Verifier was called exactly once.
+	if verifier.calls != 1 {
+		t.Errorf("verifier calls = %d, want 1", verifier.calls)
+	}
+
+	// Next identical call should hit the cache.
+	out2 := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+	if out2.Verdict != Allow {
+		t.Errorf("second-call Verdict = %v, want Allow (cache hit)", out2.Verdict)
+	}
+	if out2.Tier != "cache" {
+		t.Errorf("second-call Tier = %q, want cache", out2.Tier)
+	}
+}
+
+// TestUnsafeReview_VerifierAgrees: fast says Unsafe → verifier also
+// says Unsafe → no cache write, fall-through on next call too.
+func TestUnsafeReview_VerifierAgrees(t *testing.T) {
+	fast := &stubClassifier{verdict: llm.VerdictUnsafe}
+	verifier := &stubClassifier{verdict: llm.VerdictUnsafe}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	cch := cache.New(t.TempDir())
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      fast,
+		Verifier: verifier,
+		Cache:    cch,
+		AppLog:   slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)),
+	})
+	cmd := "cat /etc/hosts | grep -i localhost"
+	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+	if ok := e.AwaitVerifications(5 * time.Second); !ok {
+		t.Fatal("AwaitVerifications timed out")
+	}
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); hit {
+		t.Error("verifier agreed Unsafe; cache must NOT have an entry")
+	}
+}
+
+// TestUnsafeReview_VerifierUnsure: fast says Unsafe → verifier says
+// Unsure → abstain; no cache write.
+func TestUnsafeReview_VerifierUnsure(t *testing.T) {
+	fast := &stubClassifier{verdict: llm.VerdictUnsafe}
+	verifier := &stubClassifier{verdict: llm.VerdictUnsure}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	cch := cache.New(t.TempDir())
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      fast,
+		Verifier: verifier,
+		Cache:    cch,
+		AppLog:   slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)),
+	})
+	cmd := "cat /etc/hosts | grep -i localhost"
+	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+	if ok := e.AwaitVerifications(5 * time.Second); !ok {
+		t.Fatal("AwaitVerifications timed out")
+	}
+	key := keyForCmd(e, cmd, "/tmp")
+	if _, hit := cch.Get(key); hit {
+		t.Error("verifier abstained; cache must NOT have an entry")
+	}
+}
+
+// TestUnsafeReview_NoVerifier: without a verifier configured,
+// unsafe-review is a no-op — no panic, no goroutine leak.
+func TestUnsafeReview_NoVerifier(t *testing.T) {
+	fast := &stubClassifier{verdict: llm.VerdictUnsafe}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	cch := cache.New(t.TempDir())
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      fast,
+		Cache:    cch,
+		// Verifier intentionally nil
+	})
+	_ = e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep x", CWD: "/tmp"})
+	if ok := e.AwaitVerifications(100 * time.Millisecond); !ok {
+		t.Error("AwaitVerifications hung when no verifier is configured")
+	}
+}

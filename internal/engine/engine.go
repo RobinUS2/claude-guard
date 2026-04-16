@@ -633,7 +633,15 @@ func (e *Engine) runLLMTier(
 	case o := <-resultCh:
 		// Sync path — arrived within llmDeadline. Unchanged behavior.
 		asyncCancel()
-		return e.mapLLMOutcome(o.dec, o.err, in)
+		result := e.mapLLMOutcome(o.dec, o.err, in)
+		// On "unsafe" or "unsure", second-guess with the verifier so a
+		// fast-classifier false positive gets cached as allow for the
+		// next call. No-op when verifier isn't configured.
+		if o.err == nil && o.dec != nil &&
+			(o.dec.Verdict == llm.VerdictUnsafe || o.dec.Verdict == llm.VerdictUnsure) {
+			e.spawnUnsafeReview(in, o.dec.Reason, keyInputs, globalKey, projectKey)
+		}
+		return result
 
 	case <-time.After(llmDeadline):
 		// Sync timer fired. Hand the classifier goroutine off to a
@@ -688,13 +696,17 @@ func (e *Engine) runLLMTier(
 			}
 			if o.dec.Verdict != llm.VerdictSafe {
 				// Match the sync path: non-safe verdicts are not
-				// cached (LLM is approve-only).
+				// cached (LLM is approve-only). Still spawn the
+				// unsafe-review verifier so a late false-positive
+				// can still populate an allow cache entry for the
+				// next call.
 				e.appLog().Info("async_llm_completed",
 					"verdict", string(o.dec.Verdict),
 					"reason", o.dec.Reason,
 					"command_preview", previewCommand(in.Command),
 					"tool_use_id", in.ToolUseID,
 				)
+				e.spawnUnsafeReview(in, o.dec.Reason, keyInputs, globalKey, projectKey)
 				return
 			}
 			scope := o.dec.Scope
@@ -804,6 +816,131 @@ func shadowWithReason(tag, reason string) string {
 	return tag + ": " + reason
 }
 
+// spawnUnsafeReview fires a goroutine that asks the verifier to
+// second-guess a fast-classifier "unsafe" verdict. When the verifier
+// says "safe", we write an allow cache entry so the next identical
+// command bypasses the user prompt. Symmetric to spawnVerification
+// (which handles the "fast said safe, verifier disagreed" case) —
+// same cross-provider cadence, same background lifecycle via
+// pendingVerifies.
+//
+// Risk model:
+//   - Fast classifier false-positive (common for Gemini Flash on
+//     unusual but safe shapes) → verifier flips to Safe → we cache
+//     the allow. Speeds up the next identical call. No additional
+//     user risk on THIS invocation — the user has already been
+//     prompted.
+//   - Fast classifier true-positive, verifier agrees Unsafe → do not
+//     cache. Same behavior as today's plain fall-through.
+//   - Verifier Unsure → abstain; do not cache. Cross-provider signal
+//     isn't strong enough to override the fast classifier's caution.
+//
+// Residual: if the user denied the Claude Code permission prompt on
+// this call, verifier-says-safe will still cache an allow, so the
+// next identical cmd auto-approves, contradicting the user's deny.
+// Documented "acceptable residual" — same as the existing
+// safe→verifier flow.
+//
+// No-op when verifier or cache is not configured. Caller should call
+// AwaitVerifications before exiting the process.
+func (e *Engine) spawnUnsafeReview(
+	in Input,
+	fastReason string,
+	keyInputs cache.KeyInputs,
+	globalKey, projectKey string,
+) {
+	if e.verifier == nil || e.cache == nil {
+		return
+	}
+	e.pendingVerifies.Add(1)
+	go func() {
+		defer e.pendingVerifies.Done()
+		cmd := in.Command
+		if e.redactor != nil {
+			res := e.redactor.Scan(cmd)
+			if res.Decision == redact.Skip {
+				// Same redaction skip as the fast path — don't ship
+				// secret-bearing commands to the verifier either.
+				return
+			}
+			cmd = res.Redacted
+		}
+		if e.breaker != nil {
+			permitted, _, _ := e.breaker.Check()
+			if !permitted {
+				return
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		dec, err := e.verifier.Classify(ctx, llm.ClassifyInput{
+			Command:     cmd,
+			Description: in.Description,
+			CWD:         in.CWD,
+		})
+		if err != nil {
+			e.appLog().Warn("unsafe_review_error",
+				"err", err.Error(),
+				"verifier_provider", e.verifier.Provider(),
+				"verifier_model", e.verifier.Model(),
+				"command_preview", previewCommand(in.Command),
+				"tool_use_id", in.ToolUseID,
+			)
+			return
+		}
+		switch dec.Verdict {
+		case llm.VerdictSafe:
+			// Verifier disagrees: fast said unsafe, verifier says safe.
+			// Write the allow cache entry so next call auto-approves.
+			scope := dec.Scope
+			if scope != llm.ScopeGlobal && scope != llm.ScopeProject {
+				scope = llm.ScopeProject
+			}
+			v := llmCallResult{
+				allow:  true,
+				shadow: "unsafe-review:safe",
+				reason: dec.Reason,
+				scope:  scope,
+				slots:  dec.VariableSlots,
+			}
+			// Cache the allow. Skip the normal async verifier spawn:
+			// this verdict ALREADY came from the verifier, so firing
+			// spawnVerification would pointlessly re-classify the same
+			// command with the same verifier and double the cost.
+			e.persistLLMAllowNoVerify(in, v, keyInputs, globalKey, projectKey)
+			e.appLog().Warn("unsafe_review_disagree_ALLOW_NEXT_CALL",
+				"fast_reason", fastReason,
+				"verifier_reason", dec.Reason,
+				"verifier_provider", e.verifier.Provider(),
+				"verifier_model", e.verifier.Model(),
+				"scope", string(scope),
+				"command_preview", previewCommand(in.Command),
+				"tool_use_id", in.ToolUseID,
+			)
+		case llm.VerdictUnsafe:
+			// Verifier agrees. No action — just log for visibility.
+			e.appLog().Info("unsafe_review_agree",
+				"fast_reason", fastReason,
+				"verifier_reason", dec.Reason,
+				"verifier_provider", e.verifier.Provider(),
+				"verifier_model", e.verifier.Model(),
+				"command_preview", previewCommand(in.Command),
+				"tool_use_id", in.ToolUseID,
+			)
+		default:
+			// Unsure → abstain; don't cache.
+			e.appLog().Info("unsafe_review_unsure",
+				"fast_reason", fastReason,
+				"verifier_reason", dec.Reason,
+				"verifier_provider", e.verifier.Provider(),
+				"verifier_model", e.verifier.Model(),
+				"command_preview", previewCommand(in.Command),
+				"tool_use_id", in.ToolUseID,
+			)
+		}
+	}()
+}
+
 // persistLLMAllow writes a safe verdict to cache (plus the optional
 // canonical-form sibling entry), then spawns the async verifier.
 // Callable from both the sync path in Decide and the async timeout
@@ -819,6 +956,29 @@ func (e *Engine) persistLLMAllow(
 	v llmCallResult,
 	keyInputs cache.KeyInputs,
 	globalKey, projectKey string,
+) {
+	e.persistLLMAllowImpl(in, v, keyInputs, globalKey, projectKey, true)
+}
+
+// persistLLMAllowNoVerify is a variant that skips spawnVerification.
+// Used by spawnUnsafeReview: the allow verdict already came from the
+// verifier, so re-verifying would double-spend the cross-provider
+// budget on the same command.
+func (e *Engine) persistLLMAllowNoVerify(
+	in Input,
+	v llmCallResult,
+	keyInputs cache.KeyInputs,
+	globalKey, projectKey string,
+) {
+	e.persistLLMAllowImpl(in, v, keyInputs, globalKey, projectKey, false)
+}
+
+func (e *Engine) persistLLMAllowImpl(
+	in Input,
+	v llmCallResult,
+	keyInputs cache.KeyInputs,
+	globalKey, projectKey string,
+	spawnVerifier bool,
 ) {
 	if e.cache == nil || !v.allow {
 		return
@@ -894,7 +1054,11 @@ func (e *Engine) persistLLMAllow(
 	// Spawn the async verifier (cross-provider second opinion).
 	// Passing canonKey lets the verifier invalidate the canonical
 	// sibling entry too when it disagrees with the fast path.
-	e.spawnVerification(storeKey, canonKey, in)
+	// Skipped when called via persistLLMAllowNoVerify — see
+	// spawnUnsafeReview for the rationale.
+	if spawnVerifier {
+		e.spawnVerification(storeKey, canonKey, in)
+	}
 }
 
 // loadProjectConfig resolves the per-project .claude-guard.yml for
