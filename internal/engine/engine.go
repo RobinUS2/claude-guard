@@ -660,7 +660,7 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 			}
 		}
 		category := categorizeLLMError(err)
-		e.appLog().Warn("llm_error",
+		logArgs := []any{
 			"err", err.Error(),
 			"category", category,
 			"provider", e.llm.Provider(),
@@ -668,7 +668,20 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 			"breaker_state", newState,
 			"command_preview", previewCommand(in.Command),
 			"tool_use_id", in.ToolUseID,
-		)
+		}
+		// Surface structured parse-failure detail when we have it: the
+		// raw length and a "looks truncated" flag distinguish MAX_TOKENS
+		// cutoff from schema violations. Useful for tuning max_tokens
+		// or spotting model regressions.
+		var pe *llm.ParseError
+		if errors.As(err, &pe) {
+			logArgs = append(logArgs,
+				"raw_len", pe.RawLength,
+				"looks_truncated", pe.LooksTruncated,
+				"raw_response", pe.RawResponse,
+			)
+		}
+		e.appLog().Warn("llm_error", logArgs...)
 		return llmCallResult{shadow: "error:" + category}
 	}
 

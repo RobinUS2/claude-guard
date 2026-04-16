@@ -284,6 +284,36 @@ func buildUserMessage(in ClassifyInput) string {
 	return b.String()
 }
 
+// ParseError is returned by extractDecision when the model's response
+// cannot be interpreted as a valid classifier Decision. It carries the
+// raw response (truncated to a readable cap) plus diagnostic fields so
+// the engine can log structured data for debugging truncation vs
+// corruption vs schema violations.
+type ParseError struct {
+	// RawResponse is the model's text output, clipped to parseErrorRawCap.
+	RawResponse string
+	// RawLength is the original length before clipping — a value near
+	// the provider's max_tokens strongly suggests MAX_TOKENS truncation.
+	RawLength int
+	// LooksTruncated is true when the response doesn't end with `}`
+	// (or a markdown fence) — a reliable heuristic for mid-JSON cutoff.
+	LooksTruncated bool
+}
+
+// parseErrorRawCap bounds how much of the bad response we embed in the
+// error message. Large enough to show WHERE the model cut off, small
+// enough to keep app.jsonl lines readable.
+const parseErrorRawCap = 1500
+
+func (e *ParseError) Error() string {
+	hint := ""
+	if e.LooksTruncated {
+		hint = " [truncated mid-response]"
+	}
+	return fmt.Sprintf("classifier output not JSON (len=%d%s): %q",
+		e.RawLength, hint, truncate(e.RawResponse, parseErrorRawCap))
+}
+
 // extractDecision parses the model's text output into a Decision.
 // Handles raw JSON, JSON wrapped in markdown fences, and JSON embedded
 // in prose.
@@ -299,7 +329,34 @@ func extractDecision(text string) (*Decision, error) {
 			}
 		}
 	}
-	return nil, fmt.Errorf("classifier output not JSON: %q", truncate(text, 200))
+	return nil, &ParseError{
+		RawResponse:    text,
+		RawLength:      len(text),
+		LooksTruncated: looksTruncated(text),
+	}
+}
+
+// looksTruncated returns true when the response STARTED valid JSON (or
+// a fenced JSON block) but never reached a closing brace. Almost every
+// MAX_TOKENS cutoff we've seen in app.jsonl stops mid-value, so this
+// pattern reliably distinguishes truncation from "model returned prose
+// instead of JSON" — which has its own failure signature (no `{` at all).
+func looksTruncated(text string) bool {
+	s := strings.TrimSpace(text)
+	if s == "" {
+		return false
+	}
+	// Strip a leading markdown fence ("```json\n" or "```\n") if present.
+	if strings.HasPrefix(s, "```") {
+		if nl := strings.IndexByte(s, '\n'); nl > 0 {
+			s = strings.TrimSpace(s[nl+1:])
+		}
+	}
+	if !strings.HasPrefix(s, "{") {
+		return false // never started JSON — a different failure mode
+	}
+	last := s[len(s)-1]
+	return last != '}' && last != '`'
 }
 
 func tryParseJSON(s string) (*Decision, bool) {

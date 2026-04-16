@@ -98,3 +98,69 @@ func TestAutoSelect_EarlierAliasWins(t *testing.T) {
 		t.Errorf("expected canonical key to win; got %q", ac.APIKey)
 	}
 }
+
+// --- ParseError diagnostics ---
+
+func TestExtractDecision_TruncatedResponseIsStructured(t *testing.T) {
+	// Real-world case: Gemini ran out of tokens mid-reason.
+	raw := `{"decision":"safe","reason":"The command queries a BigQuery database and writes the output to a file in /tmp, which is a safe`
+	_, err := extractDecision(raw)
+	if err == nil {
+		t.Fatal("expected parse error for truncated JSON")
+	}
+	var pe *ParseError
+	if !errorsAs(err, &pe) {
+		t.Fatalf("expected *ParseError, got %T: %v", err, err)
+	}
+	if pe.RawLength != len(raw) {
+		t.Errorf("RawLength = %d, want %d", pe.RawLength, len(raw))
+	}
+	if !pe.LooksTruncated {
+		t.Error("LooksTruncated should be true for mid-value cutoff")
+	}
+	if pe.RawResponse != raw {
+		t.Error("RawResponse should carry the full text the engine can log")
+	}
+}
+
+func TestExtractDecision_ProseReturnsParseError_NotTruncated(t *testing.T) {
+	// Model returned prose, not JSON — not the same failure mode as
+	// a truncated response.
+	_, err := extractDecision("I cannot help with that request.")
+	var pe *ParseError
+	if !errorsAs(err, &pe) {
+		t.Fatalf("expected *ParseError, got %T: %v", err, err)
+	}
+	if pe.LooksTruncated {
+		t.Error("prose without JSON should NOT be flagged as truncated")
+	}
+}
+
+func TestExtractDecision_WellFormedJSONParses(t *testing.T) {
+	dec, err := extractDecision(`{"decision":"safe","reason":"ok","scope":"project"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dec.Verdict != VerdictSafe {
+		t.Errorf("Verdict = %q", dec.Verdict)
+	}
+}
+
+// errorsAs is a tiny helper to avoid adding another import just for this test file.
+func errorsAs(err error, target any) bool {
+	for err != nil {
+		if pe, ok := err.(*ParseError); ok {
+			if tgt, ok := target.(**ParseError); ok {
+				*tgt = pe
+				return true
+			}
+		}
+		type wrapper interface{ Unwrap() error }
+		if w, ok := err.(wrapper); ok {
+			err = w.Unwrap()
+			continue
+		}
+		return false
+	}
+	return false
+}
