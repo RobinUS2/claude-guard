@@ -504,3 +504,104 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+// --- step 11: forbiddenAllowPrograms expansion (network/IaC tools) ---
+
+func TestLoad_RejectNetworkTools(t *testing.T) {
+	for _, prog := range []string{"curl", "wget", "scp", "rsync", "sftp"} {
+		t.Run(prog, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, ConfigFilename, `
+version: 1
+allow:
+  - name: evil-`+prog+`
+    programs: [`+prog+`]
+    subcommands: [something]
+`)
+			cfg, _ := Load(dir)
+			if cfg.Warning == nil || len(cfg.Rules) > 0 {
+				t.Errorf("%s should be rejected; got warning=%v rules=%d", prog, cfg.Warning, len(cfg.Rules))
+			}
+		})
+	}
+}
+
+func TestLoad_RejectIaCTools(t *testing.T) {
+	for _, prog := range []string{"gh", "kubectl", "terraform", "docker", "aws", "gcloud", "helm"} {
+		t.Run(prog, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, ConfigFilename, `
+version: 1
+allow:
+  - name: evil-`+prog+`
+    programs: [`+prog+`]
+    subcommands: [status]
+`)
+			cfg, _ := Load(dir)
+			if cfg.Warning == nil || len(cfg.Rules) > 0 {
+				t.Errorf("%s should be rejected; got warning=%v rules=%d", prog, cfg.Warning, len(cfg.Rules))
+			}
+		})
+	}
+}
+
+// --- step 11: git is allowed but destructive subcommands are forbidden ---
+
+func TestLoad_GitReadonlySubcommandsAccepted(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, ConfigFilename, `
+version: 1
+allow:
+  - name: git-readonly-project
+    programs: [git]
+    subcommands: [status, log, diff, show]
+`)
+	cfg, _ := Load(dir)
+	if cfg.Warning != nil {
+		t.Errorf("git with readonly subcommands should be accepted, got: %v", cfg.Warning)
+	}
+	if len(cfg.Rules) != 1 {
+		t.Errorf("expected 1 rule, got %d", len(cfg.Rules))
+	}
+}
+
+func TestLoad_RejectGitDestructiveSubcommands(t *testing.T) {
+	destructive := []string{"apply", "checkout", "reset", "clean", "rm", "rebase", "cherry-pick", "revert", "restore", "stash"}
+	for _, sub := range destructive {
+		t.Run(sub, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, ConfigFilename, `
+version: 1
+allow:
+  - name: evil-git-`+sub+`
+    programs: [git]
+    subcommands: [`+sub+`]
+`)
+			cfg, _ := Load(dir)
+			if cfg.Warning == nil || len(cfg.Rules) > 0 {
+				t.Errorf("git %s should be rejected; got warning=%v rules=%d", sub, cfg.Warning, len(cfg.Rules))
+			}
+			if cfg.Warning != nil && !strings.Contains(cfg.Warning.Error(), sub) {
+				t.Errorf("warning should mention subcommand %q: %v", sub, cfg.Warning)
+			}
+		})
+	}
+}
+
+// Mixed: allowed sub + destructive sub → whole rule rejected (one bad
+// apple taints the rule, so users can't sneak `git apply` in alongside
+// `git status`).
+func TestLoad_RejectGitMixedSubcommands(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, ConfigFilename, `
+version: 1
+allow:
+  - name: evil-git-mixed
+    programs: [git]
+    subcommands: [status, apply]
+`)
+	cfg, _ := Load(dir)
+	if cfg.Warning == nil || len(cfg.Rules) > 0 {
+		t.Errorf("mixed git rule with 'apply' should be rejected")
+	}
+}

