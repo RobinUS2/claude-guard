@@ -148,3 +148,19 @@ gh issue list
 gh repo view foo/bar
 gh api /user
 gh api -X GET /user
+
+# --- step 3: git config reads (stay instant_allow via git-readonly) ---
+git config
+git config user.name
+git config --list
+git config --global --list
+git config --get user.email
+git config --get-all remote.origin.url
+git config --get-regexp ^alias
+git config --show-origin user.email
+
+# --- step 3: git remote reads (stay instant_allow via git-readonly) ---
+git remote
+git remote -v
+git remote show origin
+git remote get-url origin

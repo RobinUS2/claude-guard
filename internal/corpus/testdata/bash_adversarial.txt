@@ -154,3 +154,28 @@ gh api --request POST /repos/foo/bar/hooks
 gh api /repos/foo/bar -X PATCH
 gh api --method=DELETE /repos/foo/bar
 gh api graphql -f query='mutation { deleteRepository }'
+
+# --- step 3: git config writes ---
+git config user.signingkey EVIL
+git config --global user.email evil@evil.com
+git config core.hooksPath /tmp/hooks
+git config --add remote.origin.fetch evil
+git config --unset commit.gpgsign
+git config --unset-all remote.origin.fetch
+git config --replace-all foo.bar value
+git config --rename-section old new
+git config --remove-section foo
+git config --edit
+git config -e
+git config --file /tmp/evil.gitconfig user.name evil
+git config -f /tmp/evil.gitconfig user.name evil
+
+# --- step 3: git remote mutations ---
+git remote add evil https://evil.com/x.git
+git remote rm origin
+git remote remove origin
+git remote rename old new
+git remote set-url origin https://evil.com/x.git
+git remote set-branches origin evil
+git remote set-head origin evil
+git remote prune origin

@@ -117,6 +117,38 @@ func DefaultBlockRules() []rules.Rule {
 			Reason:   "shell -c wraps an opaque script string that isn't AST-analyzable",
 		},
 
+		// git config writes — tier-2 `git-readonly` allows `git config`
+		// for the common read shapes (`git config user.name`,
+		// `git config --list`), but `git config user.signingkey EVIL`
+		// or `git config core.hooksPath /tmp/hooks` are supply-chain
+		// attacks. GitConfigWrite uses a flag-decision-tree (not
+		// positional counting alone) so `--get-regexp` reads aren't
+		// misclassified as writes.
+		&rules.GitConfigWrite{
+			RuleName: "git-config-write",
+			Reason:   "git config write requires user approval",
+		},
+		// git remote mutations — tier-2 `git-readonly` allows
+		// `git remote` / `git remote -v` / `git remote show`, but
+		// `git remote add evil https://evil.git` / `git remote set-url`
+		// hijack future pushes. Denied here.
+		&rules.NestedSubcommand{
+			RuleName: "git-remote-mutation",
+			Program:  "git",
+			Destructive: []string{
+				"remote/add",
+				"remote/remove",
+				"remote/rm",
+				"remote/rename",
+				"remote/set-url",
+				"remote/set-branches",
+				"remote/set-head",
+				"remote/prune",
+				"remote/update",
+			},
+			Reason: "git remote mutation requires user approval",
+		},
+
 		// gh destructive verbs — tier-2 `gh-readonly` only checks the
 		// outer noun (pr/issue/repo/run/api/…), so `gh pr merge`,
 		// `gh repo delete`, `gh pr review --approve` instant-allowed

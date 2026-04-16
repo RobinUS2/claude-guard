@@ -424,6 +424,112 @@ func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// --- GitConfigWrite: block rule for `git config` writes.
+//
+// `git config` writes to gitconfig files (setting core.hooksPath,
+// user.signingkey, remote urls, etc.) — a supply-chain attack surface.
+// Tier-2 `git-readonly` allows `git config` for the read shapes; this
+// tier-1 rule carves out the write shapes:
+//
+//   Deny flags (always write): --add, --unset, --unset-all,
+//     --replace-all, --rename-section, --remove-section, --edit, -e
+//   Read flags (clear intent): --list, -l, --get, --get-all,
+//     --get-regexp, --get-urlmatch, --show-origin, --show-scope
+//   Else: count positionals after "config". 0-1 = read, 2+ = write.
+//
+// `--file <path>` / `-f <path>` is always-deny — the file-override
+// shape is rare and adjacent-value parsing would need to skip the
+// path token when counting positionals. Easier to refuse entirely;
+// users needing it can get an LLM approval.
+//
+// Scope modifiers (--global, --system, --local, --worktree,
+// --default) don't change the read/write classification; ignored.
+
+// GitConfigWrite blocks write shapes of `git config`.
+type GitConfigWrite struct {
+	RuleName string
+	Reason   string
+}
+
+func (r *GitConfigWrite) Name() string { return r.RuleName }
+func (r *GitConfigWrite) Kind() string { return "git_config_write" }
+
+var gitConfigDenyFlags = map[string]struct{}{
+	"--add": {}, "--unset": {}, "--unset-all": {},
+	"--replace-all":    {},
+	"--rename-section": {}, "--remove-section": {},
+	"--edit": {}, "-e": {},
+}
+
+var gitConfigReadFlags = map[string]struct{}{
+	"--list": {}, "-l": {},
+	"--get": {}, "--get-all": {}, "--get-regexp": {},
+	"--get-urlmatch": {}, "--show-origin": {}, "--show-scope": {},
+}
+
+var gitConfigFileFlags = map[string]struct{}{
+	"--file": {}, "-f": {},
+}
+
+func (r *GitConfigWrite) Eval(p *shellparse.Parsed) (Verdict, string) {
+	for _, c := range p.Calls {
+		if c.Nesting != shellparse.NestTopLevel {
+			continue
+		}
+		if baseProgram(c.Program) != "git" && c.Program != "git" {
+			continue
+		}
+		if len(c.Positional) == 0 || c.Positional[0] != "config" {
+			continue
+		}
+		// Always-deny flags.
+		for _, f := range c.Flags {
+			if _, bad := gitConfigDenyFlags[f]; bad {
+				return Match, r.Reason
+			}
+			// `--edit` / `--unset-all` etc. may appear as `--flag=…`
+			// theoretically (they don't take values, but be robust).
+			if idx := strings.IndexByte(f, '='); idx > 0 {
+				if _, bad := gitConfigDenyFlags[f[:idx]]; bad {
+					return Match, r.Reason
+				}
+			}
+			// --file / -f — always-deny shape.
+			base := f
+			if idx := strings.IndexByte(f, '='); idx > 0 {
+				base = f[:idx]
+			}
+			if _, fileForm := gitConfigFileFlags[base]; fileForm {
+				return Match, r.Reason
+			}
+		}
+		// Read-flag carve-out: if any explicit read flag is present
+		// and no deny flag matched, allow tier-2 to approve.
+		hasRead := false
+		for _, f := range c.Flags {
+			base := f
+			if idx := strings.IndexByte(f, '='); idx > 0 {
+				base = f[:idx]
+			}
+			if _, r := gitConfigReadFlags[base]; r {
+				hasRead = true
+				break
+			}
+		}
+		if hasRead {
+			continue
+		}
+		// Positional count: "config" itself is Positional[0].
+		// 0 extra positionals = list intent (safe).
+		// 1 extra positional = read single key (safe).
+		// 2+ extra positionals = write (deny).
+		if len(c.Positional) >= 3 {
+			return Match, r.Reason
+		}
+	}
+	return NoMatch, ""
+}
+
 // --- GhApiMutation: block rule for `gh api` calls with mutating HTTP
 // verbs. Distinct from NestedSubcommand because `-X DELETE` is
 // adjacency-based (two tokens) and the flag is also spellable in
