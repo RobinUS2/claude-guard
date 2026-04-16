@@ -140,3 +140,11 @@ gh version
 gh help
 
 # --- make read-only targets ---
+
+# --- step 1 regression: gh reads still instant-allow via gh-readonly ---
+gh pr view 42
+gh pr list
+gh issue list
+gh repo view foo/bar
+gh api /user
+gh api -X GET /user

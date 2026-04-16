@@ -142,6 +142,62 @@ func (c *Call) HasEnvVarArg(names ...string) bool {
 	return false
 }
 
+// FlagValue returns the string value associated with a flag (by any of
+// the provided names) in this call's arguments. Handles both shapes:
+//
+//	--flag=value    // value attached with '='
+//	--flag value    // value is the adjacent argument word
+//	-X value        // same for short flags
+//
+// Returns ("", false) when no matching flag is found, OR when the flag
+// is present but its value word is not a resolvable literal (e.g.
+// `-X $METHOD` where $METHOD is ParamExp). Only scans arg words (not
+// the program slot).
+//
+// Used by tier-1 matchers like gh-api-mutation where `-X DELETE` /
+// `--method DELETE` needs detection even though `DELETE` parses as a
+// Positional (not a Flag) with the current resolveCall conventions.
+func (c *Call) FlagValue(names ...string) (string, bool) {
+	if c.Expr == nil || len(c.Expr.Args) < 2 {
+		return "", false
+	}
+	nameSet := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		nameSet[n] = struct{}{}
+	}
+	// Iterate arg words (skip program slot). When we see a --flag=value
+	// shape, split and check. When we see a bare --flag, the next word
+	// is the value candidate.
+	args := c.Expr.Args[1:]
+	for i := 0; i < len(args); i++ {
+		lit, ok := resolveWord(args[i])
+		if !ok {
+			continue
+		}
+		// --flag=value
+		if idx := strings.Index(lit, "="); idx > 0 && strings.HasPrefix(lit, "-") {
+			name, value := lit[:idx], lit[idx+1:]
+			if _, matched := nameSet[name]; matched {
+				return value, true
+			}
+			continue
+		}
+		// --flag value (adjacent)
+		if _, matched := nameSet[lit]; !matched {
+			continue
+		}
+		if i+1 >= len(args) {
+			return "", false
+		}
+		next, nextOk := resolveWord(args[i+1])
+		if !nextOk {
+			return "", false
+		}
+		return next, true
+	}
+	return "", false
+}
+
 func wordPartHasParam(part syntax.WordPart, nameSet map[string]struct{}) bool {
 	switch p := part.(type) {
 	case *syntax.ParamExp:

@@ -424,6 +424,63 @@ func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// --- GhApiMutation: block rule for `gh api` calls with mutating HTTP
+// verbs. Distinct from NestedSubcommand because `-X DELETE` is
+// adjacency-based (two tokens) and the flag is also spellable in
+// multiple shapes: `-X DELETE`, `-XDELETE`, `--method DELETE`,
+// `--request DELETE`.
+//
+// Fires when:
+//   - program is `gh` (top-level)
+//   - positional[0] == "api"
+//   - AND any of:
+//     - a Flag equals `-X<METHOD>` (short-form concat) with METHOD in MutatingVerbs
+//     - FlagValue(`-X`,`--method`,`--request`) resolves to a MutatingVerb
+//
+// MutatingVerbs is typically {DELETE, POST, PATCH, PUT}. GET/HEAD don't
+// mutate; OPTIONS is metadata.
+
+// GhApiMutation blocks `gh api` calls with mutating HTTP methods.
+type GhApiMutation struct {
+	RuleName       string
+	MutatingVerbs  []string
+	Reason         string
+}
+
+func (r *GhApiMutation) Name() string { return r.RuleName }
+func (r *GhApiMutation) Kind() string { return "gh_api_mutation" }
+
+func (r *GhApiMutation) Eval(p *shellparse.Parsed) (Verdict, string) {
+	for _, c := range p.Calls {
+		if c.Nesting != shellparse.NestTopLevel {
+			continue
+		}
+		if baseProgram(c.Program) != "gh" && c.Program != "gh" {
+			continue
+		}
+		if len(c.Positional) == 0 || c.Positional[0] != "api" {
+			continue
+		}
+		// Short-form concat: `-XDELETE`, `-XPOST`, etc.
+		for _, f := range c.Flags {
+			if !strings.HasPrefix(f, "-X") || len(f) == 2 {
+				continue
+			}
+			verb := f[2:]
+			if stringIn(strings.ToUpper(verb), r.MutatingVerbs) {
+				return Match, r.Reason
+			}
+		}
+		// Space-separated: `-X DELETE`, `--method DELETE`, `--request DELETE`.
+		if v, ok := c.FlagValue("-X", "--method", "--request"); ok {
+			if stringIn(strings.ToUpper(v), r.MutatingVerbs) {
+				return Match, r.Reason
+			}
+		}
+	}
+	return NoMatch, ""
+}
+
 // --- GitForcePush: block rule for force pushes to protected branches.
 
 // GitForcePush blocks `git push --force`-family commands to protected branches.

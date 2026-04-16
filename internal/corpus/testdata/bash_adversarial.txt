@@ -119,3 +119,38 @@ bash -c 'id'
 # rm -rf via env wrapper — rm-rf-system sees Program=env not rm.
 # Same residual; step 8 Part B (EnvWrapper recursion) would close it.
 
+
+# --- step 1: gh destructive verbs ---
+gh repo delete foo/bar
+gh repo archive foo/bar
+gh pr merge 42
+gh pr close 42
+gh pr delete 42
+gh pr review 42 --approve
+gh pr edit 42 --title evil
+gh issue close 42
+gh run rerun 123
+gh run cancel 123
+gh workflow run attack.yml
+gh workflow disable backup.yml
+gh secret set FOO -b evil
+gh secret delete FOO
+gh variable set FOO -b evil
+gh auth token
+gh auth logout
+gh ssh-key add /tmp/evil.pub
+gh gpg-key add /tmp/evil.gpg
+gh alias set x 'pr merge'
+gh alias delete x
+gh extension install evil/repo
+gh codespace create -R evil/repo
+gh codespace delete abc123
+
+# --- step 1: gh api mutations (both -X and --method shapes, both concat and space-sep)
+gh api -X DELETE /repos/foo/bar
+gh api -XDELETE /repos/foo/bar
+gh api --method DELETE /repos/foo/bar
+gh api --request POST /repos/foo/bar/hooks
+gh api /repos/foo/bar -X PATCH
+gh api --method=DELETE /repos/foo/bar
+gh api graphql -f query='mutation { deleteRepository }'

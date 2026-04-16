@@ -117,6 +117,45 @@ func DefaultBlockRules() []rules.Rule {
 			Reason:   "shell -c wraps an opaque script string that isn't AST-analyzable",
 		},
 
+		// gh destructive verbs — tier-2 `gh-readonly` only checks the
+		// outer noun (pr/issue/repo/run/api/…), so `gh pr merge`,
+		// `gh repo delete`, `gh pr review --approve` instant-allowed
+		// before this rule. Covers the (noun, verb) pairs that
+		// mutate GitHub state, plus aliases/extensions (can wrap
+		// arbitrary commands) and codespaces (cloud VM control).
+		&rules.NestedSubcommand{
+			RuleName: "gh-destructive",
+			Program:  "gh",
+			Destructive: []string{
+				"repo/delete", "repo/archive", "repo/edit", "repo/sync",
+				"pr/merge", "pr/close", "pr/delete", "pr/edit", "pr/reopen",
+				"pr/review", // --approve refinement handled by LLM; broad deny for review is safe
+				"issue/close", "issue/delete", "issue/edit", "issue/reopen",
+				"run/rerun", "run/cancel", "run/delete", "run/watch",
+				"workflow/run", "workflow/disable", "workflow/enable",
+				"secret/set", "secret/delete", "secret/remove",
+				"variable/set", "variable/delete",
+				"auth/token", "auth/logout", "auth/refresh", "auth/setup-git",
+				"ssh-key/add", "ssh-key/delete",
+				"gpg-key/add", "gpg-key/delete",
+				"alias/set", "alias/delete", "alias/import",
+				"extension/install", "extension/exec", "extension/remove", "extension/upgrade",
+				"codespace/create", "codespace/delete", "codespace/ssh", "codespace/stop",
+				// `gh api graphql` supports arbitrary mutations via
+				// `-f query='mutation { … }'`. Any graphql = deny.
+				"api/graphql",
+			},
+			Reason: "gh destructive verb (account/repo/workflow mutation)",
+		},
+		// `gh api` with mutating HTTP methods — covers the shapes the
+		// (noun, verb) matcher above can't express because the method
+		// is a flag value, not a positional.
+		&rules.GhApiMutation{
+			RuleName:      "gh-api-mutation",
+			MutatingVerbs: []string{"DELETE", "POST", "PATCH", "PUT"},
+			Reason:        "gh api with mutating HTTP method",
+		},
+
 		// terraform state mutations — `state rm`, `state mv`, etc.
 		// mutate state without touching infrastructure, which then
 		// causes the next `terraform apply` to recreate resources
