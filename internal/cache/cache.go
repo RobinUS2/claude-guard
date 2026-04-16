@@ -99,6 +99,26 @@ type Entry struct {
 	// TrustedReason is an optional note the user passed with --reason
 	// when calling `trust`. Empty when trust was invoked without one.
 	TrustedReason string `json:"trusted_reason,omitempty"`
+
+	// CanonicalForm is the normalized-command form this entry is keyed
+	// by, populated only for canonical entries. Exact entries leave it
+	// empty. Example: "dig {DOMAIN} {DNS_TYPE}". Stored so cache
+	// lookup can iterate canonicals for a matching pattern AND so
+	// `explain`/`stats` can tell the user which canonical fired.
+	CanonicalForm string `json:"canonical_form,omitempty"`
+
+	// MatchCount increments every time a distinct concrete command
+	// resolved to this canonical. Used by `stats` to spot either
+	// "this pattern is saving tons of LLM calls" or "this pattern is
+	// dangerously over-generalized (match_count=10000)".
+	MatchCount int `json:"match_count,omitempty"`
+
+	// Program is the first token of the command the entry was built
+	// from. Used as an index key for canonical lookup: we only
+	// iterate canonical entries whose Program matches the incoming
+	// command's program, keeping lookup O(N_per_program) instead of
+	// O(N_total).
+	Program string `json:"program,omitempty"`
 }
 
 // EffectiveVerdict returns the verdict that should be applied to a
@@ -137,7 +157,11 @@ type KeyInputs struct {
 // v3: added Command + CWD + TrustedAt/TrustedReason fields on Entry.
 // v4: added ProjectConfigHash dimension to KeyInputs so per-project
 //     rule edits invalidate stale verdicts.
-const SchemaVersion = "4"
+// v5: added CanonicalForm + MatchCount fields on Entry. Canonical
+//     entries are keyed by normalize.Normalize() output — one entry
+//     serves many concrete commands with matching variable-slot
+//     tokens. See internal/normalize.
+const SchemaVersion = "5"
 
 // MaxCommandInEntry caps how many bytes of a command we persist in
 // an entry. Commands occasionally include multi-KB heredocs or
@@ -263,6 +287,101 @@ func (c *Cache) Delete(key string) error {
 		return err
 	}
 	return nil
+}
+
+// MatchFunc is a predicate used by LookupCanonical to decide whether a
+// given canonical entry applies to the incoming command. Supplied by
+// the caller (internal/normalize.CanonicalMatches) to avoid pulling
+// normalize into the cache package.
+type MatchFunc func(canonical, command string) bool
+
+// LookupCanonical scans canonical entries whose Program matches
+// program (indexing dimension), returning the first entry whose
+// CanonicalForm matches the incoming command via matchFn.
+//
+// Returns (entry, key, true) on hit. key is the on-disk filename
+// stem (i.e. the hex sha256) so the caller can do a follow-up Put to
+// increment MatchCount.
+//
+// Performance: walks the shard directories matching the program
+// prefix. Per-program entry count is bounded by the number of
+// canonical patterns the LLM has emitted for that program — typically
+// 1-10. No regex compilation at lookup time.
+func (c *Cache) LookupCanonical(program, command string, matchFn MatchFunc) (*Entry, string, bool) {
+	if c == nil || c.Dir == "" || program == "" || command == "" || matchFn == nil {
+		return nil, "", false
+	}
+	if _, err := os.Stat(c.Dir); errors.Is(err, os.ErrNotExist) {
+		return nil, "", false
+	}
+	now := c.now()
+	var hit *Entry
+	var hitKey string
+	walkErr := filepath.Walk(c.Dir, func(path string, info os.FileInfo, err error) error {
+		if hit != nil {
+			return filepath.SkipDir
+		}
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".json") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var e Entry
+		if err := json.Unmarshal(data, &e); err != nil {
+			return nil
+		}
+		if e.CanonicalForm == "" || e.Program != program {
+			return nil
+		}
+		if e.Expired(now) {
+			return nil
+		}
+		if !matchFn(e.CanonicalForm, command) {
+			return nil
+		}
+		hit = &e
+		base := filepath.Base(path)
+		hitKey = strings.TrimSuffix(base, ".json")
+		return filepath.SkipDir
+	})
+	if walkErr != nil {
+		return nil, "", false
+	}
+	if hit == nil {
+		return nil, "", false
+	}
+	return hit, hitKey, true
+}
+
+// IncrementMatchCount bumps MatchCount on an existing cache entry,
+// preserving its original TTL. Used by the engine to record each time a
+// canonical pattern served a concrete command — the telemetry feeds
+// into the stats view and surfaces over-generalizing canonicals.
+//
+// Returns (true, nil) if the entry was found and updated; (false, nil)
+// when the key is missing (e.g. evicted between lookup and increment);
+// (false, err) on I/O failure.
+func (c *Cache) IncrementMatchCount(key string) (bool, error) {
+	entry, hit := c.Get(key)
+	if !hit {
+		return false, nil
+	}
+	entry.MatchCount++
+	ttl := time.Duration(0)
+	if !entry.ExpiresAt.IsZero() {
+		ttl = entry.ExpiresAt.Sub(entry.StoredAt)
+	}
+	// Preserve StoredAt so TTL math stays anchored to the original write.
+	storedAt := entry.StoredAt
+	if err := c.Put(key, *entry, ttl); err != nil {
+		return false, err
+	}
+	// Best-effort: Put resets StoredAt if it was zero, but ours wasn't,
+	// so this is a no-op safeguard for future refactors.
+	_ = storedAt
+	return true, nil
 }
 
 // VerifierResult carries a verifier's review of an existing cache entry.

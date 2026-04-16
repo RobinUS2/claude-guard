@@ -177,9 +177,12 @@ type geminiResponseSchema struct {
 }
 
 type geminiSchemaField struct {
-	Type        string   `json:"type"`
-	Description string   `json:"description,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
+	Type        string                       `json:"type"`
+	Description string                       `json:"description,omitempty"`
+	Enum        []string                     `json:"enum,omitempty"`
+	Items       *geminiResponseSchema        `json:"items,omitempty"`
+	Properties  map[string]geminiSchemaField `json:"properties,omitempty"`
+	Required    []string                     `json:"required,omitempty"`
 }
 
 type geminiGenConfig struct {
@@ -216,6 +219,28 @@ var classifierResponseSchema = &geminiResponseSchema{
 		"reason": {
 			Type:        "string",
 			Description: "1-2 sentence plain-English explanation",
+		},
+		"variable_slots": {
+			Type:        "array",
+			Description: "optional: tokens in the command whose value does not affect safety",
+			Items: &geminiResponseSchema{
+				Type: "object",
+				Properties: map[string]geminiSchemaField{
+					"position": {
+						Type:        "string",
+						Description: "arg1|arg2|...|tail_flag",
+					},
+					"type": {
+						Type: "string",
+						Enum: []string{
+							"domain", "ipv4", "url_path_segment", "uuid",
+							"integer", "hex_hash", "filepath_tmp", "filepath_cache",
+							"quoted_string", "dns_record_type", "http_method",
+						},
+					},
+				},
+				Required: []string{"position", "type"},
+			},
 		},
 	},
 	Required: []string{"decision", "reason", "scope"},

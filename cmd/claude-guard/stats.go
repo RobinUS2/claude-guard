@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/cache"
@@ -122,7 +123,79 @@ func cmdStats(args []string) int {
 			cacheHits, cacheHits+llmHits, rate)
 	}
 
+	// Canonical breakdown: how many cache hits went through canonical
+	// patterns vs exact entries, and which programs benefit the most.
+	if cs, err := cch.Stats(); err == nil && cs.Entries > 0 {
+		canonicalEntries, programHits := canonicalSummary(cacheDir)
+		if canonicalEntries > 0 {
+			fmt.Println()
+			fmt.Printf("canonical:   %d canonical entries (of %d total cache entries)\n",
+				canonicalEntries, cs.Entries)
+			if len(programHits) > 0 {
+				fmt.Println("             per-program match counts:")
+				// Sort programs by match count, descending.
+				type pHit struct {
+					program string
+					count   int
+				}
+				list := make([]pHit, 0, len(programHits))
+				for p, n := range programHits {
+					list = append(list, pHit{p, n})
+				}
+				sort.Slice(list, func(i, j int) bool {
+					if list[i].count != list[j].count {
+						return list[i].count > list[j].count
+					}
+					return list[i].program < list[j].program
+				})
+				for _, p := range list {
+					fmt.Printf("               %-18s %d command%s\n", p.program, p.count, pluralS(p.count))
+				}
+			}
+		}
+	}
+
 	return 0
+}
+
+// canonicalSummary walks the verdict cache and returns (numCanonicalEntries,
+// programHitCounts). programHitCounts maps program name to total MatchCount
+// summed across canonical entries for that program.
+func canonicalSummary(cacheDir string) (int, map[string]int) {
+	hits := map[string]int{}
+	entries := 0
+	_ = filepath.Walk(cacheDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".json") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var e cache.Entry
+		if err := json.Unmarshal(data, &e); err != nil {
+			return nil
+		}
+		if e.CanonicalForm == "" {
+			return nil
+		}
+		entries++
+		if e.Program != "" {
+			hits[e.Program] += e.MatchCount
+			if e.MatchCount == 0 {
+				hits[e.Program]++ // count the canonical itself
+			}
+		}
+		return nil
+	})
+	return entries, hits
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // aggregation holds counters while walking the log.

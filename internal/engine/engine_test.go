@@ -22,6 +22,12 @@ type stubClassifier struct {
 	verdict llm.Verdict
 	err     error
 	calls   int
+	// Scope: optional; empty string falls through to engine's default
+	// (ScopeProject). Set to ScopeGlobal in canonical-cache tests
+	// where we want global-scope caching.
+	scope llm.Scope
+	// Slots: when set, Classify returns them alongside the verdict.
+	slots []llm.VariableSlot
 }
 
 func (s *stubClassifier) Provider() string { return "stub" }
@@ -31,7 +37,12 @@ func (s *stubClassifier) Classify(ctx context.Context, in llm.ClassifyInput) (*l
 	if s.err != nil {
 		return nil, s.err
 	}
-	return &llm.Decision{Verdict: s.verdict, Reason: "stub"}, nil
+	return &llm.Decision{
+		Verdict:       s.verdict,
+		Reason:        "stub",
+		Scope:         s.scope,
+		VariableSlots: s.slots,
+	}, nil
 }
 
 func newTestEngine(t *testing.T, shadow bool) (*Engine, clog.Paths) {
@@ -572,6 +583,142 @@ func TestEngine_ProjectConfig_LoaderErrorDoesNotBlock(t *testing.T) {
 	if out.Verdict != Allow {
 		t.Errorf("Verdict = %v, want Allow (loader failure should not break default rules)", out.Verdict)
 	}
+}
+
+// --- Canonical cache (normalization) ---
+
+func TestEngine_Canonical_SimilarDigCommandsShareCacheEntry(t *testing.T) {
+	// The LLM tells us arg1 is a domain and arg2 is a DNS record type.
+	// After the first `dig example.com A` classifies as safe, a
+	// DIFFERENT `dig other.nl MX` must hit the canonical cache
+	// without calling the LLM.
+	stub := &stubClassifier{
+		verdict: llm.VerdictSafe,
+		scope:   llm.ScopeGlobal,
+		slots: []llm.VariableSlot{
+			{Position: "arg1", Type: "domain"},
+			{Position: "arg2", Type: "dns_record_type"},
+		},
+	}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	dir := t.TempDir()
+	cch := cache.New(dir)
+	e := NewWithOptions(Options{
+		Config: cfg,
+		LLM:    stub,
+		Cache:  cch,
+	})
+
+	// First call: LLM hit, canonical written.
+	out1 := e.Decide(Input{ToolName: "Bash", Command: "dig example.com A", CWD: "/tmp"})
+	if out1.Verdict != Allow {
+		t.Fatalf("first call Verdict = %v, want Allow", out1.Verdict)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("first call should hit LLM once; got %d", stub.calls)
+	}
+
+	// Second call: different domain + record type → should hit canonical.
+	out2 := e.Decide(Input{ToolName: "Bash", Command: "dig other.nl MX", CWD: "/tmp"})
+	if out2.Verdict != Allow {
+		t.Fatalf("second call Verdict = %v, want Allow", out2.Verdict)
+	}
+	if out2.Tier != "cache" {
+		t.Errorf("second call Tier = %q, want cache (canonical hit)", out2.Tier)
+	}
+	if stub.calls != 1 {
+		t.Errorf("second call should NOT hit LLM; LLM calls = %d, want 1", stub.calls)
+	}
+}
+
+func TestEngine_Canonical_MismatchDoesNotHitCanonical(t *testing.T) {
+	// Different program → must not hit canonical.
+	stub := &stubClassifier{
+		verdict: llm.VerdictSafe,
+		slots: []llm.VariableSlot{
+			{Position: "arg1", Type: "domain"},
+		},
+	}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	dir := t.TempDir()
+	cch := cache.New(dir)
+	e := NewWithOptions(Options{Config: cfg, LLM: stub, Cache: cch})
+
+	e.Decide(Input{ToolName: "Bash", Command: "dig example.com", CWD: "/tmp"})
+	stub.calls = 0
+
+	// Different program, same shape — canonical should NOT match.
+	out := e.Decide(Input{ToolName: "Bash", Command: "whois example.com", CWD: "/tmp"})
+	if out.Verdict != Allow {
+		t.Fatalf("whois Verdict = %v, want Allow (fresh LLM call)", out.Verdict)
+	}
+	if stub.calls != 1 {
+		t.Errorf("different program should trigger fresh LLM call; got %d", stub.calls)
+	}
+}
+
+func TestEngine_Canonical_ExactWinsOverCanonical(t *testing.T) {
+	// Security canary: even if a canonical MATCHES the command, an
+	// existing exact entry MUST take priority. This prevents a
+	// canonical from masking a specific deny or verified verdict.
+	stub := &stubClassifier{
+		verdict: llm.VerdictSafe,
+		slots: []llm.VariableSlot{
+			{Position: "arg1", Type: "domain"},
+		},
+	}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	dir := t.TempDir()
+	cch := cache.New(dir)
+	e := NewWithOptions(Options{Config: cfg, LLM: stub, Cache: cch})
+
+	// First call creates both an exact entry AND a canonical entry.
+	cmd := "dig example.com"
+	e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+
+	calls := stub.calls
+	// Second call with the SAME command should hit the EXACT entry
+	// (tier=cache, scope=global or project), not the canonical.
+	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
+	if out.Verdict != Allow {
+		t.Fatalf("Verdict = %v", out.Verdict)
+	}
+	if stub.calls != calls {
+		t.Errorf("exact match should not re-call LLM; got %d new calls", stub.calls-calls)
+	}
+	// Shadow trace should indicate exact (scope:verdict), not canonical.
+	if contains(out.Shadow.Tier4LLM, "canonical") {
+		t.Errorf("exact match wrongly went through canonical path; shadow = %q", out.Shadow.Tier4LLM)
+	}
+}
+
+func TestEngine_Canonical_MaliciousSlotTypeDropped(t *testing.T) {
+	// LLM returns a made-up slot type. Engine + normalize must drop
+	// it — no canonical is created, only an exact entry.
+	stub := &stubClassifier{
+		verdict: llm.VerdictSafe,
+		slots: []llm.VariableSlot{
+			{Position: "arg1", Type: "malicious_wildcard"},
+		},
+	}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	dir := t.TempDir()
+	cch := cache.New(dir)
+	e := NewWithOptions(Options{Config: cfg, LLM: stub, Cache: cch})
+	e.Decide(Input{ToolName: "Bash", Command: "dig example.com", CWD: "/tmp"})
+
+	// A different command must NOT hit the cache — no canonical
+	// should have been written.
+	stub.calls = 0
+	out := e.Decide(Input{ToolName: "Bash", Command: "dig other.com", CWD: "/tmp"})
+	if stub.calls != 1 {
+		t.Errorf("malicious slot type must be dropped; new LLM calls = %d, want 1", stub.calls)
+	}
+	_ = out
 }
 
 func TestEngine_ProjectConfig_HashFeedsIntoCacheKey(t *testing.T) {

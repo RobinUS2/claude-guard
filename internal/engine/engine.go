@@ -26,6 +26,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
+	"github.com/RobinUS2/claude-guard/internal/normalize"
 	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 	"github.com/RobinUS2/claude-guard/internal/projectctx"
 	"github.com/RobinUS2/claude-guard/internal/redact"
@@ -403,6 +404,57 @@ func (e *Engine) Decide(in Input) Output {
 			e.record(in, out)
 			return out
 		}
+
+		// Exact miss — try canonical (normalized) lookup. This is where
+		// the cache gets amplified: one canonical entry for "dig
+		// {DOMAIN} {DNS_TYPE}" covers every concrete dig command whose
+		// tokens validate against the slot types.
+		program := normalize.FirstProgram(in.Command)
+		if program != "" {
+			if entry, canonHitKey, hit := e.cache.LookupCanonical(program, in.Command, normalize.CanonicalMatches); hit {
+				// Telemetry: bump MatchCount so stats can show how often
+				// each canonical pattern is serving concrete commands.
+				// Best-effort — a failure doesn't affect the decision.
+				if _, err := e.cache.IncrementMatchCount(canonHitKey); err != nil {
+					e.appLog().Warn("canonical_match_increment_error",
+						"err", err.Error(),
+						"tool_use_id", in.ToolUseID,
+					)
+				}
+				eff := entry.EffectiveVerdict()
+				suffix := "canonical:" + string(eff)
+				if entry.Disagreement {
+					suffix = "canonical:verifier-deny:" + string(eff)
+				} else if entry.Verified {
+					suffix = "canonical:verified:" + string(eff)
+				}
+				out.Shadow.Tier4LLM = "cache:" + suffix
+				if !e.cfg.ShadowMode && eff == cache.VerdictAllow {
+					out.Verdict = Allow
+					out.Tier = "cache"
+					out.Rule = "canonical/" + entry.CanonicalForm
+					out.Reason = entry.Reason
+					out.Latency = time.Since(start)
+					e.record(in, out)
+					return out
+				}
+				if !e.cfg.ShadowMode && eff == cache.VerdictDeny {
+					// A canonical entry can carry a verifier-disagreement
+					// just like an exact entry. Same semantics.
+					out.Verdict = Deny
+					out.Tier = "cache"
+					out.Rule = "canonical/" + entry.CanonicalForm
+					out.Reason = "verified by " + entry.VerifierProvider + " (disagreement): " + entry.VerifierReason
+					out.Latency = time.Since(start)
+					e.record(in, out)
+					return out
+				}
+				// Shadow mode: log and fall through.
+				out.Latency = time.Since(start)
+				e.record(in, out)
+				return out
+			}
+		}
 	}
 
 	// Tier 4: LLM classifier (approve-only).
@@ -428,8 +480,68 @@ func (e *Engine) Decide(in Input) Output {
 				CWD:      in.CWD,
 			}, 90*24*time.Hour)
 			out.Shadow.Tier4LLM = "safe:" + scopeStr
+
+			// Canonicalization: if the LLM returned variable slots, try
+			// to produce a normalized form and cache it as a second
+			// entry. Future commands matching the canonical hit the
+			// cache without an LLM call. Done BEFORE spawning the
+			// verifier so spawnVerification can receive the canonical
+			// key and invalidate BOTH entries on disagreement.
+			canonKey := ""
+			if len(llmVerdict.slots) > 0 {
+				canonicalForm, dropped, nerr := normalize.Normalize(in.Command, toNormalizeSlots(llmVerdict.slots))
+				if len(dropped) > 0 {
+					// Bundle per-decision (M4) — one log line carrying
+					// every dropped slot rather than N lines.
+					positions := make([]string, 0, len(dropped))
+					types := make([]string, 0, len(dropped))
+					reasons := make([]string, 0, len(dropped))
+					for _, d := range dropped {
+						positions = append(positions, d.Slot.Position)
+						types = append(types, string(d.Slot.Type))
+						reasons = append(reasons, d.Reason)
+					}
+					e.appLog().Info("normalize_slots_dropped",
+						"count", len(dropped),
+						"positions", strings.Join(positions, ","),
+						"types", strings.Join(types, ","),
+						"reasons", strings.Join(reasons, ","),
+						"tool_use_id", in.ToolUseID,
+					)
+				}
+				if nerr != nil {
+					e.appLog().Warn("normalize_error", "err", nerr.Error(),
+						"tool_use_id", in.ToolUseID)
+				}
+				if canonicalForm != "" {
+					program := normalize.FirstProgram(in.Command)
+					canonKeyInputs := keyInputs
+					canonKeyInputs.Command = canonicalForm
+					if llmVerdict.scope == llm.ScopeGlobal {
+						canonKey = cache.GlobalKey(canonKeyInputs)
+					} else {
+						canonKey = cache.Key(canonKeyInputs)
+					}
+					_ = e.cache.Put(canonKey, cache.Entry{
+						Verdict:       cache.VerdictAllow,
+						Reason:        llmVerdict.reason,
+						Tier:          "llm",
+						Provider:      e.llm.Provider(),
+						Model:         e.llm.Model(),
+						Command:       in.Command, // the first concrete command we saw
+						CWD:           in.CWD,
+						CanonicalForm: canonicalForm,
+						Program:       program,
+						MatchCount:    1,
+					}, 90*24*time.Hour)
+				}
+			}
 			// Spawn the async verifier (cross-provider second opinion).
-			e.spawnVerification(storeKey, in)
+			// Passing canonKey lets the verifier invalidate the canonical
+			// sibling entry too when it disagrees with the fast path —
+			// otherwise the canonical would keep allowing new concrete
+			// commands forever (CTO review C1).
+			e.spawnVerification(storeKey, canonKey, in)
 		}
 		// Always populate Reason and Rule from the LLM result so the
 		// decision log has the WHY, even on fall-through.
@@ -473,10 +585,25 @@ func (e *Engine) Decide(in Input) Output {
 
 // llmCallResult is the engine-internal summary of a Tier 4 attempt.
 type llmCallResult struct {
-	allow  bool      // true only when LLM said "safe"
-	shadow string    // "safe", "unsafe", "unsure", "skipped:<reason>", or "error"
-	reason string    // human-readable reason for the decision
-	scope  llm.Scope // global vs project — used for cache key choice
+	allow  bool               // true only when LLM said "safe"
+	shadow string             // "safe", "unsafe", "unsure", "skipped:<reason>", or "error"
+	reason string             // human-readable reason for the decision
+	scope  llm.Scope          // global vs project — used for cache key choice
+	slots  []llm.VariableSlot // LLM-identified variable tokens for normalization
+}
+
+// toNormalizeSlots converts llm.VariableSlot → normalize.Slot (which
+// uses the canonical SlotType). normalize validates the type against
+// its closed vocabulary; unknown types are dropped.
+func toNormalizeSlots(xs []llm.VariableSlot) []normalize.Slot {
+	out := make([]normalize.Slot, 0, len(xs))
+	for _, x := range xs {
+		out = append(out, normalize.Slot{
+			Position: x.Position,
+			Type:     normalize.SlotType(x.Type),
+		})
+	}
+	return out
 }
 
 // runLLMTier handles redaction, circuit breaker check, and the actual
@@ -562,6 +689,7 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 			shadow: "safe",
 			reason: dec.Reason,
 			scope:  scope,
+			slots:  dec.VariableSlots,
 		}
 	case llm.VerdictUnsafe:
 		// LLM is approve-only — fall through. Log the would-have-been block.
@@ -698,9 +826,15 @@ func previewCommand(cmd string) string {
 // (e.g. Gemini Flash) decides in real time, a slower one (e.g. Sonnet)
 // audits the decision in the background.
 //
+// canonicalKey, when non-empty, is a sibling cache entry (the
+// normalized form of the same command). Both entries are updated in
+// lockstep: if the verifier disagrees, BOTH exact and canonical get
+// flipped to Disagreement — otherwise a flagged canonical would keep
+// allowing future concrete commands under its pattern.
+//
 // No-op when the verifier is not configured. Caller should call
 // AwaitVerifications before exiting the process.
-func (e *Engine) spawnVerification(cacheKey string, in Input) {
+func (e *Engine) spawnVerification(cacheKey, canonicalKey string, in Input) {
 	if e.verifier == nil || e.cache == nil || cacheKey == "" {
 		return
 	}
@@ -773,12 +907,13 @@ func (e *Engine) spawnVerification(cacheKey string, in Input) {
 			verifierVerdict = cache.VerdictDeny
 		}
 
-		updated, err := e.cache.Verify(cacheKey, cache.VerifierResult{
+		result := cache.VerifierResult{
 			Provider: e.verifier.Provider(),
 			Model:    e.verifier.Model(),
 			Verdict:  verifierVerdict,
 			Reason:   dec.Reason,
-		})
+		}
+		updated, err := e.cache.Verify(cacheKey, result)
 		if err != nil {
 			e.appLog().Warn("verifier_cache_update_error",
 				"err", err.Error(),
@@ -790,6 +925,24 @@ func (e *Engine) spawnVerification(cacheKey string, in Input) {
 			// Cache entry vanished between Put and Verify — possibly evicted
 			// or rotated by another process. Not an error.
 			return
+		}
+
+		// Apply the same verdict to the canonical sibling if one was
+		// written. This prevents a disagreement-on-exact from leaving
+		// the canonical (and all future concrete commands under its
+		// pattern) silently marked safe (CTO review C1).
+		if canonicalKey != "" && canonicalKey != cacheKey {
+			canonUpdated, errCanon := e.cache.Verify(canonicalKey, result)
+			if errCanon != nil {
+				e.appLog().Warn("verifier_canonical_update_error",
+					"err", errCanon.Error(),
+					"tool_use_id", in.ToolUseID,
+				)
+			} else if !canonUpdated {
+				e.appLog().Info("verifier_canonical_entry_vanished",
+					"tool_use_id", in.ToolUseID,
+				)
+			}
 		}
 
 		level := slog.LevelInfo
@@ -804,6 +957,7 @@ func (e *Engine) spawnVerification(cacheKey string, in Input) {
 			"verifier_verdict", string(dec.Verdict),
 			"verifier_reason", dec.Reason,
 			"command", in.Command,
+			"canonical_sibling_updated", canonicalKey != "",
 			"tool_use_id", in.ToolUseID,
 		)
 	}()

@@ -85,6 +85,23 @@ type Decision struct {
 	// Scope determines how broadly an allow verdict can be cached.
 	// Empty string is treated as ScopeProject (the safer default).
 	Scope Scope `json:"scope,omitempty"`
+	// VariableSlots is an optional list of "tokens that don't affect
+	// the safety verdict" the model identified. The engine uses it to
+	// build a canonical form of the command for cache amplification:
+	// different concrete commands whose varying tokens are all in the
+	// same slot types share one cached verdict.
+	//
+	// Slot types are a closed vocabulary (see internal/normalize).
+	// Unknown types are dropped at engine time. The LLM cannot author
+	// regex; it only names slot POSITIONS and TYPES.
+	VariableSlots []VariableSlot `json:"variable_slots,omitempty"`
+}
+
+// VariableSlot is a single "this token at this position doesn't
+// affect the verdict" entry in the classifier response.
+type VariableSlot struct {
+	Position string `json:"position"` // arg1, arg2, ..., tail_flag
+	Type     string `json:"type"`     // one of normalize.SlotType
 }
 
 // ClassifyInput is what the engine passes per call.
@@ -252,7 +269,18 @@ func buildUserMessage(in ClassifyInput) string {
             "global"  → safe in every cwd (e.g. ls, cat, git status)
             "project" → safe only in this specific project (e.g. npm run build, make test, ./scripts/foo.sh)
             When in doubt, prefer "project" — it's the safer default.
-  reason:   1-2 sentence plain-English explanation`)
+  reason:   1-2 sentence plain-English explanation
+  variable_slots: OPTIONAL list. Each entry names a token in the command that does NOT affect
+            the safety verdict. Used to amplify the cache so similar commands share one entry.
+            { "position": "arg1" | "arg2" | ... | "tail_flag", "type": "<slot type>" }
+            Allowed slot types (closed vocabulary — anything else is dropped):
+              domain, ipv4, url_path_segment, uuid, integer, hex_hash,
+              filepath_tmp, filepath_cache, quoted_string, dns_record_type, http_method
+            Example for 'dig example.com A':
+              [{"position":"arg1","type":"domain"}, {"position":"arg2","type":"dns_record_type"}]
+            Do not include slots for tokens whose value DOES affect safety (e.g. don't mark
+            a filepath as variable unless it's under /tmp or ~/.cache).
+            When in doubt, omit variable_slots.`)
 	return b.String()
 }
 

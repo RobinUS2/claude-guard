@@ -359,3 +359,153 @@ func TestEffectiveVerdict_UnverifiedReturnsOriginal(t *testing.T) {
 		t.Errorf("EffectiveVerdict = %q", e.EffectiveVerdict())
 	}
 }
+
+// --- Canonical lookup & MatchCount ---
+
+func TestLookupCanonical_Hit(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	c := newTestCache(t, now)
+	canonKey := Key(KeyInputs{Command: "dig {DOMAIN} {DNS_TYPE}"})
+	_ = c.Put(canonKey, Entry{
+		Verdict:       VerdictAllow,
+		Reason:        "llm: read-only DNS lookup",
+		Tier:          "llm",
+		Program:       "dig",
+		CanonicalForm: "dig {DOMAIN} {DNS_TYPE}",
+		MatchCount:    1,
+	}, 90*24*time.Hour)
+
+	matchFn := func(canonical, command string) bool {
+		return canonical == "dig {DOMAIN} {DNS_TYPE}" && command == "dig example.com A"
+	}
+	entry, hitKey, hit := c.LookupCanonical("dig", "dig example.com A", matchFn)
+	if !hit {
+		t.Fatal("expected canonical hit")
+	}
+	if entry.CanonicalForm != "dig {DOMAIN} {DNS_TYPE}" {
+		t.Errorf("CanonicalForm = %q", entry.CanonicalForm)
+	}
+	if hitKey == "" {
+		t.Error("hitKey should be populated for MatchCount increment")
+	}
+}
+
+// M3: When an exact-cache entry has expired, a subsequent lookup for
+// the same command must still find the canonical sibling entry (which
+// carries a longer TTL). Protects the behavior that the engine's Tier 3
+// exact-miss path immediately falls through to canonical lookup.
+func TestLookupCanonical_FindsEntry_WhenExactExpired(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	c := newTestCache(t, now)
+
+	exactKey := Key(KeyInputs{Command: "dig example.com A"})
+	canonKey := Key(KeyInputs{Command: "dig {DOMAIN} {DNS_TYPE}"})
+
+	// Exact: short TTL (simulates default safety horizon already passed).
+	_ = c.Put(exactKey, Entry{
+		Verdict: VerdictAllow,
+		Reason:  "fast exact",
+		Tier:    "llm",
+		Command: "dig example.com A",
+	}, time.Minute)
+
+	// Canonical sibling: long TTL (90d is production default).
+	_ = c.Put(canonKey, Entry{
+		Verdict:       VerdictAllow,
+		Reason:        "llm: read-only DNS lookup",
+		Tier:          "llm",
+		Program:       "dig",
+		CanonicalForm: "dig {DOMAIN} {DNS_TYPE}",
+		MatchCount:    1,
+	}, 90*24*time.Hour)
+
+	// Advance past the exact-TTL horizon.
+	c.now = func() time.Time { return now.Add(2 * time.Minute) }
+
+	// Exact is gone.
+	if _, ok := c.Get(exactKey); ok {
+		t.Fatal("expected exact entry to be evicted by TTL")
+	}
+
+	// Canonical still resolves — this is the fall-through that keeps
+	// cache amplification working after the short exact TTL lapses.
+	matchFn := func(canonical, command string) bool {
+		return canonical == "dig {DOMAIN} {DNS_TYPE}" && command == "dig example.com A"
+	}
+	entry, hitKey, hit := c.LookupCanonical("dig", "dig example.com A", matchFn)
+	if !hit {
+		t.Fatal("canonical lookup must still succeed after exact TTL expiry")
+	}
+	if entry.CanonicalForm != "dig {DOMAIN} {DNS_TYPE}" {
+		t.Errorf("CanonicalForm = %q", entry.CanonicalForm)
+	}
+	if hitKey == "" {
+		t.Error("hitKey should be populated so the engine can bump MatchCount")
+	}
+}
+
+// M3-companion: When BOTH exact and canonical have expired, the
+// canonical lookup must miss. Otherwise a stale canonical could keep
+// serving allow verdicts past its intended horizon.
+func TestLookupCanonical_MissesWhenCanonicalExpired(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	c := newTestCache(t, now)
+
+	canonKey := Key(KeyInputs{Command: "dig {DOMAIN} {DNS_TYPE}"})
+	_ = c.Put(canonKey, Entry{
+		Verdict:       VerdictAllow,
+		Program:       "dig",
+		CanonicalForm: "dig {DOMAIN} {DNS_TYPE}",
+	}, time.Minute)
+
+	c.now = func() time.Time { return now.Add(2 * time.Minute) }
+
+	matchFn := func(canonical, command string) bool { return true }
+	if _, _, hit := c.LookupCanonical("dig", "dig example.com A", matchFn); hit {
+		t.Error("expired canonical must not return a hit")
+	}
+}
+
+func TestIncrementMatchCount_BumpsOnHit(t *testing.T) {
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	c := newTestCache(t, now)
+	key := Key(KeyInputs{Command: "dig {DOMAIN} A"})
+	_ = c.Put(key, Entry{
+		Verdict:       VerdictAllow,
+		Program:       "dig",
+		CanonicalForm: "dig {DOMAIN} A",
+		MatchCount:    3,
+	}, time.Hour)
+
+	originalExpiry := func() time.Time {
+		e, _ := c.Get(key)
+		return e.ExpiresAt
+	}()
+
+	updated, err := c.IncrementMatchCount(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated {
+		t.Fatal("expected hit")
+	}
+	got, _ := c.Get(key)
+	if got.MatchCount != 4 {
+		t.Errorf("MatchCount = %d, want 4", got.MatchCount)
+	}
+	// TTL must be preserved — M1 telemetry must not extend entry life.
+	if !got.ExpiresAt.Equal(originalExpiry) {
+		t.Errorf("ExpiresAt changed: %v -> %v", originalExpiry, got.ExpiresAt)
+	}
+}
+
+func TestIncrementMatchCount_MissOnUnknownKey(t *testing.T) {
+	c := newTestCache(t, time.Now())
+	updated, err := c.IncrementMatchCount("nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated {
+		t.Error("expected miss on unknown key")
+	}
+}
