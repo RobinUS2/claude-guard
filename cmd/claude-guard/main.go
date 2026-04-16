@@ -27,6 +27,7 @@ Subcommands:
   doctor              health check: config, schema, API key, hook wiring
   migrate             settings.json allow-list → legacy-patterns.yaml
   backup [--dest D]   copy logs + cache + config to backup destination (default: Google Drive)
+  cache <sub>         inspect/prune the verdict cache: stats, prune, clear
   stats [--since T]   aggregate decisions.jsonl: verdicts, tiers, latency, cache hit rate
   explain <id|--last> re-run a historical decision against the current rules
   lint                validate config + run the adversarial corpus as self-tests
@@ -70,6 +71,8 @@ func run(args []string) int {
 		return cmdMigrate(args[1:])
 	case "backup":
 		return cmdBackup(args[1:])
+	case "cache":
+		return cmdCache(args[1:])
 	case "trust":
 		return cmdTrust(args[1:])
 	case "init-project-config":
