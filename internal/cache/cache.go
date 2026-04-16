@@ -121,12 +121,13 @@ func (e *Entry) Expired(now time.Time) bool {
 // All fields participate in the hash. Adding a field in the future
 // must invalidate existing entries — bump SchemaVersion.
 type KeyInputs struct {
-	Tool          string
-	Command       string
-	CWD           string
-	GitBranch     string
-	PromptVersion string // sha256 of the classifier prompt
-	RulesHash     string // sha256 of the active rule set
+	Tool              string
+	Command           string
+	CWD               string
+	GitBranch         string
+	PromptVersion     string // sha256 of the classifier prompt
+	RulesHash         string // sha256 of the active rule set
+	ProjectConfigHash string // sha256 of the project .claude-guard.yml (empty if absent)
 }
 
 // SchemaVersion is part of every cache key. Bump it when the KeyInputs
@@ -134,9 +135,9 @@ type KeyInputs struct {
 //
 // v2: added scope-aware keys (global key strips cwd + branch).
 // v3: added Command + CWD + TrustedAt/TrustedReason fields on Entry.
-//     Schema bump invalidates v2 entries — old cache is orphaned (no
-//     negative consequence: new entries are written as v3 on next miss).
-const SchemaVersion = "3"
+// v4: added ProjectConfigHash dimension to KeyInputs so per-project
+//     rule edits invalidate stale verdicts.
+const SchemaVersion = "4"
 
 // MaxCommandInEntry caps how many bytes of a command we persist in
 // an entry. Commands occasionally include multi-KB heredocs or
@@ -180,6 +181,8 @@ func keyWithDimensions(in KeyInputs, includeProject bool) string {
 	b.WriteString(in.PromptVersion)
 	b.WriteByte('\x00')
 	b.WriteString(in.RulesHash)
+	b.WriteByte('\x00')
+	b.WriteString(in.ProjectConfigHash)
 
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])

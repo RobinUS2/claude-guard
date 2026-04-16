@@ -9,6 +9,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
+	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 )
 
 // cmdTest dry-runs a command through the engine and prints a trace of
@@ -58,8 +59,9 @@ func cmdTest(args []string) int {
 	legacyList, _ := legacy.Load(defaultLegacyPath())
 
 	eng := engine.NewWithOptions(engine.Options{
-		Config: cfg,
-		Legacy: legacyList,
+		Config:              cfg,
+		Legacy:              legacyList,
+		ProjectConfigLoader: projectconfig.Load,
 	})
 	out := eng.Decide(engine.Input{
 		ToolName: "Bash",

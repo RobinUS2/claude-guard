@@ -12,6 +12,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/hook"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
+	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"github.com/RobinUS2/claude-guard/internal/redact"
@@ -108,15 +109,16 @@ func cmdDecide(_ []string) int {
 
 	// Run the engine with the full set of components.
 	eng := engine.NewWithOptions(engine.Options{
-		Config:      cfg,
-		DecisionLog: decisionLog,
-		AppLog:      appLogger,
-		Redactor:    redactor,
-		LLM:         classifier,
-		Verifier:    verifier,
-		Breaker:     br,
-		Cache:       cch,
-		Legacy:      legacyList,
+		Config:              cfg,
+		DecisionLog:         decisionLog,
+		AppLog:              appLogger,
+		Redactor:            redactor,
+		LLM:                 classifier,
+		Verifier:            verifier,
+		Breaker:             br,
+		Cache:               cch,
+		Legacy:              legacyList,
+		ProjectConfigLoader: projectconfig.Load,
 	})
 	out := eng.Decide(engine.Input{
 		ToolName:    req.ToolName,

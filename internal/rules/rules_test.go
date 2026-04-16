@@ -384,6 +384,51 @@ func TestPathAccess_Shadow(t *testing.T) {
 	}
 }
 
+// --- anchoredFlagForbidden: handles combined short flags + long-flag
+// derivatives (--force catches --force-with-lease). H1 from the CTO
+// review. ---
+
+func TestAnchoredFlagForbidden(t *testing.T) {
+	cases := []struct {
+		flags     []string
+		forbidden string
+		want      bool
+	}{
+		// Exact matches
+		{[]string{"-f"}, "-f", true},
+		{[]string{"--force"}, "--force", true},
+		{[]string{"-f", "-v"}, "-v", true},
+
+		// Combined short flags — this was the pre-fix gap
+		{[]string{"-rf"}, "-f", true},
+		{[]string{"-rf"}, "-r", true},
+		{[]string{"-Rfu"}, "-f", true},
+		{[]string{"-fR"}, "-r", false}, // case-sensitive: -r and -R are different
+		{[]string{"-fR"}, "-R", true},
+
+		// Long flag with = value
+		{[]string{"--force=true"}, "--force", true},
+		{[]string{"--output=/tmp"}, "--output", true},
+
+		// Long flag with - derivative — this was also a pre-fix gap
+		{[]string{"--force-with-lease"}, "--force", true},
+		{[]string{"--force-if-includes"}, "--force", true},
+
+		// Must not over-match
+		{[]string{"--forced"}, "--force", false}, // --forced is NOT a derivative (no hyphen separator)
+		{[]string{"-q"}, "-f", false},
+		{[]string{"-r"}, "-f", false},
+		{[]string{}, "-f", false},
+	}
+	for _, tc := range cases {
+		got := anchoredFlagForbidden(tc.flags, tc.forbidden)
+		if got != tc.want {
+			t.Errorf("anchoredFlagForbidden(%v, %q) = %v, want %v",
+				tc.flags, tc.forbidden, got, tc.want)
+		}
+	}
+}
+
 // --- flag combo helper tests ---
 
 func TestFlagsMatchAllGroups(t *testing.T) {

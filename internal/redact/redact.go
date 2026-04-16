@@ -24,6 +24,7 @@ package redact
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Decision is the outcome of scanning a command.
@@ -89,13 +90,28 @@ func New(extraSkip, extraReplace []Pattern) *Redactor {
 // checked first — a single match means the command never reaches the
 // LLM. Otherwise REPLACE patterns substitute matched substrings and
 // the result is returned.
+//
+// Special case: if a SKIP pattern's match is entirely references to
+// shell variables ($VAR, ${VAR}), the literal command text contains
+// no secret — only a variable name — and sending it to the LLM is
+// harmless. We accept the match but demote to Send. This avoids
+// false-positives on patterns like
+//   Authorization: Bearer $CF_TOKEN
+// where $CF_TOKEN is resolved by the shell at exec time and never
+// appears in the literal command string.
 func (r *Redactor) Scan(command string) Result {
 	for _, p := range r.skip {
-		if p.Regex.MatchString(command) {
-			return Result{
-				Decision:   Skip,
-				SkipReason: p.Name,
-			}
+		loc := p.Regex.FindStringIndex(command)
+		if loc == nil {
+			continue
+		}
+		matched := command[loc[0]:loc[1]]
+		if isShellVarReference(matched) {
+			continue // safe — the actual secret isn't in the literal text
+		}
+		return Result{
+			Decision:   Skip,
+			SkipReason: p.Name,
 		}
 	}
 
@@ -112,6 +128,61 @@ func (r *Redactor) Scan(command string) Result {
 		Redacted:      out,
 		ReplacedKinds: kinds,
 	}
+}
+
+// shellVarRE matches $VAR or ${VAR} references only. We demote skip-
+// pattern matches that consist entirely of shell-variable references
+// to Send, because the actual secret isn't in the literal command.
+var shellVarRE = regexp.MustCompile(`^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$`)
+
+// isShellVarReference returns true when the "secret-looking" portion
+// of a skip-pattern match is just a shell variable reference — i.e.
+// the literal command text contains no actual credential, only a
+// name the shell will expand at execution time.
+//
+// Heuristic: find the substring AFTER the last `=` or `:` in the
+// matched text (that's the "value" portion — everything before is
+// the key like "Authorization" or "api_key"). If that trimmed value
+// is a single $VAR / ${VAR}, we consider the match safe to send.
+//
+// We deliberately do NOT try to inspect command substitution
+// ($(...)), arithmetic expressions, or anything else — only bare
+// variable references. Anything more complex stays conservative.
+func isShellVarReference(matched string) bool {
+	value := matched
+	// 1. Isolate the value portion: after "=" or ":" (whichever is last).
+	for _, sep := range []string{"=", ":"} {
+		if idx := strings.LastIndex(value, sep); idx >= 0 {
+			value = value[idx+1:]
+		}
+	}
+	value = strings.TrimSpace(value)
+	// 2. Strip any auth-scheme keyword ("Bearer ", "Basic ", etc.) that
+	//    may precede the actual value. Case-insensitive.
+	lower := strings.ToLower(value)
+	for _, scheme := range []string{"bearer ", "basic ", "digest ", "token "} {
+		if strings.HasPrefix(lower, scheme) {
+			value = value[len(scheme):]
+			break
+		}
+	}
+	// 3. Strip all whitespace and any quote characters from both ends.
+	//    Done AFTER scheme strip because scheme keywords might be inside quotes.
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"'`)
+	value = strings.TrimSpace(value)
+	// 4. Scheme might have been inside quotes — try stripping again.
+	lower = strings.ToLower(value)
+	for _, scheme := range []string{"bearer ", "basic ", "digest ", "token "} {
+		if strings.HasPrefix(lower, scheme) {
+			value = value[len(scheme):]
+			break
+		}
+	}
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"'`)
+	value = strings.TrimSpace(value)
+	return shellVarRE.MatchString(value)
 }
 
 // MustCompilePatterns is a helper for static pattern lists. Panics on
@@ -144,8 +215,12 @@ type PatternSpec struct {
 // significant (any match wins).
 func DefaultSkipPatterns() []Pattern {
 	return MustCompilePatterns([]PatternSpec{
-		// HTTP Authorization headers
-		{Name: "http-bearer", Regex: `(?i)(?:authorization|bearer)\s*[:=]\s*\S+`},
+		// HTTP Authorization headers. Capture up to two whitespace-
+		// separated tokens after the colon/equals so values like
+		//   Authorization: Bearer $CF_TOKEN
+		// are matched in full; isShellVarReference then demotes the
+		// match when the value portion is just a $VAR reference.
+		{Name: "http-bearer", Regex: `(?i)(?:authorization|bearer)\s*[:=]\s*\S+(?:\s+\S+)?`},
 		{Name: "http-basic-auth", Regex: `(?i)basic\s+[a-zA-Z0-9+/=]{20,}`},
 
 		// Anthropic API keys

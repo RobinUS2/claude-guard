@@ -89,13 +89,75 @@ func (r *AnchoredCommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 		}
 	}
 	for _, forbidden := range r.ForbidFlags {
-		for _, f := range c.Flags {
-			if f == forbidden || strings.HasPrefix(f, forbidden+"=") {
-				return NoMatch, ""
-			}
+		if anchoredFlagForbidden(c.Flags, forbidden) {
+			return NoMatch, ""
 		}
 	}
 	return Match, r.RuleName
+}
+
+// anchoredFlagForbidden returns true when a ForbidFlags entry matches
+// one of the call's flag tokens. Matching rules:
+//
+//   - Exact string match (`--force` matches `--force`).
+//   - Key=value form: `--force` matches `--force=value`.
+//   - Prefix form for long flags: `--force` ALSO matches any flag
+//     starting with `--force-` (catches `--force-with-lease` when the
+//     user wrote `--force`). This widens the config author's reach
+//     without requiring them to enumerate every derivative flag.
+//   - Short-flag unpacking: `-f` matches `-fR`, `-Rf`, `-rfu`, etc.
+//     Required because shellparse stores combined short flags as one
+//     token.
+//
+// The prior implementation missed points 3 and 4 — a project config
+// saying `forbid_flags: ["-f"]` would silently fail for a command
+// like `cmd -rf foo`, and `forbid_flags: ["--force"]` would miss
+// `--force-with-lease`. Both were live security bugs.
+func anchoredFlagForbidden(callFlags []string, forbidden string) bool {
+	// Long flag
+	if strings.HasPrefix(forbidden, "--") {
+		for _, f := range callFlags {
+			if f == forbidden {
+				return true
+			}
+			if strings.HasPrefix(f, forbidden+"=") {
+				return true
+			}
+			if strings.HasPrefix(f, forbidden+"-") {
+				return true
+			}
+		}
+		return false
+	}
+	// Short flag (length 2: `-x`). Check combined short flags too.
+	if strings.HasPrefix(forbidden, "-") && len(forbidden) == 2 {
+		want := rune(forbidden[1])
+		for _, f := range callFlags {
+			if f == forbidden {
+				return true
+			}
+			if strings.HasPrefix(f, forbidden+"=") {
+				return true
+			}
+			// Combined short flags like `-rf` or `-fR`: look at each
+			// letter in the token's short-flag portion.
+			if strings.HasPrefix(f, "-") && !strings.HasPrefix(f, "--") && len(f) > 2 {
+				for _, ch := range f[1:] {
+					if ch == want {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	// Other shapes (not starting with -) — treat as exact/prefix only.
+	for _, f := range callFlags {
+		if f == forbidden || strings.HasPrefix(f, forbidden+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // --- ProgramIs: a block rule that fires when any top-level call's program

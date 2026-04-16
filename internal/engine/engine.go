@@ -26,6 +26,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
+	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 	"github.com/RobinUS2/claude-guard/internal/projectctx"
 	"github.com/RobinUS2/claude-guard/internal/redact"
 	"github.com/RobinUS2/claude-guard/internal/rules"
@@ -98,6 +99,15 @@ type Engine struct {
 	cache    *cache.Cache
 	legacy   *legacy.AllowList // tier 5: migrated allow list from settings.json
 
+	// ProjectConfigLoader is called per-decide to look up a
+	// per-project .claude-guard.yml. Can be nil (feature disabled).
+	// Defaults to projectconfig.Load in production; tests stub it.
+	projectConfigLoader func(cwd string) (*projectconfig.Config, error)
+	// projectConfigCache memoizes (path+mtime) → *Config for the
+	// lifetime of the engine. Each hook invocation spawns a fresh
+	// process, so this cache never grows unbounded.
+	projectConfigCache sync.Map
+
 	// promptVersion + rulesHash feed the cache key. Computed once at
 	// engine construction so every Decide call uses the same key shape.
 	promptVersion string
@@ -128,6 +138,11 @@ type Options struct {
 	// previously auto-approved continues to flow through while the
 	// smarter tiers warm up.
 	Legacy *legacy.AllowList
+
+	// ProjectConfigLoader is called per-decide to look up a per-project
+	// .claude-guard.yml. Pass projectconfig.Load in production; pass a
+	// stub in tests. Nil disables per-project config entirely.
+	ProjectConfigLoader func(cwd string) (*projectconfig.Config, error)
 }
 
 // New creates an engine with the given config and logger.
@@ -140,15 +155,16 @@ func New(cfg *config.Config, logger *clog.DecisionLogger) *Engine {
 // components. Pass nil for any field to disable that piece.
 func NewWithOptions(opts Options) *Engine {
 	e := &Engine{
-		cfg:      opts.Config,
-		log:      opts.DecisionLog,
-		app:      opts.AppLog,
-		redactor: opts.Redactor,
-		llm:      opts.LLM,
-		verifier: opts.Verifier,
-		breaker:  opts.Breaker,
-		cache:    opts.Cache,
-		legacy:   opts.Legacy,
+		cfg:                 opts.Config,
+		log:                 opts.DecisionLog,
+		app:                 opts.AppLog,
+		redactor:            opts.Redactor,
+		llm:                 opts.LLM,
+		verifier:            opts.Verifier,
+		breaker:             opts.Breaker,
+		cache:               opts.Cache,
+		legacy:              opts.Legacy,
+		projectConfigLoader: opts.ProjectConfigLoader,
 	}
 	if e.cfg == nil {
 		e.cfg = config.Default()
@@ -268,6 +284,11 @@ func (e *Engine) Decide(in Input) Output {
 		return out
 	}
 
+	// Load per-project config (tier 2 additions). Always safe to call —
+	// missing file returns nil config; bad file returns config with Warning
+	// and zero rules, so engine behavior falls back to compiled defaults.
+	projRules, projHash := e.loadProjectConfig(in.CWD)
+
 	// Tier 1: BLOCK (first, unconditional)
 	for _, r := range e.cfg.InstantBlock {
 		if v, reason := r.Eval(parsed); v == rules.Match {
@@ -287,9 +308,14 @@ func (e *Engine) Decide(in Input) Output {
 		}
 	}
 
-	// Tier 2: ALLOW (only if tier 1 did NOT match — in shadow mode we still
-	// run tier 2 to populate the shadow trace).
-	for _, r := range e.cfg.InstantAllow {
+	// Tier 2: ALLOW (compiled defaults + project-config extensions).
+	// Project rules are namespaced as "project:<name>" so log output
+	// distinguishes them from built-in rules. Project rules CANNOT
+	// weaken tier 1 — this loop runs only if tier 1 did not match.
+	allowRules := make([]rules.Rule, 0, len(e.cfg.InstantAllow)+len(projRules))
+	allowRules = append(allowRules, e.cfg.InstantAllow...)
+	allowRules = append(allowRules, projRules...)
+	for _, r := range allowRules {
 		if v, reason := r.Eval(parsed); v == rules.Match {
 			out.Shadow.Tier2Rule = r.Name()
 			// In enforce mode: only allow if tier 1 didn't match.
@@ -318,12 +344,13 @@ func (e *Engine) Decide(in Input) Output {
 	// the LLM regardless of where you are. A project hit only matches
 	// the same cwd + branch.
 	keyInputs := cache.KeyInputs{
-		Tool:          in.ToolName,
-		Command:       in.Command,
-		CWD:           in.CWD,
-		GitBranch:     gitBranchOf(in.CWD),
-		PromptVersion: e.promptVersion,
-		RulesHash:     e.rulesHash,
+		Tool:              in.ToolName,
+		Command:           in.Command,
+		CWD:               in.CWD,
+		GitBranch:         gitBranchOf(in.CWD),
+		PromptVersion:     e.promptVersion,
+		RulesHash:         e.rulesHash,
+		ProjectConfigHash: projHash,
 	}
 	var globalKey, projectKey string
 	if e.cache != nil && e.llm != nil {
@@ -547,6 +574,72 @@ func (e *Engine) runLLMTier(in Input) llmCallResult {
 	default:
 		return llmCallResult{shadow: "unsure", reason: dec.Reason}
 	}
+}
+
+// loadProjectConfig resolves the per-project .claude-guard.yml for
+// this command's cwd, returning the tier-2 allow rule extensions and
+// the config's hash (for cache-key invalidation). Returns (nil, "")
+// when no loader is configured or no file is found. Process-lifetime
+// memoization by config-file path keeps the cost flat across multiple
+// Decide() calls in one hook invocation.
+//
+// Warnings from Load (rejected rules, malformed YAML, unknown fields)
+// are logged to app.jsonl once per path. The engine still operates
+// with whatever rules DID validate — it does not fail closed on
+// project-config errors because then a corrupt project file could
+// prevent the user from working.
+func (e *Engine) loadProjectConfig(cwd string) ([]rules.Rule, string) {
+	if e.projectConfigLoader == nil {
+		return nil, ""
+	}
+	if cwd == "" {
+		return nil, ""
+	}
+
+	// Process-local memoization. Key is cwd — different commands in
+	// different cwds may resolve to the same or different config files.
+	if cached, ok := e.projectConfigCache.Load(cwd); ok {
+		if c, ok := cached.(*projectconfig.Config); ok && c != nil {
+			return c.Rules, c.Hash
+		}
+		return nil, ""
+	}
+
+	cfg, err := e.projectConfigLoader(cwd)
+	if err != nil {
+		e.appLog().Warn("project_config_error", "err", err.Error(), "cwd", cwd)
+		e.projectConfigCache.Store(cwd, (*projectconfig.Config)(nil))
+		return nil, ""
+	}
+	e.projectConfigCache.Store(cwd, cfg)
+	if cfg == nil {
+		return nil, ""
+	}
+
+	if cfg.Warning != nil {
+		e.appLog().Warn("project_config_warning",
+			"path", cfg.Path,
+			"warning", cfg.Warning.Error(),
+			"accepted_rules", len(cfg.Rules),
+		)
+	} else {
+		e.appLog().Info("project_config_loaded",
+			"path", cfg.Path,
+			"project_name", cfg.ProjectName,
+			"rule_count", len(cfg.Rules),
+			"hash", shortHash(cfg.Hash),
+		)
+	}
+	return cfg.Rules, cfg.Hash
+}
+
+// shortHash returns the first 12 hex chars of a sha256 string — plenty
+// for identifying a config version in logs.
+func shortHash(h string) string {
+	if len(h) < 12 {
+		return h
+	}
+	return h[:12]
 }
 
 // appLog returns the app-level logger or a no-op if not configured.

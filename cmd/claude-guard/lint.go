@@ -11,6 +11,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/corpus"
 	"github.com/RobinUS2/claude-guard/internal/engine"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
+	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 )
 
 // cmdLint validates config + runs the adversarial corpus through the
@@ -65,6 +66,20 @@ func cmdLint(args []string) int {
 		fmt.Sprintf("%d rules", len(cfg.InstantBlock)))
 	check("rules:instant_allow", len(cfg.InstantAllow) >= 5,
 		fmt.Sprintf("%d rules", len(cfg.InstantAllow)))
+
+	// 2b. Project-config file in cwd (if any).
+	if cwd, err := os.Getwd(); err == nil {
+		if projCfg, _ := projectconfig.Load(cwd); projCfg != nil {
+			if projCfg.Warning != nil {
+				check("project:config", false,
+					fmt.Sprintf("%s → %v", projCfg.Path, projCfg.Warning))
+			} else {
+				check("project:config", true,
+					fmt.Sprintf("%s (%d rule%s accepted)",
+						projCfg.Path, len(projCfg.Rules), map[bool]string{true: "", false: "s"}[len(projCfg.Rules) == 1]))
+			}
+		}
+	}
 
 	// 3. Legacy file parses if present.
 	legacyPath := defaultLegacyPath()

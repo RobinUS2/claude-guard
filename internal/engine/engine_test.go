@@ -12,7 +12,9 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
+	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 	"github.com/RobinUS2/claude-guard/internal/redact"
+	"github.com/RobinUS2/claude-guard/internal/rules"
 )
 
 // stubClassifier is an in-memory llm.Classifier for engine tests.
@@ -468,6 +470,154 @@ func hasSubstring(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// --- Per-project config integration ---
+
+func newEngineWithProjectConfig(t *testing.T, projRules []rules.Rule, hash string) *Engine {
+	t.Helper()
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	loader := func(cwd string) (*projectconfig.Config, error) {
+		return &projectconfig.Config{
+			Path:        "/fake/.claude-guard.yml",
+			ProjectName: "test",
+			Rules:       projRules,
+			Hash:        hash,
+		}, nil
+	}
+	return NewWithOptions(Options{
+		Config:              cfg,
+		ProjectConfigLoader: loader,
+	})
+}
+
+func TestEngine_ProjectConfig_AddsAllowRule(t *testing.T) {
+	// A project rule that allows `make deploy` should auto-approve
+	// when the default make-readonly rule wouldn't (deploy isn't in
+	// the default subcommand list).
+	e := newEngineWithProjectConfig(t, []rules.Rule{
+		&rules.AnchoredCommand{
+			RuleName:         "project:make-deploy",
+			Programs:         []string{"make"},
+			RequireSubcmdAny: []string{"deploy"},
+		},
+	}, "abc123")
+
+	out := e.Decide(Input{
+		ToolName: "Bash",
+		Command:  "make deploy",
+		CWD:      "/tmp/test-project",
+	})
+	if out.Verdict != Allow {
+		t.Errorf("Verdict = %v, want Allow (project rule should fire)", out.Verdict)
+	}
+	if out.Rule != "project:make-deploy" {
+		t.Errorf("Rule = %q, want project:make-deploy", out.Rule)
+	}
+}
+
+func TestEngine_ProjectConfig_CannotOverrideTier1(t *testing.T) {
+	// A malicious project config tries to allow `rm` — but the project
+	// config package rejects `rm` at validation, so no rule is loaded.
+	// Even if one WERE loaded, tier 1 runs first: rm -rf /etc would
+	// still DENY. This test uses a contrived rule that the schema
+	// validator would normally reject, to prove the ENGINE runs tier
+	// 1 first regardless of what project config contributes.
+	e := newEngineWithProjectConfig(t, []rules.Rule{
+		&rules.AnchoredCommand{
+			RuleName: "project:evil-rm",
+			Programs: []string{"rm"}, // in real life, schema rejects this
+		},
+	}, "evil")
+
+	out := e.Decide(Input{
+		ToolName: "Bash",
+		Command:  "rm -rf /etc",
+		CWD:      "/tmp/evil-project",
+	})
+	if out.Verdict != Deny {
+		t.Errorf("Verdict = %v, want Deny (tier 1 must win over project config)", out.Verdict)
+	}
+	if out.Tier != "instant_block" {
+		t.Errorf("Tier = %q, want instant_block", out.Tier)
+	}
+}
+
+func TestEngine_ProjectConfig_NoLoaderNoEffect(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	e := NewWithOptions(Options{Config: cfg}) // no ProjectConfigLoader
+	out := e.Decide(Input{
+		ToolName: "Bash",
+		Command:  "git status",
+	})
+	// git status matches default git-readonly.
+	if out.Verdict != Allow {
+		t.Errorf("Verdict = %v", out.Verdict)
+	}
+}
+
+func TestEngine_ProjectConfig_LoaderErrorDoesNotBlock(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	e := NewWithOptions(Options{
+		Config: cfg,
+		ProjectConfigLoader: func(cwd string) (*projectconfig.Config, error) {
+			return nil, errors.New("simulated failure")
+		},
+	})
+	out := e.Decide(Input{ToolName: "Bash", Command: "ls"})
+	// Loader failure must not block: engine falls back to defaults.
+	if out.Verdict != Allow {
+		t.Errorf("Verdict = %v, want Allow (loader failure should not break default rules)", out.Verdict)
+	}
+}
+
+func TestEngine_ProjectConfig_HashFeedsIntoCacheKey(t *testing.T) {
+	// Two engines with different project config hashes MUST produce
+	// different cache keys for the same command, so edits to the
+	// project config invalidate old entries.
+	cfg := config.Default()
+	cfg.ShadowMode = false
+
+	dir := t.TempDir()
+	cch := cache.New(dir)
+
+	e1 := NewWithOptions(Options{
+		Config: cfg, Cache: cch,
+		LLM: &stubClassifier{verdict: llm.VerdictSafe},
+		ProjectConfigLoader: func(cwd string) (*projectconfig.Config, error) {
+			return &projectconfig.Config{Hash: "hash-v1"}, nil
+		},
+	})
+	e2 := NewWithOptions(Options{
+		Config: cfg, Cache: cch,
+		LLM: &stubClassifier{verdict: llm.VerdictSafe},
+		ProjectConfigLoader: func(cwd string) (*projectconfig.Config, error) {
+			return &projectconfig.Config{Hash: "hash-v2"}, nil
+		},
+	})
+
+	cmd := "cat /etc/hosts | grep foo"
+	cwd := "/tmp/project"
+
+	// e1 writes a cache entry under hash-v1.
+	out1 := e1.Decide(Input{ToolName: "Bash", Command: cmd, CWD: cwd})
+	if out1.Verdict != Allow {
+		t.Fatalf("e1 Verdict = %v, want Allow", out1.Verdict)
+	}
+
+	// e2 should NOT get a cache hit — different hash → different key.
+	// Since e2's stub says "safe", the LLM is called fresh and the
+	// verdict is still Allow, but from the LLM tier, not the cache.
+	out2 := e2.Decide(Input{ToolName: "Bash", Command: cmd, CWD: cwd})
+	if out2.Verdict != Allow {
+		t.Fatalf("e2 Verdict = %v, want Allow", out2.Verdict)
+	}
+	if out2.Tier == "cache" {
+		t.Errorf("e2 hit the cache across different project hashes — cache key invalidation broken")
+	}
 }
 
 func TestEngine_LogsEveryDecision(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
+	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 	"github.com/RobinUS2/claude-guard/internal/version"
 )
 
@@ -132,6 +133,26 @@ func cmdDoctor(_ []string) int {
 		warn("legacy:patterns", err.Error())
 	}
 
+	// 6d. Per-project config (if cwd contains one)
+	if cwd, err := os.Getwd(); err == nil {
+		if projCfg, _ := projectconfig.Load(cwd); projCfg != nil {
+			if projCfg.Warning != nil {
+				warn("project:config",
+					fmt.Sprintf("%s → %v (accepted %d rules)",
+						projCfg.Path, projCfg.Warning, len(projCfg.Rules)))
+			} else {
+				label := projCfg.ProjectName
+				if label == "" {
+					label = "(no project_name)"
+				}
+				check("project:config", true,
+					fmt.Sprintf("%s [%s, %d rule%s]",
+						projCfg.Path, label, len(projCfg.Rules),
+						plural(len(projCfg.Rules))))
+			}
+		}
+	}
+
 	// 7. Claude Code settings.json hook wiring
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
 	wired, detail := checkHookWired(settingsPath)
@@ -171,6 +192,14 @@ func cmdDoctor(_ []string) int {
 	}
 	fmt.Println("overall: PROBLEMS FOUND — see lines marked [fail]")
 	return 1
+}
+
+// plural returns "s" unless n == 1. For table output cosmetics only.
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // checkHookWired reads settings.json and reports whether a PreToolUse

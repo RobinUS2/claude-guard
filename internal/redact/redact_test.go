@@ -184,6 +184,80 @@ func TestSkip_RecordsReason(t *testing.T) {
 	}
 }
 
+// --- Shell variable references: literal text contains no secret,
+// only a $VAR reference the shell expands at exec time. Sending
+// these to the LLM is safe because the secret never appears in the
+// literal command string. ---
+
+func TestShellVarRef_BearerWithVar_NotSkipped(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `curl -H "Authorization: Bearer $CF_TOKEN" https://api.cloudflare.com/zones`
+	res := r.Scan(cmd)
+	if res.Decision == Skip {
+		t.Errorf("Authorization: Bearer $VAR should NOT be skipped; only the var name is in the literal command (got skip reason=%q)", res.SkipReason)
+	}
+}
+
+func TestShellVarRef_BearerWithBraces_NotSkipped(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `curl -H "Authorization: Bearer ${CF_TOKEN}" https://api.example.com`
+	if r.Scan(cmd).Decision == Skip {
+		t.Error(`Bearer ${VAR} form should also be exempt`)
+	}
+}
+
+func TestShellVarRef_GenericKeyWithVar_NotSkipped(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `curl -d "api_key=$MY_KEY" https://api.example.com`
+	if r.Scan(cmd).Decision == Skip {
+		t.Error(`api_key=$VAR should NOT be skipped`)
+	}
+}
+
+func TestShellVarRef_RealBearerStillSkipped(t *testing.T) {
+	// Regression: the real token case must still be skipped.
+	r := New(nil, nil)
+	cmd := `curl -H "Authorization: Bearer sk-ant-abc123def456ghi789jkl" https://api.anthropic.com`
+	res := r.Scan(cmd)
+	if res.Decision != Skip {
+		t.Errorf("real Bearer token must be skipped; got Decision=%v", res.Decision)
+	}
+}
+
+func TestShellVarRef_RealApiKeyStillSkipped(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `curl -d "api_key=literal-value-12345" https://api.example.com`
+	if r.Scan(cmd).Decision != Skip {
+		t.Error("real api_key literal must be skipped")
+	}
+}
+
+func TestShellVarRef_IsShellVarReference(t *testing.T) {
+	cases := []struct {
+		matched string
+		want    bool
+	}{
+		{"Authorization: Bearer $CF_TOKEN", true},
+		{"Authorization: Bearer ${CF_TOKEN}", true},
+		{"authorization: Bearer $foo", true},
+		{`Authorization: Bearer "$CF"`, true},
+		{"api_key=$KEY", true},
+		{"api_key=${KEY}", true},
+		{"password=$PW", true},
+		{"Authorization: Bearer sk-ant-real-token", false},
+		{"api_key=actual-literal-value", false},
+		{"Authorization: Bearer $(command)", false},      // command substitution — conservative
+		{"Authorization: Bearer $VAR$OTHER", false},      // multiple vars concatenated — conservative
+		{"Authorization: Bearer prefix$VAR", false},      // var embedded in literal — conservative
+	}
+	for _, tc := range cases {
+		got := isShellVarReference(tc.matched)
+		if got != tc.want {
+			t.Errorf("isShellVarReference(%q) = %v, want %v", tc.matched, got, tc.want)
+		}
+	}
+}
+
 func TestReplacedKindsListed(t *testing.T) {
 	r := New(nil, nil)
 	res := r.Scan(`curl https://192.168.1.1/users/550e8400-e29b-41d4-a716-446655440000?email=robin@us2.nl`)
