@@ -4,3 +4,6 @@ allow:
   - name: make-guard-targets
     programs: [make]
     subcommands: [install, test, build, lint, clean]
+  - name: git-push
+    programs: [git]
+    subcommands: [push]
