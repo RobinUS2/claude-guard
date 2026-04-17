@@ -405,7 +405,7 @@ func DefaultAllowRules() []rules.Rule {
 		&rules.AnchoredCommand{
 			RuleName:         "git-readonly",
 			Programs:         []string{"git"},
-			RequireSubcmdAny: []string{"status", "log", "diff", "show", "branch", "remote", "blame", "rev-parse", "ls-files", "ls-tree", "describe", "config"},
+			RequireSubcmdAny: []string{"status", "log", "diff", "show", "branch", "remote", "blame", "rev-parse", "ls-files", "ls-tree", "describe", "config", "worktree"},
 		},
 
 		// gcloud is intentionally NOT in tier 2. Its subcommand tree is too

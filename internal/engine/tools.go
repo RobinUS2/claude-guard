@@ -6,11 +6,16 @@
 package engine
 
 import (
+	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -80,6 +85,25 @@ func (e *Engine) decideWebFetch(in Input, start time.Time) Output {
 			}
 			out.Shadow.Tier1Rule = rule
 			out.Shadow.Tier1Reason = reason
+		}
+	}
+
+	// Safe Browsing API check for new domains (between tier-1 SSRF
+	// and LLM). Only fires when API key is configured and the domain
+	// hasn't been seen before (file-cached). Fail-open on errors.
+	if in.URL != "" && out.Shadow.Tier1Rule == "" {
+		if threat := e.checkSafeBrowsing(in.URL, in.ToolUseID); threat != "" {
+			if !e.cfg.ShadowMode {
+				out.Verdict = Deny
+				out.Tier = "instant_block"
+				out.Rule = "webfetch-safe-browsing"
+				out.Reason = "Google Safe Browsing: " + threat
+				out.Latency = time.Since(start)
+				e.record(in, out)
+				return out
+			}
+			out.Shadow.Tier1Rule = "webfetch-safe-browsing"
+			out.Shadow.Tier1Reason = threat
 		}
 	}
 
@@ -430,4 +454,131 @@ func (e *Engine) buildKeyInputs(in Input, projHash string) cache.KeyInputs {
 func mcpInputHash(raw string) string {
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])[:16]
+}
+
+// --- Google Safe Browsing ---
+
+// checkSafeBrowsing queries Google Safe Browsing API v4 for the given
+// URL's domain. Returns the threat type string on match ("MALWARE",
+// "SOCIAL_ENGINEERING", etc.) or "" when safe / error / no API key.
+//
+// Results are file-cached under ~/.cache/claude-guard/safebrowsing/
+// keyed by sha256(domain). Safe domains cache for 1h, unsafe for 24h.
+// Only fires on cache miss (new domain). Fail-open on API errors.
+func (e *Engine) checkSafeBrowsing(rawURL, toolUseID string) string {
+	apiKey := os.Getenv("GOOGLE_SAFE_BROWSING_API_KEY")
+	if apiKey == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	domain := strings.ToLower(u.Hostname())
+	if domain == "" {
+		return ""
+	}
+
+	// File cache check.
+	cacheDir := filepath.Join(os.Getenv("HOME"), ".cache", "claude-guard", "safebrowsing")
+	domHash := sha256.Sum256([]byte(domain))
+	cachePath := filepath.Join(cacheDir, hex.EncodeToString(domHash[:])+".json")
+
+	type sbCacheEntry struct {
+		Domain  string    `json:"domain"`
+		Safe    bool      `json:"safe"`
+		Threat  string    `json:"threat,omitempty"`
+		Expires time.Time `json:"expires"`
+	}
+	if data, err := os.ReadFile(cachePath); err == nil {
+		var entry sbCacheEntry
+		if json.Unmarshal(data, &entry) == nil && time.Now().Before(entry.Expires) {
+			if !entry.Safe {
+				return entry.Threat
+			}
+			return ""
+		}
+	}
+
+	// Call Safe Browsing API.
+	type sbReq struct {
+		Client struct {
+			ClientID      string `json:"clientId"`
+			ClientVersion string `json:"clientVersion"`
+		} `json:"client"`
+		ThreatInfo struct {
+			ThreatTypes      []string `json:"threatTypes"`
+			PlatformTypes    []string `json:"platformTypes"`
+			ThreatEntryTypes []string `json:"threatEntryTypes"`
+			ThreatEntries    []struct {
+				URL string `json:"url"`
+			} `json:"threatEntries"`
+		} `json:"threatInfo"`
+	}
+	var body sbReq
+	body.Client.ClientID = "claude-guard"
+	body.Client.ClientVersion = "1.0"
+	body.ThreatInfo.ThreatTypes = []string{"MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE", "POTENTIALLY_HARMFUL_APPLICATION"}
+	body.ThreatInfo.PlatformTypes = []string{"ANY_PLATFORM"}
+	body.ThreatInfo.ThreatEntryTypes = []string{"URL"}
+	body.ThreatInfo.ThreatEntries = []struct {
+		URL string `json:"url"`
+	}{{URL: rawURL}}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	apiURL := "https://safebrowsing.googleapis.com/v4/threatMatches:find?key=" + apiKey
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(jsonBody))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		e.appLog().Info("safe_browsing_error", "err", err.Error(), "domain", domain, "tool_use_id", toolUseID)
+		return "" // fail-open
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		e.appLog().Info("safe_browsing_error", "status", resp.StatusCode, "domain", domain, "tool_use_id", toolUseID)
+		return "" // fail-open
+	}
+
+	type sbResp struct {
+		Matches []struct {
+			ThreatType string `json:"threatType"`
+		} `json:"matches,omitempty"`
+	}
+	var result sbResp
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ""
+	}
+
+	// Build cache entry.
+	entry := sbCacheEntry{Domain: domain, Safe: true, Expires: time.Now().Add(1 * time.Hour)}
+	threat := ""
+	if len(result.Matches) > 0 {
+		threat = result.Matches[0].ThreatType
+		entry.Safe = false
+		entry.Threat = threat
+		entry.Expires = time.Now().Add(24 * time.Hour)
+		e.appLog().Warn("safe_browsing_threat",
+			"domain", domain, "threat", threat, "url", rawURL, "tool_use_id", toolUseID)
+	} else {
+		e.appLog().Info("safe_browsing_ok", "domain", domain, "tool_use_id", toolUseID)
+	}
+
+	// Write cache (best-effort).
+	_ = os.MkdirAll(cacheDir, 0o755)
+	if cacheData, err := json.Marshal(entry); err == nil {
+		_ = os.WriteFile(cachePath, cacheData, 0o640)
+	}
+
+	return threat
 }
