@@ -360,133 +360,147 @@ func DefaultBlockRules() []rules.Rule {
 // redirections, pipes, subshells, or command substitution, AND the
 // program is fully resolved to a literal.
 func DefaultAllowRules() []rules.Rule {
+	// Define individual rules as variables so they can be referenced both
+	// as standalone tier 2 rules AND as inner rules for CdPrefixed.
+
+	// Read-only POSIX and text tools.
+	//
+	// `env`, `awk`, `sed`, `find` are deliberately NOT in this list:
+	//   - env is a wrapper program (`env rm -rf /etc` runs rm, but
+	//     the outer call's Program is `env`, so rm-rf-system can't
+	//     see it).
+	//   - awk has `system()` / `getline "cmd"` / pipe-to shell
+	//     escapes that aren't flag-filterable.
+	//   - GNU sed has the `e` command (exec) and `w` command (write
+	//     file). Same escape problem.
+	//   - find has `-exec` / `-execdir` / `-delete` / `-fprint*`.
+	//     Its own narrower `find-readonly` rule below handles the
+	//     safe shape; keeping it out of posix-readonly ensures
+	//     `find -exec rm …` doesn't short-circuit to allow.
+	// All four fall through to the LLM tier.
+	posixReadonly := &rules.AnchoredCommand{
+		RuleName: "posix-readonly",
+		Programs: []string{
+			"ls", "cat", "head", "tail", "wc", "sort", "uniq",
+			"grep", "rg", "ripgrep", "ack", "ag",
+			"tree", "file", "stat",
+			"du", "df",
+			"which", "whereis", "type",
+			"printenv", "id", "whoami", "hostname", "uname", "pwd",
+			"echo", "printf", "date",
+			"jq", "yq",
+			"cmp", "diff",
+			"tar", "zcat", "gzcat",
+			"xxd", "od", "hexdump",
+		},
+	}
+
+	// find — safe when no destructive flag. `-fprint`, `-fprintf`,
+	// `-fls` all write to files; added per red-team review.
+	findReadonly := &rules.AnchoredCommand{
+		RuleName:    "find-readonly",
+		Programs:    []string{"find"},
+		ForbidFlags: []string{"-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls"},
+	}
+
+	// git read-only subcommands
+	gitReadonly := &rules.AnchoredCommand{
+		RuleName:         "git-readonly",
+		Programs:         []string{"git"},
+		RequireSubcmdAny: []string{
+			// Read commands
+			"status", "log", "diff", "show", "branch", "remote",
+			"blame", "rev-parse", "ls-files", "ls-tree", "describe", "config",
+			// Workflow commands (safe — local operations)
+			"worktree", "add", "commit", "fetch", "pull", "merge",
+			"stash", "tag", "switch", "restore",
+			// NOTE: `push` is intentionally NOT here — push to
+			// protected branches (main/master) should go through
+			// LLM or per-project config, not auto-approve.
+		},
+	}
+
+	// gcloud is intentionally NOT in tier 2. Its subcommand tree is too
+	// deep for anchored_command to express "must be a read subcommand"
+	// — `gcloud run deploy`, `gcloud builds submit`, `gcloud projects
+	// delete` would all sneak through a naive `Programs: ["gcloud"]`
+	// rule (they're a single anchored call, no pipes, no redirects).
+	// Without a nested-subcommand matcher (Phase 2 work), gcloud calls
+	// must fall through to the LLM tier where the model can reason
+	// about the full command tree.
+	//
+	// This is a deliberate tradeoff: more LLM cost for gcloud-heavy
+	// sessions, but no risk of auto-approving a gcloud mutation.
+
+	// bq (BigQuery) read-only
+	bqReadonly := &rules.AnchoredCommand{
+		RuleName:         "bq-readonly",
+		Programs:         []string{"bq"},
+		RequireSubcmdAny: []string{"show", "ls", "query", "head"},
+	}
+
+	// terraform read-only
+	//
+	// `state` is intentionally NOT in this list — the subcommand
+	// tree is too deep for AnchoredCommand (cannot distinguish
+	// `state list` from `state rm`). `terraform state ...` falls
+	// to the LLM tier which reasons about the full command.
+	// Tier-1 `terraform-state-mutation` still denies the
+	// destructive verbs regardless of tier 2.
+	terraformReadonly := &rules.AnchoredCommand{
+		RuleName:         "terraform-readonly",
+		Programs:         []string{"terraform"},
+		RequireSubcmdAny: []string{"plan", "validate", "fmt", "show", "version", "output", "console", "workspace"},
+	}
+
+	// docker read-only
+	dockerReadonly := &rules.AnchoredCommand{
+		RuleName:         "docker-readonly",
+		Programs:         []string{"docker", "podman"},
+		RequireSubcmdAny: []string{"ps", "images", "inspect", "logs", "port", "top", "stats", "version", "info", "history", "events"},
+	}
+
+	// kubectl read-only
+	kubectlReadonly := &rules.AnchoredCommand{
+		RuleName:         "kubectl-readonly",
+		Programs:         []string{"kubectl", "oc"},
+		RequireSubcmdAny: []string{"get", "describe", "logs", "top", "version", "cluster-info", "api-resources", "explain"},
+	}
+
+	// go read-only / safe
+	goReadonly := &rules.AnchoredCommand{
+		RuleName:         "go-readonly",
+		Programs:         []string{"go"},
+		RequireSubcmdAny: []string{"version", "env", "list", "vet", "fmt", "doc", "help"},
+	}
+
+	// npm/yarn/pnpm read-only
+	nodePmReadonly := &rules.AnchoredCommand{
+		RuleName:         "node-pm-readonly",
+		Programs:         []string{"npm", "yarn", "pnpm"},
+		RequireSubcmdAny: []string{"list", "ls", "view", "outdated", "audit", "config", "whoami", "why", "info", "version"},
+	}
+
+	// gh read-only
+	ghReadonly := &rules.AnchoredCommand{
+		RuleName:         "gh-readonly",
+		Programs:         []string{"gh"},
+		RequireSubcmdAny: []string{"pr", "issue", "repo", "run", "api", "auth", "release", "search", "status", "version", "help"},
+		// Note: "gh pr view" is safe but "gh pr merge" is not. We restrict to the
+		// outer subcommand here; the LLM tier refines this.
+	}
+
 	return []rules.Rule{
-		// Read-only POSIX and text tools.
-		//
-		// `env`, `awk`, `sed`, `find` are deliberately NOT in this list:
-		//   - env is a wrapper program (`env rm -rf /etc` runs rm, but
-		//     the outer call's Program is `env`, so rm-rf-system can't
-		//     see it).
-		//   - awk has `system()` / `getline "cmd"` / pipe-to shell
-		//     escapes that aren't flag-filterable.
-		//   - GNU sed has the `e` command (exec) and `w` command (write
-		//     file). Same escape problem.
-		//   - find has `-exec` / `-execdir` / `-delete` / `-fprint*`.
-		//     Its own narrower `find-readonly` rule below handles the
-		//     safe shape; keeping it out of posix-readonly ensures
-		//     `find -exec rm …` doesn't short-circuit to allow.
-		// All four fall through to the LLM tier.
-		&rules.AnchoredCommand{
-			RuleName: "posix-readonly",
-			Programs: []string{
-				"ls", "cat", "head", "tail", "wc", "sort", "uniq",
-				"grep", "rg", "ripgrep", "ack", "ag",
-				"tree", "file", "stat",
-				"du", "df",
-				"which", "whereis", "type",
-				"printenv", "id", "whoami", "hostname", "uname", "pwd",
-				"echo", "printf", "date",
-				"jq", "yq",
-				"cmp", "diff",
-				"tar", "zcat", "gzcat",
-				"xxd", "od", "hexdump",
-			},
-		},
-
-		// find — safe when no destructive flag. `-fprint`, `-fprintf`,
-		// `-fls` all write to files; added per red-team review.
-		&rules.AnchoredCommand{
-			RuleName:    "find-readonly",
-			Programs:    []string{"find"},
-			ForbidFlags: []string{"-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls"},
-		},
-
-		// git read-only subcommands
-		&rules.AnchoredCommand{
-			RuleName:         "git-readonly",
-			Programs:         []string{"git"},
-			RequireSubcmdAny: []string{
-				// Read commands
-				"status", "log", "diff", "show", "branch", "remote",
-				"blame", "rev-parse", "ls-files", "ls-tree", "describe", "config",
-				// Workflow commands (safe — local operations)
-				"worktree", "add", "commit", "fetch", "pull", "merge",
-				"stash", "tag", "switch", "restore",
-				// NOTE: `push` is intentionally NOT here — push to
-				// protected branches (main/master) should go through
-				// LLM or per-project config, not auto-approve.
-			},
-		},
-
-		// gcloud is intentionally NOT in tier 2. Its subcommand tree is too
-		// deep for anchored_command to express "must be a read subcommand"
-		// — `gcloud run deploy`, `gcloud builds submit`, `gcloud projects
-		// delete` would all sneak through a naive `Programs: ["gcloud"]`
-		// rule (they're a single anchored call, no pipes, no redirects).
-		// Without a nested-subcommand matcher (Phase 2 work), gcloud calls
-		// must fall through to the LLM tier where the model can reason
-		// about the full command tree.
-		//
-		// This is a deliberate tradeoff: more LLM cost for gcloud-heavy
-		// sessions, but no risk of auto-approving a gcloud mutation.
-
-		// bq (BigQuery) read-only
-		&rules.AnchoredCommand{
-			RuleName:         "bq-readonly",
-			Programs:         []string{"bq"},
-			RequireSubcmdAny: []string{"show", "ls", "query", "head"},
-		},
-
-		// terraform read-only
-		//
-		// `state` is intentionally NOT in this list — the subcommand
-		// tree is too deep for AnchoredCommand (cannot distinguish
-		// `state list` from `state rm`). `terraform state ...` falls
-		// to the LLM tier which reasons about the full command.
-		// Tier-1 `terraform-state-mutation` still denies the
-		// destructive verbs regardless of tier 2.
-		&rules.AnchoredCommand{
-			RuleName:         "terraform-readonly",
-			Programs:         []string{"terraform"},
-			RequireSubcmdAny: []string{"plan", "validate", "fmt", "show", "version", "output", "console", "workspace"},
-		},
-
-		// docker read-only
-		&rules.AnchoredCommand{
-			RuleName:         "docker-readonly",
-			Programs:         []string{"docker", "podman"},
-			RequireSubcmdAny: []string{"ps", "images", "inspect", "logs", "port", "top", "stats", "version", "info", "history", "events"},
-		},
-
-		// kubectl read-only
-		&rules.AnchoredCommand{
-			RuleName:         "kubectl-readonly",
-			Programs:         []string{"kubectl", "oc"},
-			RequireSubcmdAny: []string{"get", "describe", "logs", "top", "version", "cluster-info", "api-resources", "explain"},
-		},
-
-		// go read-only / safe
-		&rules.AnchoredCommand{
-			RuleName:         "go-readonly",
-			Programs:         []string{"go"},
-			RequireSubcmdAny: []string{"version", "env", "list", "vet", "fmt", "doc", "help"},
-		},
-
-		// npm/yarn/pnpm read-only
-		&rules.AnchoredCommand{
-			RuleName:         "node-pm-readonly",
-			Programs:         []string{"npm", "yarn", "pnpm"},
-			RequireSubcmdAny: []string{"list", "ls", "view", "outdated", "audit", "config", "whoami", "why", "info", "version"},
-		},
-
-		// gh read-only
-		&rules.AnchoredCommand{
-			RuleName:         "gh-readonly",
-			Programs:         []string{"gh"},
-			RequireSubcmdAny: []string{"pr", "issue", "repo", "run", "api", "auth", "release", "search", "status", "version", "help"},
-			// Note: "gh pr view" is safe but "gh pr merge" is not. We restrict to the
-			// outer subcommand here; the LLM tier refines this.
-		},
+		posixReadonly,
+		findReadonly,
+		gitReadonly,
+		bqReadonly,
+		terraformReadonly,
+		dockerReadonly,
+		kubectlReadonly,
+		goReadonly,
+		nodePmReadonly,
+		ghReadonly,
 
 		// curl with only -I / --head / -o /dev/null (HEAD and discard-body reads)
 		// is tricky to express with flag constraints, so it falls through to LLM.
@@ -499,5 +513,34 @@ func DefaultAllowRules() []rules.Rule {
 		// to the LLM tier; future Makefile-hash content-trust (step 12
 		// / follow-up) restores fast approval for trusted Makefile
 		// contents.
+
+		// cd-prefixed compound commands — allows `cd <path> && <safe-cmd>`
+		// patterns commonly used by Claude Code subagents working across
+		// repos. The cd is a directory context-setter with no security
+		// implications; each subsequent command is evaluated against the
+		// same allow rules as standalone commands.
+		&rules.CdPrefixed{
+			RuleName: "cd-prefixed-readonly",
+			InnerRules: []rules.Rule{
+				posixReadonly,
+				findReadonly,
+				gitReadonly,
+				bqReadonly,
+				terraformReadonly,
+				dockerReadonly,
+				kubectlReadonly,
+				goReadonly,
+				nodePmReadonly,
+				ghReadonly,
+			},
+			SafePipeTargets: []string{
+				"head", "tail", "wc", "sort", "uniq",
+				"grep", "rg", "ack", "ag",
+				"jq", "yq",
+				"cat", "less", "more",
+				"tr", "cut", "paste",
+				"tee",
+			},
+		},
 	}
 }

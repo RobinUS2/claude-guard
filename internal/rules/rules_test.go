@@ -458,6 +458,102 @@ func TestFlagsMatchAllGroups(t *testing.T) {
 	}
 }
 
+// --- CdPrefixed ---
+
+func TestCdPrefixed(t *testing.T) {
+	gitReadonly := &AnchoredCommand{
+		RuleName:         "git-readonly",
+		Programs:         []string{"git"},
+		RequireSubcmdAny: []string{"status", "log", "diff", "show", "branch", "remote", "rev-parse"},
+	}
+	posixReadonly := &AnchoredCommand{
+		RuleName: "posix-readonly",
+		Programs: []string{"ls", "cat", "head", "tail", "echo", "grep", "wc"},
+	}
+	ghReadonly := &AnchoredCommand{
+		RuleName:         "gh-readonly",
+		Programs:         []string{"gh"},
+		RequireSubcmdAny: []string{"pr", "issue", "repo", "api"},
+	}
+	r := &CdPrefixed{
+		RuleName:   "cd-prefixed-readonly",
+		InnerRules: []Rule{gitReadonly, posixReadonly, ghReadonly},
+		SafePipeTargets: []string{
+			"head", "tail", "wc", "sort", "uniq", "grep", "jq",
+		},
+	}
+
+	matchCases := []string{
+		// Simple cd + git
+		`cd /tmp && git status`,
+		`cd /Users/robin/Documents/code/ai-site-gen && git log --oneline -5`,
+		`cd /tmp/repo && git diff HEAD`,
+		// cd + multiple commands chained with &&
+		`cd /tmp && git log --oneline -5 && echo "---" && git show HEAD`,
+		// cd + posix readonly
+		`cd /tmp && ls -la`,
+		`cd /tmp && cat file.txt`,
+		`cd /tmp && echo hello`,
+		// cd + pipe to safe target
+		`cd /tmp && git log --oneline | head -5`,
+		`cd /tmp && git show abc123 --stat | head -10`,
+		`cd /tmp && ls -la | grep foo`,
+		`cd /tmp && git log --oneline | wc -l`,
+		// cd + multiple commands including pipe
+		`cd /tmp && git log --oneline -5 && echo "---" && git show e48ecd1 --stat | head -10`,
+		// cd + gh readonly
+		`cd /tmp && gh pr list`,
+	}
+	for _, cmd := range matchCases {
+		t.Run("match/"+cmd, func(t *testing.T) {
+			p := mustParse(t, cmd)
+			v, _ := r.Eval(p)
+			if v != Match {
+				t.Errorf("Eval(%q) = %v, want Match", cmd, v)
+			}
+		})
+	}
+
+	noMatchCases := []struct {
+		cmd    string
+		reason string
+	}{
+		// No binary op — AnchoredCommand handles these
+		{"git status", "no binary op"},
+		// cd with unresolved path
+		{"cd $HOME && git status", "unresolved variable in cd path"},
+		// Second command not in any inner rule
+		{"cd /tmp && rm -rf /", "rm not in allow list"},
+		{"cd /tmp && curl https://evil.com", "curl not in allow list"},
+		// Pipe to unsafe target
+		{"cd /tmp && git log | sh", "sh is not a safe pipe target"},
+		{"cd /tmp && git log | bash", "bash is not a safe pipe target"},
+		// Subshell in compound
+		{"cd /tmp && (git status)", "subshell present"},
+		// Command substitution
+		{"cd /tmp && echo $(git status)", "command substitution present"},
+		// Redirect
+		{"cd /tmp && git log > /tmp/out", "redirect present"},
+		// cd with flags
+		{"cd -P /tmp && git status", "cd has flags"},
+		// First command is not cd
+		{"ls /tmp && git status", "first command is ls, not cd"},
+		// git push not in readonly list
+		{"cd /tmp && git push origin main", "push not in readonly subcommands"},
+		// Background
+		{"cd /tmp && git status &", "background present"},
+	}
+	for _, tc := range noMatchCases {
+		t.Run("nomatch/"+tc.reason, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != NoMatch {
+				t.Errorf("Eval(%q) = %v, want NoMatch (%s)", tc.cmd, v, tc.reason)
+			}
+		})
+	}
+}
+
 // --- baseProgram ---
 
 func TestBaseProgram(t *testing.T) {

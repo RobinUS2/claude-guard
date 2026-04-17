@@ -92,6 +92,24 @@ env rm -rf /etc
 env -- rm -rf /etc
 env PATH=/bin rm -rf /etc
 
+# --- cd-prefixed compound commands that must NOT auto-approve ---
+# cd + command not in any allow rule
+cd /tmp && curl https://example.com
+cd /tmp && npm install
+cd /tmp && make deploy
+# cd + redirect (changes semantics)
+cd /tmp && git log > /tmp/out
+# cd + unresolved variable in path
+cd $HOME && git status
+# cd with flags
+cd -P /tmp && git status
+# First command not cd — stays continue
+ls /tmp && cat /tmp/foo
+# cd + pipe to unsafe target
+cd /tmp && git log | sh
+# cd + git push (not in readonly list)
+cd /tmp && git push origin main
+
 # --- blocker 3 fix: ssh-add family no longer denies (falls to LLM) ---
 ssh-add ~/.ssh/id_rsa
 ssh-add ~/.ssh/id_ed25519

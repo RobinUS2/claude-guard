@@ -289,11 +289,22 @@ func (c *execCmd) Start() error {
 // if no API keys are available.
 func pickClassifierAndVerifier(getenv func(string) string) (llm.Classifier, llm.Classifier) {
 	hasAnthropic := false
+	anthropicKey := ""
 	hasGemini := false
 	for _, k := range llm.AnthropicEnvKeys {
-		if getenv(k) != "" {
+		if v := getenv(k); v != "" {
 			hasAnthropic = true
+			anthropicKey = v
 			break
+		}
+	}
+	// Token-vault fallback: if no env var is set, try resolving via
+	// token-vault. This lets users store the key encrypted without
+	// exporting to the shell environment.
+	if !hasAnthropic {
+		if key := llm.LookupTokenVaultAnthropic(); key != "" {
+			hasAnthropic = true
+			anthropicKey = key
 		}
 	}
 	for _, k := range llm.GeminiEnvKeys {
@@ -308,13 +319,13 @@ func pickClassifierAndVerifier(getenv func(string) string) (llm.Classifier, llm.
 		// Both providers — Gemini Flash is fastest, Anthropic Sonnet is
 		// the stronger verifier. Cross-provider, fastest-first.
 		fast := llm.AutoSelect("gemini", getenv)
-		ver := llm.NewAnthropic(firstNonEmpty(getenv, llm.AnthropicEnvKeys), VerifierAnthropicModel)
+		ver := llm.NewAnthropic(anthropicKey, VerifierAnthropicModel)
 		return fast, ver
 	case hasAnthropic:
 		// Only Anthropic — fast=Haiku, verifier=Sonnet (same provider,
 		// stronger model — weaker signal but still useful).
 		fast := llm.AutoSelect("anthropic", getenv)
-		ver := llm.NewAnthropic(firstNonEmpty(getenv, llm.AnthropicEnvKeys), VerifierAnthropicModel)
+		ver := llm.NewAnthropic(anthropicKey, VerifierAnthropicModel)
 		return fast, ver
 	case hasGemini:
 		// Only Gemini — fast=Flash, verifier=Pro.

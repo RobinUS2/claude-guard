@@ -172,7 +172,7 @@ func AutoSelect(prefer string, getenv func(string) string) Classifier {
 			}
 		}
 		// Last resort: try token-vault. Bounded timeout; silent on miss.
-		if v := lookupTokenVaultAnthropic(); v != "" {
+		if v := LookupTokenVaultAnthropic(); v != "" {
 			return NewAnthropic(v, DefaultAnthropicModel)
 		}
 		return nil

@@ -801,6 +801,101 @@ func (r *PathAccess) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// --- CdPrefixed: an allow rule for compound commands where the first
+// pipeline is `cd <path>` and all subsequent pipelines match one of the
+// provided inner allow rules.
+//
+// Handles the common pattern of Claude Code subagents running:
+//   cd /path/to/repo && git log --oneline -5
+//   cd /path/to/repo && git show e48ecd1 --stat | head -10
+//
+// `cd` is purely a directory context-setter with no security implications.
+// The remaining commands are evaluated against the same allow rules as
+// standalone commands. Pipes to safe read-only programs (head, tail, grep,
+// etc.) are permitted in trailing position.
+//
+// Rejects when:
+//   - first pipeline is not a bare `cd <path>` call
+//   - any remaining pipeline's head call doesn't match an inner rule
+//   - any pipe target is not in SafePipeTargets
+//   - the script has subshells, command substitution, process substitution,
+//     background, or redirections (those change semantics beyond cd)
+
+// CdPrefixed matches `cd <path> && <safe-command> [| <safe-pipe-target>]`.
+type CdPrefixed struct {
+	RuleName        string
+	InnerRules      []Rule
+	SafePipeTargets []string // read-only programs allowed in pipe tails
+}
+
+func (r *CdPrefixed) Name() string { return r.RuleName }
+func (r *CdPrefixed) Kind() string { return "cd_prefixed" }
+
+func (r *CdPrefixed) Eval(p *shellparse.Parsed) (Verdict, string) {
+	f := p.Features
+	// Must have binary op (cd && ...). Without it, AnchoredCommand handles.
+	if !f.HasBinaryOp {
+		return NoMatch, ""
+	}
+	// Reject shell features that change semantics beyond directory context.
+	if f.HasSubshell || f.HasCmdSub || f.HasProcSub || f.HasBackground || f.HasRedirect {
+		return NoMatch, ""
+	}
+	// Need at least 2 pipelines (cd + at least one command).
+	if len(p.Pipelines) < 2 {
+		return NoMatch, ""
+	}
+	// First pipeline must be exactly `cd <path>` — single call, no trickery.
+	firstPipeline := p.Pipelines[0]
+	if len(firstPipeline) != 1 {
+		return NoMatch, ""
+	}
+	cdCall := firstPipeline[0]
+	if cdCall.Program != "cd" || cdCall.HasUnresolved || len(cdCall.Positional) == 0 || len(cdCall.Flags) > 0 {
+		return NoMatch, ""
+	}
+
+	// Each remaining pipeline must have a head call matching an inner rule,
+	// and any pipe targets must be in SafePipeTargets.
+	for _, pipeline := range p.Pipelines[1:] {
+		if len(pipeline) == 0 {
+			return NoMatch, ""
+		}
+		// Check head call against inner rules via a synthetic single-call Parsed.
+		headCall := pipeline[0]
+		if !r.matchesInnerRule(&headCall) {
+			return NoMatch, ""
+		}
+		// Check pipe targets are safe read-only programs.
+		for _, tailCall := range pipeline[1:] {
+			if !stringIn(baseProgram(tailCall.Program), r.SafePipeTargets) {
+				return NoMatch, ""
+			}
+		}
+	}
+	return Match, r.RuleName
+}
+
+// matchesInnerRule creates a synthetic single-call Parsed and tests it
+// against the inner allow rules. The synthetic Parsed has all Features
+// cleared (single clean call) so AnchoredCommand's trickery checks pass.
+func (r *CdPrefixed) matchesInnerRule(c *shellparse.Call) bool {
+	if c.Nesting != shellparse.NestTopLevel || c.HasUnresolved {
+		return false
+	}
+	miniParsed := &shellparse.Parsed{
+		Calls:     []shellparse.Call{*c},
+		Pipelines: [][]shellparse.Call{{*c}},
+		Features:  shellparse.Features{}, // all false — single clean call
+	}
+	for _, rule := range r.InnerRules {
+		if verdict, _ := rule.Eval(miniParsed); verdict == Match {
+			return true
+		}
+	}
+	return false
+}
+
 // --- helpers ---
 
 func stringIn(s string, list []string) bool {

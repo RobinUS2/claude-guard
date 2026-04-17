@@ -83,7 +83,7 @@ var inProcessCache struct {
 // behavior — the hook should not log a warning every invocation just
 // because the user hasn't set up an Anthropic key. doctor handles the
 // user-facing "hey, no LLM configured" message.
-func lookupTokenVaultAnthropic() string {
+func LookupTokenVaultAnthropic() string {
 	inProcessCache.Lock()
 	defer inProcessCache.Unlock()
 	if inProcessCache.checked {

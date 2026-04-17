@@ -165,4 +165,19 @@ git remote -v
 git remote show origin
 git remote get-url origin
 
+# --- cd-prefixed compound commands (subagent patterns) ---
+cd /tmp && git status
+cd /Users/robin/Documents/code/ai-site-gen && git log --oneline -5
+cd /tmp/repo && git diff HEAD
+cd /tmp && git log --oneline -5 && echo "---" && git show HEAD
+cd /tmp && ls -la
+cd /tmp && cat file.txt
+cd /tmp && echo hello
+cd /tmp && git log --oneline | head -5
+cd /tmp && git show abc123 --stat | head -10
+cd /tmp && ls -la | grep foo
+cd /tmp && git log --oneline | wc -l
+cd /Users/robin/Documents/code/ai-site-gen && git log --oneline -5 && echo "---" && git show e48ecd1 --stat | head -10
+cd /tmp && gh pr list
+
 # --- blocker 3: ssh-add regression — ssh family still reads keys ---
