@@ -15,8 +15,8 @@ const MaxCases = 200
 // logRecord is the JSON shape of one line in decisions.jsonl.
 // We only decode the fields we need for review.
 type logRecord struct {
-	Timestamp   string `json:"ts"`
-	ToolName    string `json:"tool"`
+	Timestamp   string `json:"time"`
+	ToolName    string `json:"tool_name"`
 	Command     string `json:"command"`
 	Verdict     string `json:"verdict"`
 	Tier        string `json:"tier"`
@@ -58,7 +58,7 @@ func Collect(logDir string, hours int) ([]Case, error) {
 		if r.Shadow != nil {
 			c.Shadow = r.Shadow.Tier4LLM
 		}
-		c.Timestamp, _ = time.Parse(time.RFC3339, r.Timestamp)
+		c.Timestamp, _ = time.Parse(time.RFC3339Nano, r.Timestamp)
 
 		switch {
 		case r.Verdict == "deny":
@@ -138,7 +138,7 @@ func readLogFile(path string, cutoff time.Time) ([]logRecord, error) {
 		if err := json.Unmarshal(line, &r); err != nil {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339, r.Timestamp)
+		ts, err := time.Parse(time.RFC3339Nano, r.Timestamp)
 		if err != nil {
 			continue
 		}
