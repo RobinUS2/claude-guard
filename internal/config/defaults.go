@@ -405,7 +405,17 @@ func DefaultAllowRules() []rules.Rule {
 		&rules.AnchoredCommand{
 			RuleName:         "git-readonly",
 			Programs:         []string{"git"},
-			RequireSubcmdAny: []string{"status", "log", "diff", "show", "branch", "remote", "blame", "rev-parse", "ls-files", "ls-tree", "describe", "config", "worktree"},
+			RequireSubcmdAny: []string{
+				// Read commands
+				"status", "log", "diff", "show", "branch", "remote",
+				"blame", "rev-parse", "ls-files", "ls-tree", "describe", "config",
+				// Workflow commands (safe — local operations)
+				"worktree", "add", "commit", "fetch", "pull", "merge",
+				"stash", "tag", "switch", "restore",
+				// NOTE: `push` is intentionally NOT here — push to
+				// protected branches (main/master) should go through
+				// LLM or per-project config, not auto-approve.
+			},
 		},
 
 		// gcloud is intentionally NOT in tier 2. Its subcommand tree is too
