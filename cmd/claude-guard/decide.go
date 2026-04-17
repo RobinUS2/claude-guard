@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/RobinUS2/claude-guard/internal/budget"
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
@@ -80,6 +81,7 @@ func cmdDecide(_ []string) int {
 		cch = cache.New(filepath.Join(cacheRoot, "verdicts"))
 	}
 	redactor := redact.New(nil, nil)
+	bgt := budget.New(cacheRoot, cfg.DailyBudget.LLMCalls, cfg.DailyBudget.FileAnalysisCalls)
 
 	// Tier 5: legacy allow list (migrated from settings.json). Missing
 	// file is fine — it just means tier 5 is empty.
@@ -180,6 +182,7 @@ func cmdDecide(_ []string) int {
 		LLM:                 classifier,
 		Verifier:            verifier,
 		Breaker:             br,
+		Budget:              bgt,
 		Cache:               cch,
 		Legacy:              legacyList,
 		ProjectConfigLoader: projectconfig.Load,
