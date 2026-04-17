@@ -1,0 +1,6 @@
+version: 1
+project_name: claude-guard
+allow:
+  - name: make-guard-targets
+    programs: [make]
+    subcommands: [install, test, build, lint, clean]
