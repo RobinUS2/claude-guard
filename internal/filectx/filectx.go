@@ -12,6 +12,7 @@ package filectx
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -164,7 +165,25 @@ func readFile(path string) *FileContext {
 		return fc
 	}
 
-	data, err := os.ReadFile(path)
+	// Open the file and re-verify via Fstat to close the TOCTOU window
+	// between Lstat and read. A malicious process could replace the
+	// regular file with a symlink between those two calls.
+	f, err := os.Open(path)
+	if err != nil {
+		fc.Skipped = true
+		fc.Reason = fmt.Sprintf("open error: %v", err)
+		return fc
+	}
+	defer f.Close()
+
+	finfo, err := f.Stat()
+	if err != nil || !finfo.Mode().IsRegular() || finfo.Size() != info.Size() {
+		fc.Skipped = true
+		fc.Reason = "file changed during read (TOCTOU safety)"
+		return fc
+	}
+
+	data, err := io.ReadAll(f)
 	if err != nil {
 		fc.Skipped = true
 		fc.Reason = fmt.Sprintf("read error: %v", err)

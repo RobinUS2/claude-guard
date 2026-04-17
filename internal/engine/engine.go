@@ -418,6 +418,36 @@ func (e *Engine) Decide(in Input) Output {
 		}
 	}
 
+	// File content extraction for runner commands. Must happen before
+	// cache lookup so the FileContentHash participates in the cache key.
+	var fileContent, filePath, fileContentHash string
+	if parsed != nil {
+		for _, call := range parsed.Calls {
+			fc := filectx.Extract(call)
+			if fc == nil {
+				continue
+			}
+			if fc.Skipped {
+				break
+			}
+			// Check file-analysis budget.
+			if e.budget != nil && !e.budget.Check(true) {
+				e.appLog().Warn("file_analysis_budget_exhausted",
+					"path", fc.Path,
+					"tool_use_id", in.ToolUseID,
+				)
+				break
+			}
+			fileContent = fc.Content
+			filePath = fc.Path
+			h := sha256.Sum256([]byte(fc.Content))
+			fileContentHash = hex.EncodeToString(h[:])
+			break // first file only
+		}
+	}
+	in.FileContent = fileContent
+	in.RunnerFilePath = filePath
+
 	// Tier 3: cache lookup (only when there's an LLM to back it — caching
 	// deterministic verdicts adds latency for no gain since they're already
 	// sub-millisecond).
@@ -437,7 +467,8 @@ func (e *Engine) Decide(in Input) Output {
 		// MakefileHash: populated for `make <target>` shapes so a
 		// cached LLM verdict invalidates when the Makefile content
 		// changes. Empty for all other commands.
-		MakefileHash: projectctx.MakefileHash(in.CWD, in.Command),
+		MakefileHash:    projectctx.MakefileHash(in.CWD, in.Command),
+		FileContentHash: fileContentHash,
 	}
 	var globalKey, projectKey string
 	if e.cache != nil && e.llm != nil {
@@ -542,36 +573,6 @@ func (e *Engine) Decide(in Input) Output {
 			}
 		}
 	}
-
-	// File content extraction for runner commands.
-	var fileContent, filePath, fileContentHash string
-	if parsed != nil {
-		for _, call := range parsed.Calls {
-			fc := filectx.Extract(call)
-			if fc == nil {
-				continue
-			}
-			if fc.Skipped {
-				break
-			}
-			// Check file-analysis budget.
-			if e.budget != nil && !e.budget.Check(true) {
-				e.appLog().Warn("file_analysis_budget_exhausted",
-					"path", fc.Path,
-					"tool_use_id", in.ToolUseID,
-				)
-				break
-			}
-			fileContent = fc.Content
-			filePath = fc.Path
-			h := sha256.Sum256([]byte(fc.Content))
-			fileContentHash = hex.EncodeToString(h[:])
-			break // first file only
-		}
-		keyInputs.FileContentHash = fileContentHash
-	}
-	in.FileContent = fileContent
-	in.RunnerFilePath = filePath
 
 	// Tier 4: LLM classifier (approve-only).
 	llmBudgetOK := e.budget == nil || e.budget.Check(false)
@@ -987,6 +988,8 @@ func (e *Engine) spawnUnsafeReview(
 			Command:     cmd,
 			Description: in.Description,
 			CWD:         in.CWD,
+			FileContent: in.FileContent,
+			FilePath:    in.RunnerFilePath,
 		})
 		if err != nil {
 			e.appLog().Warn("unsafe_review_error",
@@ -1329,6 +1332,8 @@ func (e *Engine) spawnVerification(cacheKey, canonicalKey string, in Input) {
 			Command:     cmd,
 			Description: in.Description,
 			CWD:         in.CWD,
+			FileContent: in.FileContent,
+			FilePath:    in.RunnerFilePath,
 		})
 		if err != nil {
 			e.appLog().Warn("verifier_error",
