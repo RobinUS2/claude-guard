@@ -214,7 +214,73 @@ func cmdDecide(_ []string) int {
 	// run under llmAsyncDeadline (30s) and may then spawn a verifier.
 	// Cap = llmAsyncDeadline (30s) + verifierDeadline (15s) + slack (5s).
 	eng.AwaitVerifications(50 * time.Second)
+
+	// Self-review stale-check: if the last review was >24h ago and
+	// review is enabled, spawn `claude-guard review --apply` as a
+	// separate OS process. Runs independently of this hook's
+	// lifetime (CTO review CRIT-2: Opus calls take 30-60s, exceeds
+	// the AwaitVerifications cap).
+	maybeSpawnReview()
+
 	return 0
+}
+
+// maybeSpawnReview checks whether enough time has elapsed since the
+// last self-review and spawns a background review process if so.
+// No-op when the interval hasn't elapsed or config is disabled.
+func maybeSpawnReview() {
+	tsPath := filepath.Join(os.Getenv("HOME"), ".cache", "claude-guard", "last-review.txt")
+	data, err := os.ReadFile(tsPath)
+	if err == nil {
+		if ts, err := time.Parse(time.RFC3339, string(data)); err == nil {
+			if time.Since(ts) < 24*time.Hour {
+				return // recently reviewed
+			}
+		}
+	}
+	// Spawn detached process. Errors are best-effort — a failed
+	// spawn just means the review runs on the next invocation.
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	// Check if ANTHROPIC_API_KEY is available (review needs Opus).
+	if os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("CLAUDE_API_KEY") == "" {
+		return
+	}
+	cmd := execCommand(exe, "review", "--apply")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	_ = cmd.Start()
+}
+
+// execCommand is a var so tests can stub it out.
+var execCommand = defaultExecCommand
+
+func defaultExecCommand(name string, args ...string) *execCmd {
+	c := &execCmd{cmd: name, args: args}
+	return c
+}
+
+// execCmd is a thin wrapper around os/exec.Cmd for testability.
+type execCmd struct {
+	cmd    string
+	args   []string
+	Stdout *os.File
+	Stderr *os.File
+}
+
+func (c *execCmd) Start() error {
+	proc := &os.ProcAttr{
+		Files: []*os.File{os.Stdin, c.Stdout, c.Stderr},
+	}
+	p, err := os.StartProcess(c.cmd, append([]string{c.cmd}, c.args...), proc)
+	if err != nil {
+		return err
+	}
+	// Detach — don't wait.
+	_ = p.Release()
+	return nil
 }
 
 // pickClassifierAndVerifier returns (fast, verifier). The verifier is

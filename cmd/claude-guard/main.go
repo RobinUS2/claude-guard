@@ -79,6 +79,8 @@ func run(args []string) int {
 		return cmdInitProjectConfig(args[1:])
 	case "lint":
 		return cmdLint(args[1:])
+	case "review":
+		return cmdReview(args[1:])
 	case "eval-prompt":
 		return cmdEvalPrompt(args[1:])
 	case "bench":
