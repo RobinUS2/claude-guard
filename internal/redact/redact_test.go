@@ -144,13 +144,14 @@ func TestReplace_GenericKeyValue(t *testing.T) {
 
 // Regression: high-entropy tokens embedded in a generic key=value shape
 // must still Skip (specific SKIP pattern runs before generic REPLACE).
+// NOTE: JWT case moved to TestReplace_JWTInsideGenericShape after the
+// 2026-04-17 jwt SKIP→REPLACE change.
 func TestSpecificPatternsSkipInsideGenericShape(t *testing.T) {
 	r := New(nil, nil)
 	cases := []string{
-		`curl -d "api_key=sk-ant-api03-realtokenaaabbbcccdddeee"`,   // anthropic inside api_key=
-		`curl -d "token=ghp_1234567890abcdefghijklmnopqr"`,           // github PAT inside token=
-		`curl -d "secret=AKIAIOSFODNN7EXAMPLE"`,                      // AWS inside secret=
-		`curl -d "password=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.sig-abc-def-ghi"`, // JWT inside password=
+		`curl -d "api_key=sk-ant-api03-realtokenaaabbbcccdddeee"`, // anthropic inside api_key=
+		`curl -d "token=ghp_1234567890abcdefghijklmnopqr"`,        // github PAT inside token=
+		`curl -d "secret=AKIAIOSFODNN7EXAMPLE"`,                   // AWS inside secret=
 	}
 	for _, cmd := range cases {
 		t.Run(cmd, func(t *testing.T) {
@@ -323,11 +324,153 @@ func TestSkip_PrivateKey(t *testing.T) {
 	}
 }
 
-func TestSkip_JWT(t *testing.T) {
+// Previously SKIP; now REPLACE must substitute the full token so neither
+// signature nor base64-encoded payload claims reach the LLM. Custom
+// X-Session-Id header (not "Authorization", and free of token/secret/
+// password/api-key words) so neither the http auth-header SKIP nor any
+// generic-credential REPLACE fires — this test specifically exercises
+// the jwt REPLACE and asserts the JWT placeholder survives.
+func TestReplace_JWT(t *testing.T) {
 	r := New(nil, nil)
-	cmd := `curl -H "Auth: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"`
-	if r.Scan(cmd).Decision != Skip {
-		t.Error("expected Skip for JWT")
+	jwtHeader := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+	jwtPayload := "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0"
+	jwtSig := "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+	jwt := jwtHeader + "." + jwtPayload + "." + jwtSig
+	cmd := `curl -H "X-Session-Id: ` + jwt + `" https://api.example.com`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v (reason=%q), want Send", res.Decision, res.SkipReason)
+	}
+	if strings.Contains(res.Redacted, jwt) {
+		t.Errorf("Redacted = %q — full JWT leaked", res.Redacted)
+	}
+	if strings.Contains(res.Redacted, "eyJ") {
+		t.Errorf("Redacted = %q — JWT header fragment leaked", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-JWT>") {
+		t.Errorf("Redacted = %q — missing JWT placeholder", res.Redacted)
+	}
+	found := false
+	for _, k := range res.ReplacedKinds {
+		if k == "jwt" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ReplacedKinds = %v, missing %q", res.ReplacedKinds, "jwt")
+	}
+}
+
+// Bare JWT in a URL path (no key=value wrapper). Must be redacted,
+// not skipped, so the curl shape reaches the LLM.
+func TestReplace_JWT_BareInURL(t *testing.T) {
+	r := New(nil, nil)
+	h := "eyJhbGciOiJIUzI1NiJ9"
+	p := "eyJzdWIiOiIxIn0"
+	s := "abcdefghijklmnop"
+	jwt := h + "." + p + "." + s
+	cmd := `curl https://api.example.com/verify/` + jwt
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	if strings.Contains(res.Redacted, jwt) {
+		t.Errorf("Redacted = %q — JWT leaked in URL path", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-JWT>") {
+		t.Errorf("Redacted = %q — missing placeholder", res.Redacted)
+	}
+}
+
+// Robin's original failing case: TOKEN="<jwt>" shell-env assignment.
+// Must Send with value substituted. Either JWT or TOKEN placeholder is
+// acceptable (pattern-order dependent) — invariant is "no eyJ leak".
+func TestReplace_JWT_InsideEnvShape(t *testing.T) {
+	r := New(nil, nil)
+	h := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+	p := "eyJpc3MiOiJzaXRlZ2VuIiwic3ViIjoiMSJ9"
+	s := "sig-abc-def-ghi-jkl"
+	jwt := h + "." + p + "." + s
+	cmd := `TOKEN="` + jwt + `" ./run-test.sh`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v (reason=%q), want Send", res.Decision, res.SkipReason)
+	}
+	if strings.Contains(res.Redacted, "eyJ") {
+		t.Errorf("Redacted = %q — JWT header fragment leaked", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "TOKEN=") {
+		t.Errorf("Redacted = %q — env var name should be preserved", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-JWT>") && !strings.Contains(res.Redacted, "<REDACTED-TOKEN>") {
+		t.Errorf("Redacted = %q — missing JWT or TOKEN placeholder", res.Redacted)
+	}
+}
+
+// Post-move invariant: JWT wrapped in a generic credential shape
+// (password=, token=, secret=) Sends with value redacted.
+func TestReplace_JWTInsideGenericShape(t *testing.T) {
+	r := New(nil, nil)
+	h := "eyJhbGciOiJIUzI1NiJ9"
+	p := "eyJzdWIiOiIxMjM0NSJ9"
+	s := "sig-abc-def-ghi"
+	jwt := h + "." + p + "." + s
+	cmd := `curl -d "password=` + jwt + `"`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v (reason=%q), want Send", res.Decision, res.SkipReason)
+	}
+	if strings.Contains(res.Redacted, "eyJ") {
+		t.Errorf("Redacted = %q — JWT header fragment leaked", res.Redacted)
+	}
+	if strings.Contains(res.Redacted, "sig-abc-def-ghi") {
+		t.Errorf("Redacted = %q — JWT signature fragment leaked", res.Redacted)
+	}
+}
+
+// Multiple JWTs in a single command (e.g. two chained curls). All
+// occurrences must be redacted — neither eyJ fragment may leak.
+func TestReplace_MultipleJWTs(t *testing.T) {
+	r := New(nil, nil)
+	h1, p1, s1 := "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJhbGljZSJ9", "sigalicexxxx"
+	h2, p2, s2 := "eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiJib2IifQ", "sigbobxxxxxx"
+	jwt1 := h1 + "." + p1 + "." + s1
+	jwt2 := h2 + "." + p2 + "." + s2
+	cmd := `curl -H "X-Session-Id: ` + jwt1 + `" https://a.example.com && curl -H "X-Session-Id: ` + jwt2 + `" https://b.example.com`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v (reason=%q), want Send", res.Decision, res.SkipReason)
+	}
+	if strings.Contains(res.Redacted, "eyJ") {
+		t.Errorf("Redacted = %q — eyJ fragment leaked (at least one JWT not redacted)", res.Redacted)
+	}
+	if strings.Contains(res.Redacted, "sigalicexxxx") || strings.Contains(res.Redacted, "sigbobxxxxxx") {
+		t.Errorf("Redacted = %q — signature fragment leaked", res.Redacted)
+	}
+	n := strings.Count(res.Redacted, "<REDACTED-JWT>")
+	if n < 2 {
+		t.Errorf("Redacted = %q — expected ≥2 JWT placeholders, got %d", res.Redacted, n)
+	}
+}
+
+// Regression: JWT carried inside an Authorization: Bearer header must
+// still Skip after the jwt SKIP→REPLACE move. The http-bearer SKIP
+// pattern is iterated before any REPLACE pattern, so a full-triple JWT
+// behind Bearer never reaches the jwt REPLACE stage. If this test ever
+// starts returning Send, it means a refactor has broken the SKIP-first
+// ordering invariant and the Authorization header value is now leaking
+// to the LLM — which would be a security regression.
+func TestSkip_BearerJWT_RemainsSkipped(t *testing.T) {
+	r := New(nil, nil)
+	h := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+	p := "eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+	s := "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+	jwt := h + "." + p + "." + s
+	cmd := `curl -H "Authorization: Bearer ` + jwt + `" https://api.example.com`
+	res := r.Scan(cmd)
+	if res.Decision != Skip {
+		t.Errorf("Decision = %v, want Skip (Bearer SKIP must win over jwt REPLACE); reason=%q", res.Decision, res.SkipReason)
 	}
 }
 

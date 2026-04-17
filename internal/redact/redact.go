@@ -263,9 +263,6 @@ func DefaultSkipPatterns() []Pattern {
 
 		// Private keys (PEM in command text — unlikely but devastating)
 		{Name: "pem-private-key", Regex: `-----BEGIN [A-Z ]*PRIVATE KEY-----`},
-
-		// JWT tokens (header.payload.sig where header looks JWT-y)
-		{Name: "jwt", Regex: `eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}`},
 	})
 }
 
@@ -291,6 +288,26 @@ func DefaultReplacePatterns() []Pattern {
 			Name:        "uuid",
 			Regex:       `[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}`,
 			Placeholder: "<REDACTED-UUID>",
+		},
+		// JWT tokens (header.payload.sig where header looks JWT-y).
+		// REPLACE rather than SKIP so commands like TOKEN="<jwt>" or
+		// curl /api/verify/<jwt> can reach the LLM with the credential
+		// shape preserved but the value substituted. The full triple is
+		// matched and replaced, so neither the signature nor the
+		// base64-encoded payload claims (user IDs, roles, emails) reach
+		// the LLM. Bearer-scheme JWTs in http auth headers still hit
+		// the http-bearer SKIP and never reach this REPLACE stage.
+		//
+		// Ordering: placed BEFORE the generic credential-shape block so
+		// that when a JWT appears inside token="…"/password="…" the jwt
+		// pattern fires first and the specific <REDACTED-JWT> placeholder
+		// is emitted. If a later generic pattern also matches, the value
+		// is already a placeholder — no secret leak, just placeholder
+		// overwrite (pattern-order artifact; asserted in tests).
+		{
+			Name:        "jwt",
+			Regex:       `eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}`,
+			Placeholder: "<REDACTED-JWT>",
 		},
 		// Generic credential-shape assignments: api_key=…, password=…,
 		// token=…, secret=…. REPLACE rather than SKIP so the LLM can
