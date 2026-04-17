@@ -36,8 +36,9 @@ type Config struct {
 	ShadowMode bool   `yaml:"shadow_mode"`
 	Log        Log    `yaml:"log"`
 	LLM        LLM    `yaml:"llm"`
-	Cache      Cache  `yaml:"cache"`
-	Legacy     Legacy `yaml:"legacy"`
+	Cache       Cache       `yaml:"cache"`
+	Legacy      Legacy      `yaml:"legacy"`
+	DailyBudget DailyBudget `yaml:"daily_budget"`
 
 	// Rules are populated from the compiled-in default set; YAML overrides
 	// are intentionally not supported in v1.
@@ -77,6 +78,12 @@ type Cache struct {
 // Legacy points at the migrated allow-list file.
 type Legacy struct {
 	Path string `yaml:"path"`
+}
+
+// DailyBudget caps daily LLM calls to control cost.
+type DailyBudget struct {
+	LLMCalls          int `yaml:"llm_calls"`
+	FileAnalysisCalls int `yaml:"file_analysis_calls"`
 }
 
 // Default returns the compiled-in default Config. This is the fallback
@@ -126,6 +133,10 @@ func Default() *Config {
 		},
 		Legacy: Legacy{
 			Path: legacyPath,
+		},
+		DailyBudget: DailyBudget{
+			LLMCalls:          500,
+			FileAnalysisCalls: 50,
 		},
 		InstantBlock: DefaultBlockRules(),
 		InstantAllow: DefaultAllowRules(),
