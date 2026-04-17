@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/RobinUS2/claude-guard/internal/budget"
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/llm"
@@ -33,12 +36,17 @@ type stubClassifier struct {
 	scope llm.Scope
 	// Slots: when set, Classify returns them alongside the verdict.
 	slots []llm.VariableSlot
+	// onCall: optional callback to capture the ClassifyInput for assertions.
+	onCall func(in llm.ClassifyInput)
 }
 
 func (s *stubClassifier) Provider() string { return "stub" }
 func (s *stubClassifier) Model() string    { return "stub-1" }
 func (s *stubClassifier) Classify(ctx context.Context, in llm.ClassifyInput) (*llm.Decision, error) {
 	s.calls++
+	if s.onCall != nil {
+		s.onCall(in)
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -493,6 +501,137 @@ func hasSubstring(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// --- File content extraction + budget ---
+
+func newTestEngineWithClassifier(stub llm.Classifier) *Engine {
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	return NewWithOptions(Options{
+		Config: cfg,
+		LLM:    stub,
+		Cache:  cache.New(os.TempDir() + "/claude-guard-test-" + fmt.Sprintf("%d", time.Now().UnixNano())),
+	})
+}
+
+func newTestEngineWithClassifierAndBudget(stub llm.Classifier, bgt *budget.Budget) *Engine {
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	return NewWithOptions(Options{
+		Config: cfg,
+		LLM:    stub,
+		Cache:  cache.New(os.TempDir() + "/claude-guard-test-" + fmt.Sprintf("%d", time.Now().UnixNano())),
+		Budget: bgt,
+	})
+}
+
+func TestDecide_RunnerCommand_PopulatesFileContent(t *testing.T) {
+	// Create a safe Go file.
+	f := filepath.Join(t.TempDir(), "test.go")
+	os.WriteFile(f, []byte("package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"hi\") }\n"), 0o644)
+
+	var captured llm.ClassifyInput
+	stub := &stubClassifier{
+		verdict: llm.VerdictSafe,
+		onCall: func(in llm.ClassifyInput) {
+			captured = in
+		},
+	}
+	e := newTestEngineWithClassifier(stub)
+
+	e.Decide(Input{
+		ToolName: "Bash",
+		Command:  "go run " + f,
+		CWD:      t.TempDir(),
+	})
+
+	if captured.FileContent == "" {
+		t.Fatal("expected FileContent to be populated for go run")
+	}
+	if captured.FilePath != f {
+		t.Errorf("FilePath = %q, want %q", captured.FilePath, f)
+	}
+}
+
+func TestDecide_NonRunner_NoFileContent(t *testing.T) {
+	var captured llm.ClassifyInput
+	stub := &stubClassifier{
+		verdict: llm.VerdictSafe,
+		onCall: func(in llm.ClassifyInput) {
+			captured = in
+		},
+	}
+	e := newTestEngineWithClassifier(stub)
+
+	e.Decide(Input{
+		ToolName: "Bash",
+		Command:  "git status",
+		CWD:      t.TempDir(),
+	})
+
+	if captured.FileContent != "" {
+		t.Error("expected no FileContent for git status")
+	}
+}
+
+func TestDecide_RunnerLargeFile_NoFileContent(t *testing.T) {
+	// File > 20KB — should skip file content, LLM still called.
+	f := filepath.Join(t.TempDir(), "big.go")
+	os.WriteFile(f, make([]byte, 21*1024), 0o644) // 21KB
+
+	var captured llm.ClassifyInput
+	stub := &stubClassifier{
+		verdict: llm.VerdictUnsafe,
+		onCall: func(in llm.ClassifyInput) {
+			captured = in
+		},
+	}
+	e := newTestEngineWithClassifier(stub)
+
+	e.Decide(Input{
+		ToolName: "Bash",
+		Command:  "go run " + f,
+		CWD:      t.TempDir(),
+	})
+
+	if captured.FileContent != "" {
+		t.Error("expected no FileContent for large file")
+	}
+	// LLM should still have been called (command-only classification).
+	if captured.Command == "" {
+		t.Error("expected LLM to be called even without file content")
+	}
+}
+
+func TestDecide_FileBudgetExhausted_LLMStillCalled(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "test.go")
+	os.WriteFile(f, []byte("package main\nfunc main() {}\n"), 0o644)
+
+	var captured llm.ClassifyInput
+	stub := &stubClassifier{
+		verdict: llm.VerdictUnsafe,
+		onCall: func(in llm.ClassifyInput) {
+			captured = in
+		},
+	}
+
+	// Create engine with file budget of 0 (immediately exhausted).
+	bgt := budget.New(t.TempDir(), 500, 0)
+	e := newTestEngineWithClassifierAndBudget(stub, bgt)
+
+	e.Decide(Input{
+		ToolName: "Bash",
+		Command:  "go run " + f,
+		CWD:      t.TempDir(),
+	})
+
+	if captured.FileContent != "" {
+		t.Error("expected no FileContent when file budget exhausted")
+	}
+	if captured.Command == "" {
+		t.Error("expected LLM to still be called without file content")
+	}
 }
 
 // --- Per-project config integration ---
