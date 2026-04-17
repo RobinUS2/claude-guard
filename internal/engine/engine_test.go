@@ -245,10 +245,12 @@ func TestEngine_LLM_UnsureFallsThrough(t *testing.T) {
 func TestEngine_LLM_SkippedBySecretRedaction(t *testing.T) {
 	stub := &stubClassifier{verdict: llm.VerdictSafe}
 	e := newEngineWithLLM(t, stub, false)
-	// Bearer token in command — redactor should SKIP, LLM never called.
+	// Real-length anthropic key — anthropic-key SKIP pattern fires, LLM
+	// never called. (The looser http-bearer SKIP was moved to REPLACE
+	// on 2026-04-17; it alone would no longer short-circuit.)
 	out := e.Decide(Input{
 		ToolName: "Bash",
-		Command:  `curl -H "Authorization: Bearer sk-ant-secret123" https://api.example.com`,
+		Command:  `curl -H "Authorization: Bearer sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890" https://api.anthropic.com`,
 	})
 	if stub.calls != 0 {
 		t.Errorf("LLM should not have been called; got %d calls", stub.calls)

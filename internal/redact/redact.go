@@ -231,12 +231,12 @@ type PatternSpec struct {
 // significant (any match wins).
 func DefaultSkipPatterns() []Pattern {
 	return MustCompilePatterns([]PatternSpec{
-		// HTTP Authorization headers. Capture up to two whitespace-
-		// separated tokens after the colon/equals so values like
-		//   Authorization: Bearer $CF_TOKEN
-		// are matched in full; isShellVarReference then demotes the
-		// match when the value portion is just a $VAR reference.
-		{Name: "http-bearer", Regex: `(?i)(?:authorization|bearer)\s*[:=]\s*\S+(?:\s+\S+)?`},
+		// HTTP Basic auth: base64-encoded creds are directly sensitive
+		// (username:password in the value), so SKIP. http-bearer moved
+		// to REPLACE — see DefaultReplacePatterns. Bearer values that
+		// are themselves high-entropy secrets (anthropic-key, github-pat,
+		// aws-access-key, …) are still caught by their specific SKIP
+		// patterns below.
 		{Name: "http-basic-auth", Regex: `(?i)basic\s+[a-zA-Z0-9+/=]{20,}`},
 
 		// Anthropic API keys
@@ -289,14 +289,46 @@ func DefaultReplacePatterns() []Pattern {
 			Regex:       `[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}`,
 			Placeholder: "<REDACTED-UUID>",
 		},
+		// HTTP Authorization / Bearer headers. REPLACE rather than SKIP
+		// so commands like curl -H "Authorization: Bearer <opaque-token>"
+		// can reach the LLM with the header shape preserved but the
+		// token substituted. High-entropy secret patterns (anthropic-key,
+		// github-pat, aws-access-key, google-api-key, openai-key) remain
+		// in SKIP and run first — a Bearer value that IS one of those
+		// keys still never reaches this REPLACE stage.
+		//
+		// Two capture groups:
+		//   $1 = prefix (optional opening quote + "authorization"/"bearer"
+		//        + optional closing quote + separator + optional opening
+		//        quote + optional "Bearer " scheme word)
+		//   $2 = token value (non-whitespace, non-quote chars — quotes
+		//        around the value sit OUTSIDE the match and are preserved)
+		//
+		// Shell-var references ($TOKEN / ${TOKEN}) are preserved literally
+		// by the REPLACE loop's isShellVarReference guard, so
+		//   Authorization: Bearer $CF_TOKEN
+		// keeps the literal $CF_TOKEN (no secret in literal text; the
+		// shell expands it at exec time).
+		//
+		// Placed BEFORE jwt so the `Authorization: Bearer <jwt>` shape
+		// emits a single <REDACTED-BEARER> rather than a nested
+		// `Authorization: Bearer <REDACTED-JWT>` placeholder. The final
+		// output is equivalent — no eyJ fragment or signature leaks —
+		// but the LLM sees the outer credential shape directly.
+		{
+			Name:        "http-bearer",
+			Regex:       `(?i)\b(["']?(?:authorization|bearer)["']?\s*[:=]\s*["']?(?:bearer\s+)?)([^"'\s]+)`,
+			Placeholder: "<REDACTED-BEARER>",
+		},
 		// JWT tokens (header.payload.sig where header looks JWT-y).
 		// REPLACE rather than SKIP so commands like TOKEN="<jwt>" or
 		// curl /api/verify/<jwt> can reach the LLM with the credential
 		// shape preserved but the value substituted. The full triple is
 		// matched and replaced, so neither the signature nor the
 		// base64-encoded payload claims (user IDs, roles, emails) reach
-		// the LLM. Bearer-scheme JWTs in http auth headers still hit
-		// the http-bearer SKIP and never reach this REPLACE stage.
+		// the LLM. Bearer-scheme JWTs are caught by the http-bearer
+		// REPLACE above first — this entry catches bare JWTs in URL
+		// paths, TOKEN="…" env shapes, and other non-bearer contexts.
 		//
 		// Ordering: placed BEFORE the generic credential-shape block so
 		// that when a JWT appears inside token="…"/password="…" the jwt

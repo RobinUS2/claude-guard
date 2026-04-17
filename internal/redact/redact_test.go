@@ -5,18 +5,23 @@ import (
 	"testing"
 )
 
-func TestSkip_BearerToken(t *testing.T) {
+// After the 2026-04-17 http-bearer SKIP→REPLACE move, a bare Bearer
+// header no longer Skips on its own — the shape reaches REPLACE and
+// the token value is substituted. What still MUST Skip is a Bearer
+// carrying a high-entropy secret (anthropic-key, github-pat, …):
+// those specific SKIP patterns fire first, before http-bearer REPLACE.
+// The JWT-in-Bearer case moved to TestReplace_BearerJWT_RedactedNotLeaked.
+func TestSkip_BearerToken_HighEntropyValueStillSkips(t *testing.T) {
 	r := New(nil, nil)
 	cases := []string{
 		`curl -H "Authorization: Bearer sk-ant-abc123def456ghi789jkl" https://api.example.com`,
 		`curl --header 'authorization: bearer ghp_1234567890abcdefghijklmnopqr'`,
-		`http POST api.example.com Authorization:"Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"`,
 	}
 	for _, cmd := range cases {
 		t.Run(cmd, func(t *testing.T) {
 			res := r.Scan(cmd)
 			if res.Decision != Skip {
-				t.Errorf("Decision = %v, want Skip; reason=%q", res.Decision, res.SkipReason)
+				t.Errorf("Decision = %v, want Skip (specific secret pattern must fire); reason=%q", res.Decision, res.SkipReason)
 			}
 		})
 	}
@@ -455,13 +460,17 @@ func TestReplace_MultipleJWTs(t *testing.T) {
 }
 
 // Regression: JWT carried inside an Authorization: Bearer header must
-// still Skip after the jwt SKIP→REPLACE move. The http-bearer SKIP
-// pattern is iterated before any REPLACE pattern, so a full-triple JWT
-// behind Bearer never reaches the jwt REPLACE stage. If this test ever
-// starts returning Send, it means a refactor has broken the SKIP-first
-// ordering invariant and the Authorization header value is now leaking
-// to the LLM — which would be a security regression.
-func TestSkip_BearerJWT_RemainsSkipped(t *testing.T) {
+// reach the LLM with both the Bearer token and the JWT substituted —
+// no eyJ fragment, no signature, no payload claim leaks. The command
+// shape is preserved so the LLM can still decide on the outer curl.
+//
+// After the 2026-04-17 http-bearer and jwt SKIP→REPLACE moves, the
+// http-bearer REPLACE runs first and emits <REDACTED-BEARER> covering
+// the whole Bearer value (including the JWT). If this test ever starts
+// leaking an eyJ fragment, it means the capture groups drifted or the
+// REPLACE ordering changed and the Authorization value is now reaching
+// the LLM as literal — a security regression.
+func TestReplace_BearerJWT_RedactedNotLeaked(t *testing.T) {
 	r := New(nil, nil)
 	h := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 	p := "eyJzdWIiOiIxMjM0NTY3ODkwIn0"
@@ -469,8 +478,131 @@ func TestSkip_BearerJWT_RemainsSkipped(t *testing.T) {
 	jwt := h + "." + p + "." + s
 	cmd := `curl -H "Authorization: Bearer ` + jwt + `" https://api.example.com`
 	res := r.Scan(cmd)
-	if res.Decision != Skip {
-		t.Errorf("Decision = %v, want Skip (Bearer SKIP must win over jwt REPLACE); reason=%q", res.Decision, res.SkipReason)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v (reason=%q), want Send", res.Decision, res.SkipReason)
+	}
+	if strings.Contains(res.Redacted, "eyJ") {
+		t.Errorf("Redacted = %q — eyJ fragment leaked", res.Redacted)
+	}
+	if strings.Contains(res.Redacted, s) {
+		t.Errorf("Redacted = %q — JWT signature leaked", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-BEARER>") {
+		t.Errorf("Redacted = %q — missing <REDACTED-BEARER> placeholder", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "Authorization: Bearer ") {
+		t.Errorf("Redacted = %q — Authorization: Bearer prefix should be preserved", res.Redacted)
+	}
+}
+
+// Robin's original failing case: opaque Bearer token (not a JWT, not a
+// known high-entropy shape) must now Send with the token substituted.
+// Previously SKIP-ed, which routed to the UI approval prompt — this is
+// the point of the http-bearer SKIP→REPLACE move.
+func TestReplace_Bearer_ArbitraryToken(t *testing.T) {
+	r := New(nil, nil)
+	token := "arbitrary-opaque-token-1234567890"
+	cmd := `curl -sS "https://studio.taufinity.io/api/credentials" -H "Authorization: Bearer ` + token + `"`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v (reason=%q), want Send", res.Decision, res.SkipReason)
+	}
+	if strings.Contains(res.Redacted, token) {
+		t.Errorf("Redacted = %q — Bearer token leaked", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-BEARER>") {
+		t.Errorf("Redacted = %q — missing <REDACTED-BEARER> placeholder", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "Authorization: Bearer ") {
+		t.Errorf("Redacted = %q — Authorization: Bearer prefix should be preserved for LLM", res.Redacted)
+	}
+	found := false
+	for _, k := range res.ReplacedKinds {
+		if k == "http-bearer" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ReplacedKinds = %v, missing %q", res.ReplacedKinds, "http-bearer")
+	}
+}
+
+// JSON form common in `http` CLI and language-SDK output:
+//
+//	"Authorization":"Bearer <token>"
+//
+// The outer quotes sit outside the regex match so they stay in the
+// redacted output. No eyJ / signature / literal-token leaks.
+func TestReplace_Bearer_InJSON(t *testing.T) {
+	r := New(nil, nil)
+	token := "opaque-json-token-abcdef"
+	cmd := `http POST api.example.com '{"Authorization":"Bearer ` + token + `"}'`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v (reason=%q), want Send", res.Decision, res.SkipReason)
+	}
+	if strings.Contains(res.Redacted, token) {
+		t.Errorf("Redacted = %q — Bearer token leaked in JSON", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-BEARER>") {
+		t.Errorf("Redacted = %q — missing placeholder", res.Redacted)
+	}
+}
+
+// Shell-var references must be preserved literally: the value "$CF_TOKEN"
+// is not a secret in the literal command text (the shell expands it at
+// exec time). Post-move, isShellVarReference gates the REPLACE substitution
+// the same way it used to gate the SKIP demotion.
+func TestReplace_Bearer_ShellVarPreserved(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `curl -H "Authorization: Bearer $CF_TOKEN" https://api.cloudflare.com/zones`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	if !strings.Contains(res.Redacted, "$CF_TOKEN") {
+		t.Errorf("Redacted = %q — literal $CF_TOKEN should be preserved (shell-var ref)", res.Redacted)
+	}
+	if strings.Contains(res.Redacted, "<REDACTED-BEARER>") {
+		t.Errorf("Redacted = %q — shell-var ref should NOT be substituted", res.Redacted)
+	}
+}
+
+// Lower-case header key, = separator, no quotes — stress the regex
+// tolerance for off-the-beaten-path shapes that still express the same
+// intent.
+func TestReplace_Bearer_LowercaseEquals(t *testing.T) {
+	r := New(nil, nil)
+	token := "tok-lowercase-xyz-123"
+	cmd := `myclient --auth authorization=` + token
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	if strings.Contains(res.Redacted, token) {
+		t.Errorf("Redacted = %q — token leaked", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-BEARER>") {
+		t.Errorf("Redacted = %q — missing placeholder", res.Redacted)
+	}
+}
+
+// Bearer as the header key (e.g. `bearer: <token>`) — no Authorization
+// wrapper. Regex accepts "bearer" as an alternate head keyword.
+func TestReplace_Bearer_StandaloneBearerKey(t *testing.T) {
+	r := New(nil, nil)
+	token := "standalone-bearer-value-9876"
+	cmd := `bearer: ` + token
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Fatalf("Decision = %v, want Send", res.Decision)
+	}
+	if strings.Contains(res.Redacted, token) {
+		t.Errorf("Redacted = %q — token leaked", res.Redacted)
+	}
+	if !strings.Contains(res.Redacted, "<REDACTED-BEARER>") {
+		t.Errorf("Redacted = %q — missing placeholder", res.Redacted)
 	}
 }
 
@@ -541,9 +673,9 @@ func TestExtraPatternsAreAdditive(t *testing.T) {
 	if r.Scan(`call --token INTERNAL-AB12CD34`).Decision != Skip {
 		t.Error("custom skip pattern should have fired")
 	}
-	// Default still fires
-	if r.Scan(`curl -H "Authorization: Bearer foo"`).Decision != Skip {
-		t.Error("default skip pattern should have fired")
+	// Default still fires (AKIA AWS access key — remains SKIP).
+	if r.Scan(`aws configure set aws_access_key_id AKIAIOSFODNN7EXAMPLE`).Decision != Skip {
+		t.Error("default skip pattern (aws-access-key) should have fired")
 	}
 }
 
