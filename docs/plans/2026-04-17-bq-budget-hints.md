@@ -16,6 +16,8 @@
 
 | File | Action | Responsibility |
 |---|---|---|
+| `internal/engine/engine.go` | Modify | Add MCP allow-list check; add `UserMessage` to `Output` |
+| `internal/engine/engine_test.go` | Modify | MCP allow tests + BQ pre-flight integration tests |
 | `internal/rules/rules.go` | Modify | Add `RequireFlags []string` to `AnchoredCommand` |
 | `internal/rules/rules_test.go` | Modify | Test `RequireFlags` matching |
 | `internal/hook/hook.go` | Modify | Add `UserMessage string` to `Response` |
@@ -24,18 +26,172 @@
 | `internal/budget/bq_test.go` | **Create** | Budget check/record/status tests |
 | `internal/engine/bq.go` | **Create** | BQ pre-flight: detection, dry-run subprocess, bytes parser |
 | `internal/engine/bq_test.go` | **Create** | BQ engine unit tests (stubbed subprocess) |
-| `internal/engine/engine.go` | Modify | Wire BQ pre-flight tier + `userMessage` into `Output` |
 | `cmd/claude-guard/decide.go` | Modify | Pass `out.UserMessage` to `hook.Response` |
-| `internal/config/defaults.go` | Modify | go-readonly fix; bq-dry-run tier-2 rule; remove `query` from bq-readonly |
+| `cmd/claude-guard/stats.go` | Modify | Add hit-rate + time-saved display |
+| `internal/config/defaults.go` | Modify | go-readonly fix; bq-dry-run rules; remove `query` from bq-readonly |
 
 ## Failure Routing
 
 | Phase | On Failure → |
 |---|---|
+| Task 0 (MCP allow-list) | ABORT — high volume, should ship first |
 | Task 1-2 (rules/hook) | ABORT — foundation, nothing builds without them |
 | Task 3 (budget) | Skip budget check, still run dry-run hint |
 | Task 4 (engine BQ) | Fall through to LLM tier (no regression, same as today) |
 | Task 5 (config) | Revert defaults change, keep existing bq-readonly as-is |
+| Task 8 (stats) | Ship without, add in follow-up |
+
+---
+
+## Task 0: MCP tool call allow-list
+
+**Files:**
+- Modify: `internal/engine/engine.go` — add MCP allow-list check in `decideGeneric`
+- Modify: `internal/engine/engine_test.go` — MCP allow tests
+
+Every MCP tool call currently hits `decideGeneric()` which sends it to the LLM. The LLM returns "unsure" because the prompt is written for Bash commands. This generates a user prompt for every single MCP call. Given that gdrive, google-calendar, computer-use, and Claude Preview are active in every session, this is the highest-volume prompt gap in the system.
+
+Fix: check the tool name against a hardcoded allow-list of known read-only MCP tools **before** calling the LLM. No new rule type needed — just a slice of allowed tool name prefixes inside `decideGeneric`.
+
+- [ ] **Step 1: Write failing tests**
+
+Add to `internal/engine/engine_test.go`:
+
+```go
+func TestMCPReadonlyAllowList(t *testing.T) {
+    eng := engine.New(config.Default(), nil)
+    allowed := []string{
+        "mcp__gdrive__gdrive_list_files",
+        "mcp__gdrive__gdrive_read_file",
+        "mcp__gdrive__gdrive_get_file",
+        "mcp__gdrive__gdrive_get_document_info",
+        "mcp__gdrive__gdrive_get_spreadsheet_info",
+        "mcp__gdrive__gdrive_search",
+        "mcp__google-calendar__list-events",
+        "mcp__google-calendar__get-event",
+        "mcp__google-calendar__list-calendars",
+        "mcp__google-calendar__get-freebusy",
+        "mcp__google-calendar__get-current-time",
+        "mcp__Claude_Preview__preview_screenshot",
+        "mcp__Claude_Preview__preview_list",
+        "mcp__Claude_Preview__preview_logs",
+        "mcp__Claude_Preview__preview_console_logs",
+        "mcp__Claude_Preview__preview_network",
+        "mcp__Claude_Preview__preview_snapshot",
+        "mcp__computer-use__screenshot",
+        "mcp__computer-use__cursor_position",
+        "mcp__computer-use__list_granted_applications",
+    }
+    for _, toolName := range allowed {
+        out := eng.Decide(engine.Input{ToolName: toolName, Command: "MCP tool call (not bash) " + toolName + ": {}"})
+        if out.Verdict != engine.Allow {
+            t.Errorf("tool=%s: got %v (tier=%s), want Allow", toolName, out.Verdict, out.Tier)
+        }
+        if out.Tier != "instant_allow" {
+            t.Errorf("tool=%s: tier=%s, want instant_allow", toolName, out.Tier)
+        }
+    }
+    // Write/mutating tools must NOT be in the allow list
+    blocked := []string{
+        "mcp__gdrive__gdrive_create_doc",
+        "mcp__gdrive__gdrive_update_sheet",
+        "mcp__gdrive__gdrive_delete_rows_columns",
+        "mcp__computer-use__left_click",
+        "mcp__computer-use__type",
+    }
+    for _, toolName := range blocked {
+        out := eng.Decide(engine.Input{ToolName: toolName, Command: "MCP tool call (not bash) " + toolName + ": {}"})
+        if out.Verdict == engine.Allow && out.Tier == "instant_allow" {
+            t.Errorf("tool=%s: should NOT be instant_allow (mutating tool)", toolName)
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Run test — expect FAIL**
+
+```bash
+go test ./internal/engine/... -run TestMCPReadonlyAllowList -v
+```
+
+Expected: all allowed tools return `Continue` (fall through), not `Allow`.
+
+- [ ] **Step 3: Add MCP allow-list to `decideGeneric`**
+
+In `internal/engine/engine.go`, find `decideGeneric` (or add it if it only exists as a stub). Before the LLM call, add:
+
+```go
+// mcpReadonlyTools is the allow-list of MCP tool names that are
+// unconditionally safe to auto-approve. These are read-only operations
+// on known services (GDrive, Calendar, Preview, computer screenshot).
+// Naming convention: mcp__<server>__<tool>. Only exact matches allowed —
+// no prefix wildcards to avoid accidentally approving write variants.
+var mcpReadonlyTools = map[string]struct{}{
+    // Google Drive — read only
+    "mcp__gdrive__gdrive_list_files":           {},
+    "mcp__gdrive__gdrive_read_file":            {},
+    "mcp__gdrive__gdrive_get_file":             {},
+    "mcp__gdrive__gdrive_get_document_info":    {},
+    "mcp__gdrive__gdrive_get_spreadsheet_info": {},
+    "mcp__gdrive__gdrive_search":               {},
+    // Google Calendar — read only
+    "mcp__google-calendar__list-events":      {},
+    "mcp__google-calendar__get-event":        {},
+    "mcp__google-calendar__list-calendars":   {},
+    "mcp__google-calendar__get-freebusy":     {},
+    "mcp__google-calendar__get-current-time": {},
+    // Claude Preview — observation only (no click/type)
+    "mcp__Claude_Preview__preview_screenshot":    {},
+    "mcp__Claude_Preview__preview_list":          {},
+    "mcp__Claude_Preview__preview_logs":          {},
+    "mcp__Claude_Preview__preview_console_logs":  {},
+    "mcp__Claude_Preview__preview_network":       {},
+    "mcp__Claude_Preview__preview_snapshot":      {},
+    // Computer use — observation only (no click/type/key)
+    "mcp__computer-use__screenshot":               {},
+    "mcp__computer-use__cursor_position":          {},
+    "mcp__computer-use__list_granted_applications":{},
+}
+```
+
+In `decideGeneric` (wherever it is in `engine.go`), add the check at the top of the function:
+
+```go
+func (e *Engine) decideGeneric(in Input, start time.Time) Output {
+    // Fast path: known read-only MCP tools bypass the LLM entirely.
+    if _, ok := mcpReadonlyTools[in.ToolName]; ok {
+        out := Output{
+            Verdict: Allow,
+            Tier:    "instant_allow",
+            Rule:    "mcp-readonly",
+            Reason:  "known read-only MCP tool",
+            Latency: time.Since(start),
+        }
+        e.record(in, out)
+        return out
+    }
+    // ... rest of existing decideGeneric logic ...
+}
+```
+
+- [ ] **Step 4: Run test — expect PASS**
+
+```bash
+go test ./internal/engine/... -run TestMCPReadonlyAllowList -v
+```
+
+- [ ] **Step 5: Run full suite**
+
+```bash
+go test ./... 2>&1 | tail -20
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/engine/engine.go internal/engine/engine_test.go
+git commit -m "engine: add MCP read-only allow-list (gdrive, calendar, preview, computer-use screenshot)"
+```
 
 ---
 
@@ -144,29 +300,38 @@ Add to `internal/rules/rules_test.go`:
 
 ```go
 func TestAnchoredCommandRequireFlags(t *testing.T) {
-    rule := &AnchoredCommand{
+    ruleUnderscore := &AnchoredCommand{
         RuleName:         "bq-dry-run",
         Programs:         []string{"bq"},
         RequireSubcmdAny: []string{"query"},
         RequireFlags:     []string{"--dry_run"},
     }
+    ruleHyphen := &AnchoredCommand{
+        RuleName:         "bq-dry-run-hyphen",
+        Programs:         []string{"bq"},
+        RequireSubcmdAny: []string{"query"},
+        RequireFlags:     []string{"--dry-run"},
+    }
     tests := []struct {
+        rule *AnchoredCommand
         cmd  string
         want Verdict
     }{
-        {"bq query --dry_run --nouse_legacy_sql 'SELECT 1'", Match},
-        {"bq query --nouse_legacy_sql 'SELECT 1'", NoMatch}, // missing --dry_run
-        {"bq query", NoMatch},                               // missing --dry_run
-        {"bq ls", NoMatch},                                  // wrong subcommand
+        {ruleUnderscore, "bq query --dry_run --nouse_legacy_sql 'SELECT 1'", Match},
+        {ruleUnderscore, "bq query --nouse_legacy_sql 'SELECT 1'", NoMatch}, // missing --dry_run
+        {ruleUnderscore, "bq query", NoMatch},                               // missing --dry_run
+        {ruleUnderscore, "bq ls", NoMatch},                                  // wrong subcommand
+        {ruleHyphen, "bq query --dry-run --nouse_legacy_sql 'SELECT 1'", Match},
+        {ruleHyphen, "bq query --dry_run 'SELECT 1'", NoMatch}, // underscore != hyphen rule
     }
     for _, tt := range tests {
         p, err := shellparse.Parse(tt.cmd)
         if err != nil {
             t.Fatalf("parse %q: %v", tt.cmd, err)
         }
-        got, _ := rule.Eval(p)
+        got, _ := tt.rule.Eval(p)
         if got != tt.want {
-            t.Errorf("cmd=%q: got %v, want %v", tt.cmd, got, tt.want)
+            t.Errorf("rule=%s cmd=%q: got %v, want %v", tt.rule.RuleName, tt.cmd, got, tt.want)
         }
     }
 }
@@ -656,19 +821,29 @@ func TestIsBQQueryWithoutDryRun(t *testing.T) {
 }
 
 func TestBuildDryRunCommand(t *testing.T) {
-    cmd := "bq query --nouse_legacy_sql 'SELECT * FROM dataset.table'"
-    dry := buildDryRunCommand(cmd)
-    if dry == "" {
-        t.Fatal("should produce a dry-run command")
+    tests := []struct {
+        cmd  string
+        want string
+    }{
+        {
+            "bq query --nouse_legacy_sql 'SELECT * FROM dataset.table'",
+            "bq query --dry_run --nouse_legacy_sql 'SELECT * FROM dataset.table'",
+        },
+        {
+            // SQL with embedded spaces in quoted string — must not be mangled
+            `bq query --nouse_legacy_sql 'SELECT id FROM users WHERE name = "Alice Smith"'`,
+            `bq query --dry_run --nouse_legacy_sql 'SELECT id FROM users WHERE name = "Alice Smith"'`,
+        },
     }
-    // Must contain --dry_run
-    if !containsStr(dry, "--dry_run") {
-        t.Errorf("dry-run command missing --dry_run flag: %s", dry)
+    for _, tt := range tests {
+        got := buildDryRunCommand(tt.cmd)
+        if got != tt.want {
+            t.Errorf("buildDryRunCommand(%q) = %q, want %q", tt.cmd, got, tt.want)
+        }
+        if !strings.Contains(got, "--dry_run") {
+            t.Errorf("dry-run command missing --dry_run flag: %s", got)
+        }
     }
-}
-
-func containsStr(s, sub string) bool {
-    return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr(s[1:], sub) || s[:len(sub)] == sub)
 }
 ```
 
@@ -731,17 +906,17 @@ func isBQQueryWithoutDryRun(cmd string) bool {
 }
 
 // buildDryRunCommand inserts --dry_run after "bq query" in cmd.
+// Uses string replacement rather than field split so shell quoting in
+// the query text is preserved intact (e.g. 'SELECT name FROM t WHERE
+// city = "Amsterdam"' must not be broken across fields).
 // Returns "" if cmd does not have the expected shape.
 func buildDryRunCommand(cmd string) string {
-    fields := strings.Fields(cmd)
-    if len(fields) < 2 || fields[1] != "query" {
+    trimmed := strings.TrimSpace(cmd)
+    const marker = "bq query "
+    if !strings.HasPrefix(trimmed, marker) && trimmed != "bq query" {
         return ""
     }
-    // Insert --dry_run after "bq query".
-    result := make([]string, 0, len(fields)+1)
-    result = append(result, fields[0], fields[1], "--dry_run")
-    result = append(result, fields[2:]...)
-    return strings.Join(result, " ")
+    return strings.Replace(trimmed, "bq query", "bq query --dry_run", 1)
 }
 
 // parseBQDryRunBytes extracts the byte estimate from bq --dry_run output.
@@ -1160,16 +1335,23 @@ bqReadonly := &rules.AnchoredCommand{
     RequireSubcmdAny: []string{"show", "ls", "head"},
 }
 
-// bq query --dry_run is always free — validate and estimate, never bill.
-bqDryRun := &rules.AnchoredCommand{
+// bq query --dry_run / --dry-run is always free — validate and estimate, never bill.
+// Two rules: one per flag spelling (bq CLI accepts both underscore and hyphen).
+bqDryRunUnderscore := &rules.AnchoredCommand{
     RuleName:         "bq-dry-run",
     Programs:         []string{"bq"},
     RequireSubcmdAny: []string{"query"},
     RequireFlags:     []string{"--dry_run"},
 }
+bqDryRunHyphen := &rules.AnchoredCommand{
+    RuleName:         "bq-dry-run-hyphen",
+    Programs:         []string{"bq"},
+    RequireSubcmdAny: []string{"query"},
+    RequireFlags:     []string{"--dry-run"},
+}
 ```
 
-Add `bqDryRun` to the return slice and to `CdPrefixed.InnerRules` (after `bqReadonly` in both places):
+Add both dry-run variants to the return slice and to `CdPrefixed.InnerRules` (after `bqReadonly` in both places):
 
 ```go
 return []rules.Rule{
@@ -1177,7 +1359,8 @@ return []rules.Rule{
     findReadonly,
     gitReadonly,
     bqReadonly,
-    bqDryRun,    // ADD
+    bqDryRunUnderscore, // ADD: --dry_run
+    bqDryRunHyphen,     // ADD: --dry-run
     terraformReadonly,
     // ...
 }
@@ -1191,7 +1374,8 @@ return []rules.Rule{
         findReadonly,
         gitReadonly,
         bqReadonly,
-        bqDryRun,    // ADD
+        bqDryRunUnderscore, // ADD
+        bqDryRunHyphen,     // ADD
         // ...
     },
 }
@@ -1240,6 +1424,106 @@ Expected for real query: response includes `"userMessage"` with byte estimate.
 ```bash
 git add internal/config/defaults.go cmd/claude-guard/decide.go
 git commit -m "config: split bq-readonly → bq-dry-run (instant-allow) + bq-budget pre-flight for real queries"
+```
+
+---
+
+### Task 8: Hit-rate and time-saved measurement in `stats.go`
+
+Show how many user prompts claude-guard avoided and estimate wall-clock time saved.
+
+**Files:**
+- Modify: `cmd/claude-guard/stats.go`
+- Test: `cmd/claude-guard/stats_test.go`
+
+The existing decision log (`decisions.jsonl`) already records `verdict` and `tier` per entry. We need to:
+
+1. Count entries where the engine resolved without asking the user: `verdict=allow` at tier `instant_allow`, `cache`, or `llm`.
+2. Count entries where the user was prompted: `verdict=continue` (tier `default`).
+3. Derive `interrupts_avoided` and `time_saved_estimate`.
+
+**Heuristic:** 3 minutes per avoided user-prompt (conservative; typical pause is longer when the user is mid-thought).
+
+- [ ] **Step 1: Write failing test**
+
+In `cmd/claude-guard/stats_test.go`, add:
+
+```go
+func TestComputeTimeSaved(t *testing.T) {
+    entries := []logEntry{
+        {Verdict: "allow",    Tier: "instant_allow"},
+        {Verdict: "allow",    Tier: "cache"},
+        {Verdict: "allow",    Tier: "llm"},
+        {Verdict: "continue", Tier: "default"},   // user prompted
+        {Verdict: "continue", Tier: "default"},   // user prompted
+    }
+    avoided, saved := computeTimeSaved(entries)
+    if avoided != 3 {
+        t.Errorf("avoided=%d, want 3", avoided)
+    }
+    wantMin := 3 * 3 // 3 avoided × 3 min
+    if saved != wantMin {
+        t.Errorf("saved=%d min, want %d", saved, wantMin)
+    }
+}
+```
+
+- [ ] **Step 2: Run test — expect FAIL**
+
+```bash
+go test ./cmd/claude-guard/... -run TestComputeTimeSaved -v
+```
+
+Expected: `undefined: computeTimeSaved`
+
+- [ ] **Step 3: Implement `computeTimeSaved` in `stats.go`**
+
+Add to `cmd/claude-guard/stats.go`:
+
+```go
+const minutesPerInterruptAvoided = 3
+
+// computeTimeSaved returns (interruptsAvoided, minutesSaved).
+// An interrupt is "avoided" when the engine resolved without prompting the user
+// (instant_allow, cache, or llm tier — all automated paths).
+func computeTimeSaved(entries []logEntry) (int, int) {
+    avoided := 0
+    for _, e := range entries {
+        switch e.Tier {
+        case "instant_allow", "cache", "llm":
+            if e.Verdict == "allow" {
+                avoided++
+            }
+        }
+    }
+    return avoided, avoided * minutesPerInterruptAvoided
+}
+```
+
+- [ ] **Step 4: Surface in `cmdStats` output**
+
+In the `cmdStats` function (or equivalent stats renderer), after the existing rule-hit counts, add:
+
+```go
+avoided, savedMin := computeTimeSaved(entries)
+fmt.Printf("\nInterrupts avoided:  %d\n", avoided)
+fmt.Printf("Time saved (est.):   ~%d min (~%.1f h)\n",
+    savedMin, float64(savedMin)/60.0)
+fmt.Printf("  (heuristic: %d min per avoided user-prompt)\n", minutesPerInterruptAvoided)
+```
+
+- [ ] **Step 5: Run test — expect PASS**
+
+```bash
+go test ./cmd/claude-guard/... -run TestComputeTimeSaved -v
+go test ./... 2>&1 | tail -20
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add cmd/claude-guard/stats.go cmd/claude-guard/stats_test.go
+git commit -m "stats: add interrupts-avoided and time-saved-estimate to output"
 ```
 
 ---
