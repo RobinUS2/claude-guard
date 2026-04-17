@@ -93,12 +93,6 @@ func cmdDecide(_ []string) int {
 		return 1
 	}
 
-	// Only act on Bash for v1.
-	if req.ToolName != "Bash" {
-		_ = hook.WriteResponse(os.Stdout, hook.Continue())
-		return 0
-	}
-
 	// Build the engine input from the parsed tool_input.
 	in := engine.Input{
 		ToolName:  req.ToolName,
