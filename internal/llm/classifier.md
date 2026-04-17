@@ -66,3 +66,21 @@ schema:
 The reason field MUST NOT quote secrets, tokens, passwords, or
 credentials from the command text. If sensitive-looking values are
 present, refer to them as "[redacted]" in your reason.
+
+When a command executes a file and the file contents are provided in
+the REFERENCED FILE section, evaluate the file's actual behavior
+instead of judging purely from the command pattern:
+
+- If the file only does computation, string manipulation, printing,
+  or reads from stdin, it is SAFE.
+- If the file imports packages for network access, subprocess
+  execution, or filesystem writes outside the working directory,
+  classify as UNSAFE or UNSURE depending on how they are used.
+- If the file contents appear truncated or incomplete, classify as
+  UNSURE.
+- The file contents show only the directly referenced file. Imported
+  packages and modules are NOT provided. If the file imports
+  unfamiliar third-party packages that could have side effects,
+  classify as UNSURE.
+- Standard library imports for testing, formatting, math, and data
+  structures are SAFE.
