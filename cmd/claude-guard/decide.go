@@ -99,12 +99,82 @@ func cmdDecide(_ []string) int {
 		return 0
 	}
 
-	// Extract the Bash command + description.
-	bi, err := req.Bash()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "claude-guard: %v\n", err)
-		_ = hook.WriteResponse(os.Stdout, hook.Continue())
-		return 1
+	// Build the engine input from the parsed tool_input.
+	in := engine.Input{
+		ToolName:  req.ToolName,
+		CWD:       req.CWD,
+		SessionID: req.SessionID,
+		ToolUseID: req.ToolUseID,
+		AgentID:   req.AgentID,
+		AgentType: req.AgentType,
+	}
+	switch req.ToolName {
+	case "Bash":
+		bi, err := req.Bash()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: %v\n", err)
+			_ = hook.WriteResponse(os.Stdout, hook.Continue())
+			return 1
+		}
+		in.Command = bi.Command
+		in.Description = bi.Description
+	case "WebFetch":
+		wf, err := req.WebFetch()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: webfetch parse: %v\n", err)
+			_ = hook.WriteResponse(os.Stdout, hook.Continue())
+			return 1
+		}
+		in.URL = wf.URL
+		in.Command = "WebFetch: " + wf.URL
+		in.Description = wf.Prompt
+	case "WebSearch":
+		ws, err := req.WebSearch()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: websearch parse: %v\n", err)
+			_ = hook.WriteResponse(os.Stdout, hook.Continue())
+			return 1
+		}
+		in.Query = ws.Query
+		in.Command = "WebSearch: " + ws.Query
+	case "Read":
+		ri, err := req.Read()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: read parse: %v\n", err)
+			_ = hook.WriteResponse(os.Stdout, hook.Continue())
+			return 1
+		}
+		in.FilePath = ri.FilePath
+		in.Command = "Read: " + ri.FilePath
+	case "Write":
+		wi, err := req.Write()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: write parse: %v\n", err)
+			_ = hook.WriteResponse(os.Stdout, hook.Continue())
+			return 1
+		}
+		in.FilePath = wi.FilePath
+		in.IsWrite = true
+		in.Content = wi.Content
+		in.Command = "Write: " + wi.FilePath
+	case "Edit":
+		ei, err := req.Edit()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: edit parse: %v\n", err)
+			_ = hook.WriteResponse(os.Stdout, hook.Continue())
+			return 1
+		}
+		in.FilePath = ei.FilePath
+		in.IsWrite = true
+		in.Command = "Edit: " + ei.FilePath
+	default:
+		// MCP and unknown tools — pass serialized tool_input.
+		raw := string(req.ToolInput)
+		const maxMCPLen = 2048
+		if len(raw) > maxMCPLen {
+			raw = raw[:maxMCPLen]
+		}
+		in.Command = "MCP tool call (not bash) " + req.ToolName + ": " + raw
 	}
 
 	// Run the engine with the full set of components.
@@ -120,16 +190,7 @@ func cmdDecide(_ []string) int {
 		Legacy:              legacyList,
 		ProjectConfigLoader: projectconfig.Load,
 	})
-	out := eng.Decide(engine.Input{
-		ToolName:    req.ToolName,
-		Command:     bi.Command,
-		Description: bi.Description,
-		CWD:         req.CWD,
-		SessionID:   req.SessionID,
-		ToolUseID:   req.ToolUseID,
-		AgentID:     req.AgentID,
-		AgentType:   req.AgentType,
-	})
+	out := eng.Decide(in)
 
 	// Translate engine verdict to hook response.
 	var resp hook.Response

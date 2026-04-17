@@ -72,13 +72,20 @@ const (
 // Input carries the data the engine needs to decide.
 type Input struct {
 	ToolName    string
-	Command     string
+	Command     string // Bash: shell command; others: prefixed summary for LLM/cache
 	Description string // Claude's own short description of intent
 	CWD         string
 	SessionID   string
 	ToolUseID   string
 	AgentID     string
 	AgentType   string
+
+	// Tool-specific parsed fields (populated by decide.go).
+	URL      string // WebFetch
+	Query    string // WebSearch
+	FilePath string // Read, Write, Edit
+	IsWrite  bool   // true for Write, Edit
+	Content  string // Write content (for secret scan; NOT sent to LLM)
 }
 
 // Output is the engine's decision plus metadata for logging/debugging.
@@ -284,10 +291,20 @@ func (e *Engine) Decide(in Input) Output {
 	start := time.Now()
 	out := Output{Verdict: Continue, Tier: "default"}
 
-	if in.ToolName != "Bash" {
-		out.Latency = time.Since(start)
-		e.record(in, out)
-		return out
+	switch in.ToolName {
+	case "Bash":
+		// Fall through to the existing Bash pipeline below.
+	case "WebFetch":
+		return e.decideWebFetch(in, start)
+	case "WebSearch":
+		return e.decideWebSearch(in, start)
+	case "Read":
+		return e.decideRead(in, start)
+	case "Write", "Edit":
+		return e.decideWrite(in, start)
+	default:
+		// MCP and unknown tools — generic evaluator.
+		return e.decideGeneric(in, start)
 	}
 
 	parsed, err := shellparse.Parse(in.Command)

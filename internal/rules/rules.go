@@ -251,7 +251,7 @@ func (r *BlockedCommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 			if pos == "" {
 				continue
 			}
-			if pathMatchesAny(pos, r.TargetPaths) {
+			if PathMatchesAny(pos, r.TargetPaths) {
 				return Match, r.Reason
 			}
 		}
@@ -742,7 +742,7 @@ func (r *PathAccess) Eval(p *shellparse.Parsed) (Verdict, string) {
 				if arg == "" {
 					continue
 				}
-				if pathMatchesAny(arg, r.Paths) {
+				if PathMatchesAny(arg, r.Paths) {
 					return Match, r.Reason
 				}
 			}
@@ -758,7 +758,7 @@ func (r *PathAccess) Eval(p *shellparse.Parsed) (Verdict, string) {
 			if r.WriteOnly && rw.Direction != shellparse.RedirTarget {
 				continue
 			}
-			if pathMatchesAny(rw.Path, r.Paths) {
+			if PathMatchesAny(rw.Path, r.Paths) {
 				return Match, r.Reason
 			}
 		}
@@ -771,7 +771,7 @@ func (r *PathAccess) Eval(p *shellparse.Parsed) (Verdict, string) {
 			if r.WriteOnly && rw.Direction != shellparse.RedirTarget {
 				continue
 			}
-			if pathMatchesAny(rw.Path, r.Paths) {
+			if PathMatchesAny(rw.Path, r.Paths) {
 				return Match, r.Reason
 			}
 		}
@@ -791,7 +791,7 @@ func (r *PathAccess) Eval(p *shellparse.Parsed) (Verdict, string) {
 					if arg == "" {
 						continue
 					}
-					if pathMatchesAny(arg, r.Paths) {
+					if PathMatchesAny(arg, r.Paths) {
 						return Match, r.Reason
 					}
 				}
@@ -877,7 +877,7 @@ func flagsMatchGroup(flags, group []string) bool {
 // rules written with `/Users` matching subpaths — we try the match
 // against BOTH forms: the fully-normalized arg AND the arg with only
 // lexical (filepath.Clean) normalization applied.
-func pathMatchesAny(arg string, paths []string) bool {
+func PathMatchesAny(arg string, paths []string) bool {
 	normArg := normalizePath(arg)
 	lexArg := arg
 	if strings.HasPrefix(lexArg, "/") {

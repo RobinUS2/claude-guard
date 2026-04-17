@@ -47,6 +47,91 @@ func (r *Request) Bash() (*BashInput, error) {
 	return &bi, nil
 }
 
+// WebFetchInput is the tool_input shape for WebFetch.
+type WebFetchInput struct {
+	URL    string `json:"url"`
+	Prompt string `json:"prompt,omitempty"`
+}
+
+func (r *Request) WebFetch() (*WebFetchInput, error) {
+	if r.ToolName != "WebFetch" {
+		return nil, fmt.Errorf("tool is %q, not WebFetch", r.ToolName)
+	}
+	var wf WebFetchInput
+	if err := json.Unmarshal(r.ToolInput, &wf); err != nil {
+		return nil, fmt.Errorf("decode webfetch tool_input: %w", err)
+	}
+	return &wf, nil
+}
+
+// WebSearchInput is the tool_input shape for WebSearch.
+type WebSearchInput struct {
+	Query          string   `json:"query"`
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+}
+
+func (r *Request) WebSearch() (*WebSearchInput, error) {
+	if r.ToolName != "WebSearch" {
+		return nil, fmt.Errorf("tool is %q, not WebSearch", r.ToolName)
+	}
+	var ws WebSearchInput
+	if err := json.Unmarshal(r.ToolInput, &ws); err != nil {
+		return nil, fmt.Errorf("decode websearch tool_input: %w", err)
+	}
+	return &ws, nil
+}
+
+// ReadInput is the tool_input shape for Read.
+type ReadInput struct {
+	FilePath string `json:"file_path"`
+}
+
+func (r *Request) Read() (*ReadInput, error) {
+	if r.ToolName != "Read" {
+		return nil, fmt.Errorf("tool is %q, not Read", r.ToolName)
+	}
+	var ri ReadInput
+	if err := json.Unmarshal(r.ToolInput, &ri); err != nil {
+		return nil, fmt.Errorf("decode read tool_input: %w", err)
+	}
+	return &ri, nil
+}
+
+// WriteInput is the tool_input shape for Write.
+type WriteInput struct {
+	FilePath string `json:"file_path"`
+	Content  string `json:"content"`
+}
+
+func (r *Request) Write() (*WriteInput, error) {
+	if r.ToolName != "Write" {
+		return nil, fmt.Errorf("tool is %q, not Write", r.ToolName)
+	}
+	var wi WriteInput
+	if err := json.Unmarshal(r.ToolInput, &wi); err != nil {
+		return nil, fmt.Errorf("decode write tool_input: %w", err)
+	}
+	return &wi, nil
+}
+
+// EditInput is the tool_input shape for Edit.
+type EditInput struct {
+	FilePath  string `json:"file_path"`
+	OldString string `json:"old_string"`
+	NewString string `json:"new_string"`
+}
+
+func (r *Request) Edit() (*EditInput, error) {
+	if r.ToolName != "Edit" {
+		return nil, fmt.Errorf("tool is %q, not Edit", r.ToolName)
+	}
+	var ei EditInput
+	if err := json.Unmarshal(r.ToolInput, &ei); err != nil {
+		return nil, fmt.Errorf("decode edit tool_input: %w", err)
+	}
+	return &ei, nil
+}
+
 // Decision is an explicit verdict the guard wants to send back to Claude Code.
 type Decision string
 
