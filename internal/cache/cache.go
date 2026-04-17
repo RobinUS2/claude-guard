@@ -155,6 +155,11 @@ type KeyInputs struct {
 	// are unchanged. Populated by the engine for `make <target>`
 	// shapes; empty for all other commands.
 	MakefileHash string
+	// FileContentHash is the SHA-256 of the file contents for runner
+	// commands (go run, python, etc.). When populated, a change in the
+	// file invalidates the cached verdict even when the command string
+	// is identical. Empty for non-runner commands.
+	FileContentHash string
 }
 
 // SchemaVersion is part of every cache key. Bump it when the KeyInputs
@@ -170,7 +175,7 @@ type KeyInputs struct {
 //     tokens. See internal/normalize.
 // v6: added MakefileHash dimension so Makefile edits invalidate
 //     cached `make <target>` verdicts.
-const SchemaVersion = "6"
+const SchemaVersion = "7"
 
 // MaxCommandInEntry caps how many bytes of a command we persist in
 // an entry. Commands occasionally include multi-KB heredocs or
@@ -218,6 +223,8 @@ func keyWithDimensions(in KeyInputs, includeProject bool) string {
 	b.WriteString(in.ProjectConfigHash)
 	b.WriteByte('\x00')
 	b.WriteString(in.MakefileHash)
+	b.WriteByte('\x00')
+	b.WriteString(in.FileContentHash)
 
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])
