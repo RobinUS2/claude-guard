@@ -84,6 +84,7 @@ type AnchoredCommand struct {
 	// independently of trailing ID/path args.
 	RequireSubcmd2Any []string
 	ForbidFlags       []string // reject if any of these flags appear
+	RequireFlags      []string // if non-empty, ALL of these flags must be present
 }
 
 func (r *AnchoredCommand) Name() string { return r.RuleName }
@@ -118,6 +119,11 @@ func (r *AnchoredCommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 	}
 	for _, forbidden := range r.ForbidFlags {
 		if anchoredFlagForbidden(c.Flags, forbidden) {
+			return NoMatch, ""
+		}
+	}
+	for _, required := range r.RequireFlags {
+		if !anchoredFlagPresent(c.Flags, required) {
 			return NoMatch, ""
 		}
 	}
@@ -182,6 +188,21 @@ func anchoredFlagForbidden(callFlags []string, forbidden string) bool {
 	// Other shapes (not starting with -) — treat as exact/prefix only.
 	for _, f := range callFlags {
 		if f == forbidden || strings.HasPrefix(f, forbidden+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// anchoredFlagPresent returns true when the required flag is present in the
+// call's flag list. Uses the same exact-match logic as anchoredFlagForbidden
+// for long flags (`--flag` or `--flag=value`). Short flags are matched exactly.
+func anchoredFlagPresent(callFlags []string, required string) bool {
+	for _, f := range callFlags {
+		if f == required {
+			return true
+		}
+		if strings.HasPrefix(required, "--") && strings.HasPrefix(f, required+"=") {
 			return true
 		}
 	}

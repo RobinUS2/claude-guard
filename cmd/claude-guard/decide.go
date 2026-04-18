@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/RobinUS2/claude-guard/internal/budget"
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
@@ -80,6 +81,10 @@ func cmdDecide(_ []string) int {
 		cch = cache.New(filepath.Join(cacheRoot, "verdicts"))
 	}
 	redactor := redact.New(nil, nil)
+
+	// BQ byte budget: 100 GB per day by default.
+	const defaultBQDailyLimitGB = 100
+	bqBudget := budget.NewBQ(cacheRoot, defaultBQDailyLimitGB<<30)
 
 	// Tier 5: legacy allow list (migrated from settings.json). Missing
 	// file is fine — it just means tier 5 is empty.
@@ -183,18 +188,30 @@ func cmdDecide(_ []string) int {
 		Cache:               cch,
 		Legacy:              legacyList,
 		ProjectConfigLoader: projectconfig.Load,
+		BQBudget:            bqBudget,
 	})
 	out := eng.Decide(in)
 
 	// Translate engine verdict to hook response.
+	// When the engine sets UserMessage, pass it through to the hook so
+	// Claude sees the BQ byte estimate or budget-exhausted hint inline.
 	var resp hook.Response
+	reason := fmt.Sprintf("tier=%s rule=%s", out.Tier, out.Rule)
 	switch out.Verdict {
 	case engine.Allow:
-		resp = hook.Allow(fmt.Sprintf("tier=%s rule=%s", out.Tier, out.Rule))
+		if out.UserMessage != "" {
+			resp = hook.AllowWithMessage(reason, out.UserMessage)
+		} else {
+			resp = hook.Allow(reason)
+		}
 	case engine.Deny:
 		resp = hook.Deny(fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule))
 	default:
-		resp = hook.Continue()
+		if out.UserMessage != "" {
+			resp = hook.ContinueWithMessage(out.UserMessage)
+		} else {
+			resp = hook.Continue()
+		}
 	}
 
 	if err := hook.WriteResponse(os.Stdout, resp); err != nil {

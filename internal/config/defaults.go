@@ -514,23 +514,40 @@ func DefaultAllowRules() []rules.Rule {
 		},
 	}
 
-	// bq (BigQuery) read-only — NestedSubcommandAllow for the nested
-	// cases (`bq show`, `bq ls`, `bq query`), replacing the old
-	// AnchoredCommand shape. Safe-identifier rule means
-	// `bq show my-dataset.my-table` matches (`.` is allowed) but
-	// `bq show my-proj:my-dataset.my-table` does not (`:` blocked).
+	// bq (BigQuery) read-only — NestedSubcommandAllow for metadata ops
+	// (`bq show`, `bq ls`, `bq head`). Real `bq query` is intentionally
+	// absent here — it routes to the BQ pre-flight tier for dry-run
+	// byte-budget gating. `bq query --dry_run` / `--dry-run` are allowed
+	// by the separate bqDryRunUnderscore / bqDryRunHyphen rules below.
 	bqReadonly := &rules.NestedSubcommandAllow{
 		RuleName: "bq-readonly",
 		Programs: []string{"bq"},
 		// bq is verb-first: `bq show`, `bq ls`, `bq head …`.
 		VerbPosition: rules.VerbFirst,
-		SafeVerbs:    []string{"show", "ls", "query", "head", "version", "help"},
+		SafeVerbs:    []string{"show", "ls", "head", "version", "help"},
 		ForbidFlags: []string{
 			"--service_account",
 			"--service_account_credential_file",
 			"--application_default_credential_file",
 			"--oauth_access_token",
 		},
+	}
+
+	// bq query --dry_run / --dry-run: cost-free pre-flight that only
+	// estimates bytes. AnchoredCommand (not NestedSubcommandAllow) so
+	// RequireFlags can gate on the dry-run flag presence. Two rules
+	// because the bq CLI accepts both underscore and hyphen spellings.
+	bqDryRunUnderscore := &rules.AnchoredCommand{
+		RuleName:         "bq-dry-run",
+		Programs:         []string{"bq"},
+		RequireSubcmdAny: []string{"query"},
+		RequireFlags:     []string{"--dry_run"},
+	}
+	bqDryRunHyphen := &rules.AnchoredCommand{
+		RuleName:         "bq-dry-run-hyphen",
+		Programs:         []string{"bq"},
+		RequireSubcmdAny: []string{"query"},
+		RequireFlags:     []string{"--dry-run"},
 	}
 
 	// terraform read-only
@@ -599,11 +616,12 @@ func DefaultAllowRules() []rules.Rule {
 		},
 	}
 
-	// go read-only / safe
+	// go read-only / safe — includes build, test, and run which are standard
+	// development workflow operations with no side effects beyond the project.
 	goReadonly := &rules.AnchoredCommand{
 		RuleName:         "go-readonly",
 		Programs:         []string{"go"},
-		RequireSubcmdAny: []string{"version", "env", "list", "vet", "fmt", "doc", "help"},
+		RequireSubcmdAny: []string{"version", "env", "list", "vet", "fmt", "doc", "help", "build", "test", "run"},
 	}
 
 	// npm/yarn/pnpm read-only
@@ -695,6 +713,8 @@ func DefaultAllowRules() []rules.Rule {
 		gcloudReadonly,
 		gsutilReadonly,
 		bqReadonly,
+		bqDryRunUnderscore,
+		bqDryRunHyphen,
 		terraformReadonly,
 		dockerReadonly,
 		kubectlReadonly,
@@ -722,6 +742,8 @@ func DefaultAllowRules() []rules.Rule {
 		gcloudReadonly,
 		gsutilReadonly,
 		bqReadonly,
+		bqDryRunUnderscore,
+		bqDryRunHyphen,
 		terraformReadonly,
 		dockerReadonly,
 		kubectlReadonly,

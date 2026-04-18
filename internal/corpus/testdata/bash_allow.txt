@@ -73,8 +73,10 @@ git config user.name
 # --- bq read-only ---
 bq show
 bq ls
-bq query
 bq head
+# bq query (no --dry_run) goes to BQ pre-flight tier, not instant-allow
+bq query --dry_run --nouse_legacy_sql 'SELECT 1'
+bq query --dry-run --nouse_legacy_sql 'SELECT 1'
 
 # --- terraform read-only ---
 terraform plan
@@ -155,6 +157,10 @@ go vet
 go fmt
 go doc
 go help
+go build ./...
+go test ./...
+go test -race ./...
+go run main.go
 
 # --- node package managers, read-only ---
 npm list

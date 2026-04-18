@@ -110,7 +110,9 @@ func TestEngine_EnforceMode_BlockBeatsAllow(t *testing.T) {
 
 func TestEngine_EnforceMode_FallsThroughOnNoMatch(t *testing.T) {
 	e, _ := newTestEngine(t, false)
-	out := e.Decide(Input{ToolName: "Bash", Command: "go test ./..."})
+	// Use a command that is genuinely not in any allow rule (npm install
+	// has side effects and is intentionally excluded from tier 2).
+	out := e.Decide(Input{ToolName: "Bash", Command: "npm install"})
 	if out.Verdict != Continue {
 		t.Errorf("Verdict = %v (tier=%s), want Continue", out.Verdict, out.Tier)
 	}

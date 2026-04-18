@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RobinUS2/claude-guard/internal/budget"
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
@@ -97,6 +98,11 @@ type Output struct {
 	Reason  string // human-readable reason
 	Latency time.Duration
 
+	// UserMessage, when non-empty, is injected into Claude's conversation
+	// via the hook protocol's top-level `userMessage` field. Used by the
+	// BQ pre-flight tier to surface byte estimates and budget status.
+	UserMessage string
+
 	// Shadow-mode snapshot of each tier's (hypothetical) verdict.
 	// Populated even when a tier doesn't fire, so shadow mode can be
 	// analysed post-hoc.
@@ -121,7 +127,8 @@ type Engine struct {
 	verifier llm.Classifier // optional cross-provider verifier
 	breaker  *breaker.Breaker
 	cache    *cache.Cache
-	legacy   *legacy.AllowList // tier 5: migrated allow list from settings.json
+	legacy   *legacy.AllowList   // tier 5: migrated allow list from settings.json
+	bqBudget *budget.BQBudget    // BQ pre-flight budget tracker (nil = disabled)
 
 	// ProjectConfigLoader is called per-decide to look up a
 	// per-project .claude-guard.yml. Can be nil (feature disabled).
@@ -172,6 +179,11 @@ type Options struct {
 	// .claude-guard.yml. Pass projectconfig.Load in production; pass a
 	// stub in tests. Nil disables per-project config entirely.
 	ProjectConfigLoader func(cwd string) (*projectconfig.Config, error)
+
+	// BQBudget tracks the rolling daily BigQuery byte estimate. When set,
+	// the engine runs a `bq query --dry_run` pre-flight for real BQ
+	// queries and gates on the daily limit. Nil disables BQ pre-flight.
+	BQBudget *budget.BQBudget
 }
 
 // New creates an engine with the given config and logger.
@@ -194,6 +206,7 @@ func NewWithOptions(opts Options) *Engine {
 		cache:               opts.Cache,
 		legacy:              opts.Legacy,
 		projectConfigLoader: opts.ProjectConfigLoader,
+		bqBudget:            opts.BQBudget,
 	}
 	if e.cfg == nil {
 		e.cfg = config.Default()
@@ -403,6 +416,33 @@ func (e *Engine) Decide(in Input) Output {
 				return out
 			}
 			break
+		}
+	}
+
+	// BQ pre-flight tier: runs between tier 2 and tier 3 for real `bq query`
+	// commands (i.e., without --dry_run). Spawns `bq query --dry_run` as a
+	// subprocess to get a byte estimate, checks the daily budget, and either
+	// auto-allows (with a userMessage hint) or falls through to the user
+	// prompt with a rewrite suggestion.
+	if e.bqBudget != nil {
+		pf := runBQPreflight(in.Command, e.bqBudget)
+		if !pf.skipped {
+			out.UserMessage = pf.userMessage
+			if pf.allow && !e.cfg.ShadowMode {
+				out.Verdict = Allow
+				out.Tier = "bq_preflight"
+				out.Rule = "bq-budget"
+				out.Reason = pf.userMessage
+				out.Latency = time.Since(start)
+				e.record(in, out)
+				return out
+			}
+			if !pf.allow {
+				// Over budget — fall through to user prompt with hint already set.
+				out.Latency = time.Since(start)
+				e.record(in, out)
+				return out
+			}
 		}
 	}
 

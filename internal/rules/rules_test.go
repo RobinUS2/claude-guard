@@ -153,6 +153,44 @@ func TestAnchoredCommand_ForbidFlags(t *testing.T) {
 	}
 }
 
+func TestAnchoredCommand_RequireFlags(t *testing.T) {
+	bqDryRunUnderscore := &AnchoredCommand{
+		RuleName:         "bq-dry-run",
+		Programs:         []string{"bq"},
+		RequireSubcmdAny: []string{"query"},
+		RequireFlags:     []string{"--dry_run"},
+	}
+	bqDryRunHyphen := &AnchoredCommand{
+		RuleName:         "bq-dry-run-hyphen",
+		Programs:         []string{"bq"},
+		RequireSubcmdAny: []string{"query"},
+		RequireFlags:     []string{"--dry-run"},
+	}
+	cases := []struct {
+		rule    *AnchoredCommand
+		cmd     string
+		want    Verdict
+	}{
+		{bqDryRunUnderscore, "bq query --dry_run --nouse_legacy_sql 'SELECT 1'", Match},
+		{bqDryRunUnderscore, "bq query --nouse_legacy_sql 'SELECT 1'", NoMatch},
+		{bqDryRunUnderscore, "bq query --dry-run 'SELECT 1'", NoMatch},
+		{bqDryRunHyphen, "bq query --dry-run --nouse_legacy_sql 'SELECT 1'", Match},
+		{bqDryRunHyphen, "bq query --nouse_legacy_sql 'SELECT 1'", NoMatch},
+		{bqDryRunHyphen, "bq query --dry_run 'SELECT 1'", NoMatch},
+		// embedded-space SQL should not break flag matching
+		{bqDryRunUnderscore, `bq query --dry_run --nouse_legacy_sql 'SELECT id FROM users WHERE name = "Alice Smith"'`, Match},
+	}
+	for _, tt := range cases {
+		t.Run(tt.rule.RuleName+"/"+tt.cmd, func(t *testing.T) {
+			p := mustParse(t, tt.cmd)
+			v, _ := tt.rule.Eval(p)
+			if v != tt.want {
+				t.Errorf("Eval(%q) = %v, want %v", tt.cmd, v, tt.want)
+			}
+		})
+	}
+}
+
 // --- ProgramIs (sudo) ---
 
 func TestProgramIs_Sudo(t *testing.T) {

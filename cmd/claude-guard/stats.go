@@ -149,6 +149,13 @@ func cmdStats(args []string) int {
 		}
 	}
 
+	// Time saved estimate.
+	avoided, savedMin := computeTimeSaved(agg)
+	fmt.Println()
+	fmt.Printf("interrupts avoided: %d (est. ~%d min / ~%.1f h saved)\n",
+		avoided, savedMin, float64(savedMin)/60.0)
+	fmt.Printf("  heuristic: %d min per avoided user-prompt\n", minutesPerInterruptAvoided)
+
 	// Canonical breakdown: how many cache hits went through canonical
 	// patterns vs exact entries, and which programs benefit the most.
 	if cs, err := cch.Stats(); err == nil && cs.Entries > 0 {
@@ -215,6 +222,25 @@ func canonicalSummary(cacheDir string) (int, map[string]int) {
 		return nil
 	})
 	return entries, hits
+}
+
+const minutesPerInterruptAvoided = 3
+
+// computeTimeSaved counts how many user-prompt interrupts were avoided and
+// estimates wall-clock time saved. An interrupt is "avoided" when the engine
+// resolved the decision automatically (instant_allow, cache, bq_preflight, or
+// llm tier with an "allow" verdict). Tiers that fall through to the user
+// prompt (verdict=continue, tier=default) are counted as interrupts NOT avoided.
+func computeTimeSaved(agg *aggregation) (interruptsAvoided, minutesSaved int) {
+	// Automated allow paths: instant_allow, cache (LLM already approved),
+	// bq_preflight (pre-flight within budget), llm (LLM approved in real-time).
+	for _, tier := range []string{"instant_allow", "cache", "bq_preflight", "llm"} {
+		interruptsAvoided += agg.byTier[tier]
+	}
+	// Also count the legacy tier (migrated allow list — still automated).
+	interruptsAvoided += agg.byTier["legacy"]
+	minutesSaved = interruptsAvoided * minutesPerInterruptAvoided
+	return
 }
 
 func pluralS(n int) string {
