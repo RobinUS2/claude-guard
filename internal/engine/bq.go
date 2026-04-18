@@ -45,7 +45,7 @@ func buildDryRunCommand(cmd string) string {
 // that does NOT already include --dry_run or --dry-run.
 func isBQQueryWithoutDryRun(cmd string) bool {
 	trimmed := strings.TrimSpace(cmd)
-	if !strings.HasPrefix(trimmed, "bq query") {
+	if trimmed != "bq query" && !strings.HasPrefix(trimmed, "bq query ") {
 		return false
 	}
 	lower := strings.ToLower(trimmed)
@@ -150,12 +150,11 @@ func runBQPreflight(cmd string, bqBudget *budget.BQBudget) bqPreflightResult {
 	}
 
 	// Over budget — don't record (CheckAndRecord already didn't).
-	usedCurrent, _ := bqBudget.Status()
-	humanCurrentUsed := formatBytes(usedCurrent)
+	// usedAfter holds the pre-recording total (recording was skipped).
 	msg := fmt.Sprintf(
 		"BQ daily budget exhausted (%s of %s used). This query would process %s. "+
 			"Consider adding a LIMIT clause or rewriting to scan fewer bytes.",
-		humanCurrentUsed, humanLimit, humanEstimate,
+		humanUsed, humanLimit, humanEstimate,
 	)
 	return bqPreflightResult{allow: false, userMessage: msg}
 }

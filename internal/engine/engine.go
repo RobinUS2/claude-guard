@@ -437,8 +437,10 @@ func (e *Engine) Decide(in Input) Output {
 				e.record(in, out)
 				return out
 			}
-			if !pf.allow {
+			if !pf.allow && !e.cfg.ShadowMode {
 				// Over budget — fall through to user prompt with hint already set.
+				out.Tier = "bq_preflight"
+				out.Rule = "bq-budget-exceeded"
 				out.Latency = time.Since(start)
 				e.record(in, out)
 				return out
