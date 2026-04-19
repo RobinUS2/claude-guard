@@ -413,7 +413,7 @@ func DefaultAllowRules() []rules.Rule {
 			"blame", "rev-parse", "ls-files", "ls-tree", "describe", "config",
 			// Workflow commands (safe — local operations)
 			"worktree", "add", "commit", "fetch", "pull", "merge",
-			"stash", "tag", "switch", "restore",
+			"stash", "tag", "switch", "restore", "checkout",
 			// NOTE: `push` is intentionally NOT here — push to
 			// protected branches (main/master) should go through
 			// LLM or per-project config, not auto-approve.
@@ -490,6 +490,32 @@ func DefaultAllowRules() []rules.Rule {
 		// outer subcommand here; the LLM tier refines this.
 	}
 
+	// claude-guard self-invocation. All subcommands are local
+	// introspection, config, or cache operations — no network side
+	// effects, no destructive ops outside claude-guard's own state
+	// directories. Matches both `claude-guard` (bare) and absolute
+	// paths like `~/.claude/bin/claude-guard` via AnchoredCommand's
+	// basename fallback. Without this rule tier-4 LLM flags it as
+	// "unknown custom tool" and the user gets prompted every time.
+	claudeGuardReadonly := &rules.AnchoredCommand{
+		RuleName: "claude-guard-readonly",
+		Programs: []string{"claude-guard"},
+		RequireSubcmdAny: []string{
+			"decide", "test", "monitor", "explain", "replay",
+			"stats", "doctor", "migrate", "backup", "cache",
+			"lint", "trust", "init-project-config",
+			"eval-prompt", "bench", "version", "help",
+		},
+	}
+
+	// cat > file <<'EOF' ... EOF — single-quoted heredoc write. Equivalent to
+	// the Write tool in semantics: literal content, no shell expansion.
+	// PathAccess block rules (tier 1) still protect sensitive paths.
+	catHeredocWrite := &rules.HeredocWrite{
+		RuleName: "cat-heredoc-write",
+		Programs: []string{"cat"},
+	}
+
 	return []rules.Rule{
 		posixReadonly,
 		findReadonly,
@@ -501,6 +527,8 @@ func DefaultAllowRules() []rules.Rule {
 		goReadonly,
 		nodePmReadonly,
 		ghReadonly,
+		claudeGuardReadonly,
+		catHeredocWrite,
 
 		// curl with only -I / --head / -o /dev/null (HEAD and discard-body reads)
 		// is tricky to express with flag constraints, so it falls through to LLM.
@@ -532,6 +560,7 @@ func DefaultAllowRules() []rules.Rule {
 				goReadonly,
 				nodePmReadonly,
 				ghReadonly,
+				claudeGuardReadonly,
 			},
 			SafePipeTargets: []string{
 				"head", "tail", "wc", "sort", "uniq",

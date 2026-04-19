@@ -52,14 +52,16 @@ type Parsed struct {
 
 // Features is a set of boolean flags describing the top-level script structure.
 type Features struct {
-	HasRedirect   bool // any >, >>, <, <&, >&, <<, <<<
-	HasPipe       bool // any |
-	HasSubshell   bool // (...) group or explicit subshell
-	HasCmdSub     bool // $(...) or `...`
-	HasProcSub    bool // <(...) or >(...)
-	HasBackground bool // command ending in &
-	HasBinaryOp   bool // &&, ||, ; between multiple statements
-	HasMultiStmt  bool // more than one top-level statement
+	HasRedirect            bool // any >, >>, <, <&, >&, <<, <<<
+	HasFdOnlyRedirects     bool // true when HasRedirect and ALL redirects are fd-to-fd (>&N or <&N)
+	HasSingleQuotedHeredoc bool // at least one <<'MARKER' heredoc (no expansion in body)
+	HasPipe                bool // any |
+	HasSubshell            bool // (...) group or explicit subshell
+	HasCmdSub              bool // $(...) or `...`
+	HasProcSub             bool // <(...) or >(...)
+	HasBackground          bool // command ending in &
+	HasBinaryOp            bool // &&, ||, ; between multiple statements
+	HasMultiStmt           bool // more than one top-level statement
 }
 
 // Nesting describes where a call appears in the AST.
@@ -328,6 +330,16 @@ func (p *Parsed) extract() {
 			p.Features.HasProcSub = true
 		case *syntax.Redirect:
 			p.Features.HasRedirect = true
+			// <<'MARKER' is Op==Hdoc with a SglQuoted marker word.
+			// The single quotes prevent all shell expansion in the body.
+			if (n.Op == syntax.Hdoc || n.Op == syntax.DashHdoc) && n.Word != nil {
+				for _, part := range n.Word.Parts {
+					if _, ok := part.(*syntax.SglQuoted); ok {
+						p.Features.HasSingleQuotedHeredoc = true
+						break
+					}
+				}
+			}
 		}
 		return true
 	})
@@ -337,6 +349,24 @@ func (p *Parsed) extract() {
 	// Stmt entries. Detect by: multiple top-level statements.
 	if p.Features.HasMultiStmt {
 		p.Features.HasBinaryOp = true
+	}
+
+	// HasFdOnlyRedirects: true when HasRedirect and every redirect in the
+	// script is an fd-to-fd duplicate (>&N or <&N). These are harmless
+	// stderr/stdout rewirings that carry no file-path security implications.
+	if p.Features.HasRedirect {
+		allFd := true
+		syntax.Walk(p.File, func(node syntax.Node) bool {
+			r, ok := node.(*syntax.Redirect)
+			if !ok {
+				return true
+			}
+			if r.Op != syntax.DplOut && r.Op != syntax.DplIn {
+				allFd = false
+			}
+			return allFd // stop walking once we find a non-fd redirect
+		})
+		p.Features.HasFdOnlyRedirects = allFd
 	}
 
 	// Post-pass: attach Stmt.Redirs to each Call via CallExpr pointer

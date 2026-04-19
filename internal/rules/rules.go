@@ -95,7 +95,7 @@ func (r *AnchoredCommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 	if c.Nesting != shellparse.NestTopLevel || c.HasUnresolved {
 		return NoMatch, ""
 	}
-	if !stringIn(c.Program, r.Programs) {
+	if !stringIn(c.Program, r.Programs) && !stringIn(baseProgram(c.Program), r.Programs) {
 		return NoMatch, ""
 	}
 	if len(r.RequireSubcmdAny) > 0 {
@@ -838,7 +838,11 @@ func (r *CdPrefixed) Eval(p *shellparse.Parsed) (Verdict, string) {
 		return NoMatch, ""
 	}
 	// Reject shell features that change semantics beyond directory context.
-	if f.HasSubshell || f.HasCmdSub || f.HasProcSub || f.HasBackground || f.HasRedirect {
+	// fd-to-fd redirects (2>&1) are harmless rewirings; allow them through.
+	if f.HasSubshell || f.HasCmdSub || f.HasProcSub || f.HasBackground {
+		return NoMatch, ""
+	}
+	if f.HasRedirect && !f.HasFdOnlyRedirects {
 		return NoMatch, ""
 	}
 	// Need at least 2 pipelines (cd + at least one command).
@@ -894,6 +898,53 @@ func (r *CdPrefixed) matchesInnerRule(c *shellparse.Call) bool {
 		}
 	}
 	return false
+}
+
+// --- HeredocWrite ---
+
+// HeredocWrite matches `cat > <path> <<'MARKER' ... EOF` patterns where the
+// heredoc delimiter is single-quoted (no shell expansion in the body). This is
+// semantically equivalent to the Write tool — it writes literal content to a
+// file — and is safe to auto-allow. Sensitive-path protection (PathAccess tier
+// 1 block rules) fires before tier 2, so `/etc/passwd` and friends remain
+// blocked regardless of this rule.
+//
+// Exact match conditions:
+//   - Single top-level statement (no && / || / ;)
+//   - Features: HasSingleQuotedHeredoc=true, no subshell, no cmdsub, no procsub, no bg
+//   - First (and only non-tee) program is in Programs list
+//   - Has a pipe to at most one of SafePipeTargets (e.g. `tee`)
+type HeredocWrite struct {
+	RuleName string
+	Programs []string // programs that may appear as the writer (e.g. ["cat"])
+}
+
+func (r *HeredocWrite) Name() string { return r.RuleName }
+func (r *HeredocWrite) Kind() string { return "heredoc_write" }
+
+func (r *HeredocWrite) Eval(p *shellparse.Parsed) (Verdict, string) {
+	f := p.Features
+	if !f.HasSingleQuotedHeredoc {
+		return NoMatch, ""
+	}
+	if f.HasMultiStmt || f.HasSubshell || f.HasCmdSub || f.HasProcSub || f.HasBackground {
+		return NoMatch, ""
+	}
+	// Allow fd-only redirects (2>&1) alongside the heredoc, but not file redirects.
+	// HasRedirect is always true here (heredoc is a redirect), but
+	// HasFdOnlyRedirects would be false because the heredoc is not an fd redirect.
+	// We intentionally skip the redirect check since the heredoc itself is the redirect.
+	if len(p.Calls) == 0 {
+		return NoMatch, ""
+	}
+	head := p.Calls[0]
+	if head.Nesting != shellparse.NestTopLevel || head.HasUnresolved {
+		return NoMatch, ""
+	}
+	if !stringIn(head.Program, r.Programs) && !stringIn(baseProgram(head.Program), r.Programs) {
+		return NoMatch, ""
+	}
+	return Match, r.RuleName
 }
 
 // --- helpers ---

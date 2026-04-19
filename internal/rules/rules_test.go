@@ -61,6 +61,42 @@ func TestAnchoredCommand_Simple(t *testing.T) {
 	}
 }
 
+func TestAnchoredCommand_BasenameMatch(t *testing.T) {
+	// AnchoredCommand matches both the literal program and its
+	// basename, so an absolute path or tilde-prefixed path resolves
+	// to the same rule as the bare command. Claude-guard itself is
+	// invoked as `~/.claude/bin/claude-guard` from the hook and
+	// elsewhere, so this is the canonical case.
+	r := &AnchoredCommand{
+		RuleName:         "claude-guard-readonly",
+		Programs:         []string{"claude-guard"},
+		RequireSubcmdAny: []string{"stats", "doctor", "test"},
+	}
+	cases := []struct {
+		cmd  string
+		want Verdict
+	}{
+		{"claude-guard stats", Match},
+		{"/Users/robin/.claude/bin/claude-guard doctor", Match},
+		{"~/.claude/bin/claude-guard test foo", Match},
+		{"/usr/local/bin/claude-guard stats", Match},
+		// basename mismatch: must NOT match
+		{"not-claude-guard stats", NoMatch},
+		{"/bin/claude-guard-helper stats", NoMatch},
+		// wrong subcommand
+		{"claude-guard rm-everything", NoMatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != tc.want {
+				t.Errorf("Eval(%q) = %v, want %v", tc.cmd, v, tc.want)
+			}
+		})
+	}
+}
+
 func TestAnchoredCommand_WithSubcommand(t *testing.T) {
 	r := &AnchoredCommand{
 		RuleName:         "git-readonly",
@@ -532,8 +568,8 @@ func TestCdPrefixed(t *testing.T) {
 		{"cd /tmp && (git status)", "subshell present"},
 		// Command substitution
 		{"cd /tmp && echo $(git status)", "command substitution present"},
-		// Redirect
-		{"cd /tmp && git log > /tmp/out", "redirect present"},
+		// File redirect — still rejected (fd-to-fd like 2>&1 is allowed separately)
+		{"cd /tmp && git log > /tmp/out", "file redirect present"},
 		// cd with flags
 		{"cd -P /tmp && git status", "cd has flags"},
 		// First command is not cd
@@ -572,3 +608,75 @@ func TestBaseProgram(t *testing.T) {
 		}
 	}
 }
+
+// --- HeredocWrite ---
+
+func TestHeredocWrite_Match(t *testing.T) {
+	r := &HeredocWrite{RuleName: "cat-heredoc-write", Programs: []string{"cat"}}
+	cases := []string{
+		"cat > /tmp/foo.go <<'EOF'\npackage main\nEOF",
+		"cat > /path/to/file.go <<'MARKER'\nsome code with {braces} and \"quotes\"\nMARKER",
+	}
+	for _, cmd := range cases {
+		p := mustParse(t, cmd)
+		v, _ := r.Eval(p)
+		if v != Match {
+			t.Errorf("Eval(%q) = %v, want Match", cmd, v)
+		}
+	}
+}
+
+func TestHeredocWrite_NoMatch(t *testing.T) {
+	r := &HeredocWrite{RuleName: "cat-heredoc-write", Programs: []string{"cat"}}
+	cases := []struct {
+		cmd    string
+		reason string
+	}{
+		// Unquoted heredoc — expansion allowed in body
+		{"cat > /tmp/foo <<EOF\nsome $VAR content\nEOF", "unquoted heredoc allows expansion"},
+		// No heredoc at all
+		{"cat /etc/passwd", "no heredoc present"},
+		// Wrong program
+		{"tee /tmp/foo <<'EOF'\ncontent\nEOF", "tee not in Programs list"},
+		// Command substitution
+		{"cat > /tmp/$(id -u).go <<'EOF'\ncontent\nEOF", "command substitution"},
+	}
+	for _, tc := range cases {
+		t.Run("nomatch/"+tc.reason, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != NoMatch {
+				t.Errorf("Eval(%q) = %v, want NoMatch (%s)", tc.cmd, v, tc.reason)
+			}
+		})
+	}
+}
+
+// --- CdPrefixed with fd redirects ---
+
+func TestCdPrefixed_FdRedirectAllowed(t *testing.T) {
+	gitRO := &AnchoredCommand{
+		RuleName:         "git-readonly",
+		Programs:         []string{"git"},
+		RequireSubcmdAny: []string{"status", "log", "checkout"},
+	}
+	r := &CdPrefixed{
+		RuleName:        "cd-prefixed-readonly",
+		InnerRules:      []Rule{gitRO},
+		SafePipeTargets: []string{"tail", "head", "grep"},
+	}
+	// 2>&1 is an fd-to-fd redirect and should be allowed
+	p := mustParse(t, "cd /tmp && git checkout feature/branch 2>&1 | tail -3")
+	v, _ := r.Eval(p)
+	if v != Match {
+		t.Errorf("Eval with 2>&1 = %v, want Match", v)
+	}
+	// File redirect should still be rejected
+	p2 := mustParse(t, "cd /tmp && git log > /tmp/out")
+	v2, _ := r.Eval(p2)
+	if v2 != NoMatch {
+		t.Errorf("Eval with file redirect = %v, want NoMatch", v2)
+	}
+}
+
+
