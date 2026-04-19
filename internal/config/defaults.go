@@ -292,35 +292,38 @@ func DefaultBlockRules() []rules.Rule {
 			Reason: "git remote mutation requires user approval",
 		},
 
-		// gh destructive verbs — tier-2 `gh-readonly` only checks the
-		// outer noun (pr/issue/repo/run/api/…), so `gh pr merge`,
-		// `gh repo delete`, `gh pr review --approve` instant-allowed
-		// before this rule. Covers the (noun, verb) pairs that
-		// mutate GitHub state, plus aliases/extensions (can wrap
-		// arbitrary commands) and codespaces (cloud VM control).
+		// gh critical verbs — tier-1 hard block for irreversible data
+		// loss, credential/account changes, or arbitrary-code wrappers
+		// (aliases/extensions). Routine-but-destructive verbs like
+		// `pr/merge`, `pr/close`, `issue/close`, `run/rerun`,
+		// `workflow/run` are NOT in this list — they fall through to
+		// the LLM tier / user prompt so the operator can approve them
+		// in context. The gh-readonly rules below match only explicit
+		// read verbs, so those commands no longer auto-allow.
 		&rules.NestedSubcommand{
 			RuleName: "gh-destructive",
 			Program:  "gh",
 			Destructive: []string{
-				"repo/delete", "repo/archive", "repo/edit", "repo/sync",
-				"pr/merge", "pr/close", "pr/delete", "pr/edit", "pr/reopen",
-				"pr/review", // --approve refinement handled by LLM; broad deny for review is safe
-				"issue/close", "issue/delete", "issue/edit", "issue/reopen",
-				"run/rerun", "run/cancel", "run/delete", "run/watch",
-				"workflow/run", "workflow/disable", "workflow/enable",
+				// data loss — repos, PRs, issues, runs
+				"repo/delete", "repo/archive",
+				"pr/delete", "issue/delete", "run/delete",
+				// credentials / principal changes
+				"auth/login", "auth/logout", "auth/switch",
+				"auth/token", "auth/refresh", "auth/setup-git",
 				"secret/set", "secret/delete", "secret/remove",
 				"variable/set", "variable/delete",
-				"auth/token", "auth/logout", "auth/refresh", "auth/setup-git",
 				"ssh-key/add", "ssh-key/delete",
 				"gpg-key/add", "gpg-key/delete",
+				// arbitrary-code wrappers
 				"alias/set", "alias/delete", "alias/import",
 				"extension/install", "extension/exec", "extension/remove", "extension/upgrade",
+				// cloud VM control
 				"codespace/create", "codespace/delete", "codespace/ssh", "codespace/stop",
 				// `gh api graphql` supports arbitrary mutations via
 				// `-f query='mutation { … }'`. Any graphql = deny.
 				"api/graphql",
 			},
-			Reason: "gh destructive verb (account/repo/workflow mutation)",
+			Reason: "gh critical verb (data loss, credential change, or code wrapper)",
 		},
 		// `gh api` with mutating HTTP methods — covers the shapes the
 		// (noun, verb) matcher above can't express because the method
@@ -610,13 +613,48 @@ func DefaultAllowRules() []rules.Rule {
 		RequireSubcmdAny: []string{"list", "ls", "view", "outdated", "audit", "config", "whoami", "why", "info", "version"},
 	}
 
-	// gh read-only
+	// gh read-only (standalone-noun shapes).
+	//
+	// Accepts only nouns that have no destructive child commands at
+	// the CLI root — `gh api <path>` is safe because `gh-api-mutation`
+	// (tier 1) catches POST/PATCH/etc. `gh search <query>` and
+	// `gh status` are always reads. Nouns with destructive verbs
+	// (pr, issue, repo, run, workflow, auth, release, codespace) are
+	// intentionally omitted here — they go through ghNounVerbReadonly
+	// below, which additionally requires positional[1] to be a known
+	// read verb.
 	ghReadonly := &rules.AnchoredCommand{
 		RuleName:         "gh-readonly",
 		Programs:         []string{"gh"},
-		RequireSubcmdAny: []string{"pr", "issue", "repo", "run", "api", "auth", "release", "search", "status", "version", "help"},
-		// Note: "gh pr view" is safe but "gh pr merge" is not. We restrict to the
-		// outer subcommand here; the LLM tier refines this.
+		RequireSubcmdAny: []string{"api", "search", "status", "version", "help"},
+	}
+
+	// gh read-only (noun-verb shape).
+	//
+	// Matches `gh <noun> <read-verb> [<id>...]`. Covers `gh pr view
+	// 42`, `gh issue list`, `gh repo view foo/bar`, `gh run view`,
+	// `gh workflow list`, `gh auth status`, `gh release list`. Trailing
+	// positionals (PR numbers, `owner/repo` slugs, workflow files) are
+	// intentionally NOT constrained — gh accepts free-form IDs that
+	// would fail NestedSubcommandAllow's safe-identifier gate.
+	//
+	// Destructive verbs (merge, close, delete, edit, merge, review,
+	// rerun, cancel, create, …) are absent from RequireSubcmd2Any so
+	// they fall through to the LLM / user prompt rather than auto-
+	// allowing. Bare `gh pr` / `gh repo` / etc. matches too (no
+	// positional[1] present) — that's just the help screen.
+	ghNounVerbReadonly := &rules.AnchoredCommand{
+		RuleName: "gh-readonly-noun-verb",
+		Programs: []string{"gh"},
+		RequireSubcmdAny: []string{
+			"pr", "issue", "repo", "run", "workflow",
+			"auth", "release", "codespace", "label", "gist",
+			"ruleset", "attestation", "cache",
+		},
+		RequireSubcmd2Any: []string{
+			"view", "list", "status", "checks", "diff",
+			"help", "version",
+		},
 	}
 
 	// claude-guard self-invocation. All subcommands are local
@@ -664,6 +702,7 @@ func DefaultAllowRules() []rules.Rule {
 		goReadonly,
 		nodePmReadonly,
 		ghReadonly,
+		ghNounVerbReadonly,
 		claudeGuardReadonly,
 	}
 	safePipeTargets := []string{
@@ -690,6 +729,7 @@ func DefaultAllowRules() []rules.Rule {
 		goReadonly,
 		nodePmReadonly,
 		ghReadonly,
+		ghNounVerbReadonly,
 		claudeGuardReadonly,
 		catHeredocWrite,
 

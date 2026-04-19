@@ -75,7 +75,15 @@ type AnchoredCommand struct {
 	RuleName         string
 	Programs         []string
 	RequireSubcmdAny []string // if non-empty, first positional arg must be in this list
-	ForbidFlags      []string // reject if any of these flags appear
+	// RequireSubcmd2Any, if non-empty, constrains positional[1]:
+	//   - positional[1] absent (bare-noun help): match (UX)
+	//   - positional[1] present and in list: match
+	//   - positional[1] present and not in list: NoMatch
+	// Used for noun-verb CLIs (e.g. gh) where positional[0] is a
+	// noun group and positional[1] is the action to allow-list
+	// independently of trailing ID/path args.
+	RequireSubcmd2Any []string
+	ForbidFlags       []string // reject if any of these flags appear
 }
 
 func (r *AnchoredCommand) Name() string { return r.RuleName }
@@ -100,6 +108,11 @@ func (r *AnchoredCommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 	}
 	if len(r.RequireSubcmdAny) > 0 {
 		if len(c.Positional) == 0 || !stringIn(c.Positional[0], r.RequireSubcmdAny) {
+			return NoMatch, ""
+		}
+	}
+	if len(r.RequireSubcmd2Any) > 0 && len(c.Positional) >= 2 {
+		if !stringIn(c.Positional[1], r.RequireSubcmd2Any) {
 			return NoMatch, ""
 		}
 	}

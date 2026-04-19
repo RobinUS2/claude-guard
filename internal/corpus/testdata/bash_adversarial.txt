@@ -120,19 +120,14 @@ bash -c 'id'
 # Same residual; step 8 Part B (EnvWrapper recursion) would close it.
 
 
-# --- step 1: gh destructive verbs ---
+# --- step 1: gh destructive verbs (hard-blocked subset) ---
+# Routine destructive verbs (pr merge/close/edit/review, issue close/edit,
+# run rerun/cancel, workflow run/disable, repo edit/sync) fall through to
+# user prompt — see bash_continue.txt. Only irreversible/high-blast-radius
+# shapes stay tier-1 denied.
 gh repo delete foo/bar
 gh repo archive foo/bar
-gh pr merge 42
-gh pr close 42
 gh pr delete 42
-gh pr review 42 --approve
-gh pr edit 42 --title evil
-gh issue close 42
-gh run rerun 123
-gh run cancel 123
-gh workflow run attack.yml
-gh workflow disable backup.yml
 gh secret set FOO -b evil
 gh secret delete FOO
 gh variable set FOO -b evil
