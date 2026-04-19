@@ -17,9 +17,8 @@ echo "evil" > /tmp/tmp.txt
 echo $(date)
 
 # --- Commands not in any anchored allow list ---
-go build ./...
-go test ./...
-go test -race ./...
+# go build/test/run are now instant-allow (moved to bash_allow.txt)
+bq query --nouse_legacy_sql 'SELECT 1'
 npm install
 npm run dev
 npm run build

@@ -146,3 +146,45 @@ func TestWriteResponse_Deny(t *testing.T) {
 		t.Errorf("Reason = %q", decoded.HSO.PermissionDecisionReason)
 	}
 }
+
+func TestAllowWithMessage(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, AllowWithMessage("tier=instant_allow rule=bq-dry-run", "BQ dry-run: will process 500 MB")); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+	var decoded struct {
+		HSO struct {
+			PermissionDecision string `json:"permissionDecision"`
+		} `json:"hookSpecificOutput"`
+		UserMessage string `json:"userMessage"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if decoded.HSO.PermissionDecision != "allow" {
+		t.Errorf("PermissionDecision = %q, want allow", decoded.HSO.PermissionDecision)
+	}
+	if decoded.UserMessage != "BQ dry-run: will process 500 MB" {
+		t.Errorf("UserMessage = %q", decoded.UserMessage)
+	}
+}
+
+func TestContinueWithMessage(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, ContinueWithMessage("BQ daily budget exhausted — consider adding LIMIT")); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+	var decoded struct {
+		HSO         *struct{} `json:"hookSpecificOutput"`
+		UserMessage string    `json:"userMessage"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if decoded.HSO != nil {
+		t.Error("hookSpecificOutput should be absent for ContinueWithMessage")
+	}
+	if decoded.UserMessage != "BQ daily budget exhausted — consider adding LIMIT" {
+		t.Errorf("UserMessage = %q", decoded.UserMessage)
+	}
+}

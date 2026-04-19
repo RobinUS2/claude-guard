@@ -148,8 +148,13 @@ const (
 // Response is the JSON shape Claude Code expects on stdout.
 // We always emit the native `hookSpecificOutput` form; it's the most
 // explicit and least likely to silently change semantics.
+//
+// UserMessage, when non-empty, is injected into Claude's conversation as
+// a hook-side note before the next tool response. This is the Claude Code
+// hook protocol's top-level `userMessage` field.
 type Response struct {
 	HookSpecificOutput *hookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+	UserMessage        string              `json:"userMessage,omitempty"`
 }
 
 type hookSpecificOutput struct {
@@ -183,6 +188,20 @@ func Deny(reason string) Response {
 			PermissionDecisionReason: reason,
 		},
 	}
+}
+
+// AllowWithMessage auto-approves the tool use and injects msg into Claude's conversation.
+// Use for contextual hints (e.g. "will process 3.1 GB — 17.4 GB of 100 GB daily budget used").
+func AllowWithMessage(reason, msg string) Response {
+	r := Allow(reason)
+	r.UserMessage = msg
+	return r
+}
+
+// ContinueWithMessage falls through to the user prompt and injects msg into Claude's conversation.
+// Use when the engine has no verdict but wants to hint Claude (e.g. budget exhausted, suggest rewrite).
+func ContinueWithMessage(msg string) Response {
+	return Response{UserMessage: msg}
 }
 
 // ReadRequest parses the PreToolUse JSON payload from r.
