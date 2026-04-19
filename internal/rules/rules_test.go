@@ -554,6 +554,104 @@ func TestCdPrefixed(t *testing.T) {
 	}
 }
 
+// --- NestedSubcommandAllow ---
+
+func TestNestedSubcommandAllow(t *testing.T) {
+	r := &NestedSubcommandAllow{
+		RuleName:  "gcloud-readonly",
+		Programs:  []string{"gcloud"},
+		SafeVerbs: []string{"list", "describe", "get-value", "get-iam-policy"},
+		ForbidFlags: []string{
+			"--impersonate-service-account", "--account",
+			"--configuration", "--credential-file-override",
+			"--billing-project", "--access-token-file",
+		},
+	}
+	cases := []struct {
+		cmd  string
+		want Verdict
+	}{
+		// Auto-allow shapes
+		{"gcloud projects list", Match},
+		{"gcloud compute instances list", Match},
+		{"gcloud projects describe", Match},
+		{"gcloud iam service-accounts list", Match},
+		{"gcloud projects get-iam-policy", Match},
+		{"gcloud projects list 2>&1", Match}, // stderr merge OK
+		{"/usr/bin/gcloud projects list", Match},  // basename fallback
+		{"gcloud projects list --format=json", Match},
+		{"gcloud projects list --limit=10", Match},
+
+		// Verb not in SafeVerbs
+		{"gcloud projects delete myproj", NoMatch},
+		{"gcloud compute instances create x", NoMatch},
+		{"gcloud config get-value project", NoMatch},     // "project" not a SafeVerb
+		{"gcloud projects describe myproj", NoMatch},     // tail positional not a SafeVerb (by design)
+		// Unsafe identifier in positional
+		{"gsutil ls gs://my-bucket", NoMatch},     // wrong program anyway, but also unsafe pos
+		{"gcloud projects describe proj/foo", NoMatch},
+		{"gcloud projects describe foo:bar", NoMatch},
+		// Forbidden flags
+		{"gcloud projects list --impersonate-service-account=x@y.iam", NoMatch},
+		{"gcloud projects list --account=foo@bar.com", NoMatch},
+		{"gcloud projects list --billing-project=x", NoMatch},
+		{"gcloud projects list --credential-file-override=/tmp/key", NoMatch},
+		// Shell trickery
+		{"gcloud projects list | head", NoMatch},
+		{"gcloud projects list && rm -rf /", NoMatch},
+		{"gcloud projects list > /tmp/out", NoMatch},     // file redirect
+		{"gcloud projects list > /dev/null 2>&1", NoMatch}, // still has file redirect
+		{"(gcloud projects list)", NoMatch},
+		{"gcloud projects list; cat /etc/hosts", NoMatch},
+		{"echo $(gcloud projects list)", NoMatch},
+		{"gcloud projects list &", NoMatch},
+		// Variable expansion
+		{"gcloud $ACTION list", NoMatch},
+		{"gcloud projects list --project=$PROJ", NoMatch},
+		// Wrong program
+		{"kubectl get pods", NoMatch},
+		{"aws s3 ls", NoMatch},
+		// Empty positional
+		{"gcloud", NoMatch},
+		{"gcloud --help", NoMatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != tc.want {
+				t.Errorf("Eval(%q) = %v, want %v (features=%+v)", tc.cmd, v, tc.want, p.Features)
+			}
+		})
+	}
+}
+
+func TestIsSafeIdentifier(t *testing.T) {
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"list", true},
+		{"get-value", true},
+		{"my-project", true},
+		{"my.dataset.tbl", true},
+		{"proj_123", true},
+		{"", false},
+		{"gs://bucket", false},
+		{"projects/foo", false},
+		{"foo:bar", false},
+		{"../etc", false},
+		{"foo bar", false},
+		{"$(evil)", false},
+		{"foo*", false},
+	}
+	for _, tc := range cases {
+		if got := isSafeIdentifier(tc.s); got != tc.want {
+			t.Errorf("isSafeIdentifier(%q) = %v, want %v", tc.s, got, tc.want)
+		}
+	}
+}
+
 // --- baseProgram ---
 
 func TestBaseProgram(t *testing.T) {

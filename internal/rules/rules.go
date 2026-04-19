@@ -484,6 +484,103 @@ func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// --- NestedSubcommandAllow: a tier-2 allow rule for CLIs with a
+// (noun, verb) shape where only read verbs should auto-allow.
+//
+// Fires when:
+//   - exactly one top-level call
+//   - no pipes, subshells, command-subst, proc-subst, background,
+//     binary ops, or multi-statement scripts
+//   - any redirect in the script is exactly `2>&1` (see
+//     shellparse.OnlyStderrMergeRedirect)
+//   - call is fully resolved
+//   - program is in Programs (literal OR basename match)
+//   - every positional is a "safe identifier" (letters, digits,
+//     `-`, `_`, `.`) — no `:`, no `/`, no `gs://…`, no path traversal
+//   - the LAST positional is in SafeVerbs — this is the verb in
+//     the (noun, verb) pair, e.g. `gcloud projects list` → `list`
+//   - no ForbidFlags present (impersonation, credential override,
+//     account override, etc.)
+//
+// Distinct from AnchoredCommand (which checks the FIRST positional
+// and refuses all redirects) because gcloud/gsutil/bq/kubectl read
+// shapes put the verb last and frequently stream via `2>&1`.
+//
+// The safe-identifier gate is deliberately strict: `gsutil ls
+// gs://my-bucket` has `gs://my-bucket` as its tail positional and
+// fails the check. Users wanting bucket-specific ops get the LLM
+// tier (or the user-prompt default). This avoids building a
+// per-CLI argument parser just to auto-allow reads.
+type NestedSubcommandAllow struct {
+	RuleName    string
+	Programs    []string
+	SafeVerbs   []string
+	ForbidFlags []string
+}
+
+func (r *NestedSubcommandAllow) Name() string { return r.RuleName }
+func (r *NestedSubcommandAllow) Kind() string { return "nested_subcommand_allow" }
+
+func (r *NestedSubcommandAllow) Eval(p *shellparse.Parsed) (Verdict, string) {
+	f := p.Features
+	if f.HasPipe || f.HasSubshell || f.HasCmdSub || f.HasProcSub ||
+		f.HasBackground || f.HasBinaryOp || f.HasMultiStmt {
+		return NoMatch, ""
+	}
+	if f.HasRedirect && !p.OnlyStderrMergeRedirect() {
+		return NoMatch, ""
+	}
+	if len(p.Calls) != 1 {
+		return NoMatch, ""
+	}
+	c := p.Calls[0]
+	if c.Nesting != shellparse.NestTopLevel || c.HasUnresolved {
+		return NoMatch, ""
+	}
+	if !stringIn(c.Program, r.Programs) && !stringIn(baseProgram(c.Program), r.Programs) {
+		return NoMatch, ""
+	}
+	if len(c.Positional) == 0 {
+		return NoMatch, ""
+	}
+	for _, pos := range c.Positional {
+		if !isSafeIdentifier(pos) {
+			return NoMatch, ""
+		}
+	}
+	last := c.Positional[len(c.Positional)-1]
+	if !stringIn(last, r.SafeVerbs) {
+		return NoMatch, ""
+	}
+	for _, forbidden := range r.ForbidFlags {
+		if anchoredFlagForbidden(c.Flags, forbidden) {
+			return NoMatch, ""
+		}
+	}
+	return Match, r.RuleName
+}
+
+// isSafeIdentifier returns true when s is a bare identifier
+// (letters, digits, `-`, `_`, `.`). Blocks path traversal, URLs
+// (`gs://…`), resource selectors (`projects/foo`), command
+// substitution remnants, etc. in positional args.
+func isSafeIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // --- GitConfigWrite: block rule for `git config` writes.
 //
 // `git config` writes to gitconfig files (setting core.hooksPath,
