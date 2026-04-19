@@ -1,0 +1,152 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/RobinUS2/claude-guard/internal/stop"
+)
+
+const stopShellTimeoutMs = 500
+
+type stopInput struct {
+	SessionID      string            `json:"session_id"`
+	StopHookActive bool              `json:"stop_hook_active"`
+	Transcript     []json.RawMessage `json:"transcript"`
+}
+
+type stopResponse struct {
+	UserMessage string `json:"userMessage,omitempty"`
+}
+
+func cmdStop(_ []string) int {
+	return cmdStopWithIO(os.Stdin, os.Stdout)
+}
+
+func cmdStopWithIO(r io.Reader, w io.Writer) int {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "stop: read stdin: %v\n", err)
+		return 1
+	}
+
+	var in stopInput
+	if err := json.Unmarshal(data, &in); err != nil {
+		// Malformed input: fail-open, let Claude stop.
+		fmt.Fprintf(os.Stderr, "stop: parse input: %v\n", err)
+		return writeStopResp(w, "")
+	}
+
+	tr := parseTranscript(in.Transcript)
+	timeout := time.Duration(stopShellTimeoutMs) * time.Millisecond
+
+	msg := stop.Evaluate(
+		in.SessionID,
+		os.TempDir(),
+		in.StopHookActive,
+		tr,
+		stop.DefaultRules(),
+		timeout,
+	)
+
+	return writeStopResp(w, msg)
+}
+
+func writeStopResp(w io.Writer, msg string) int {
+	data, _ := json.Marshal(stopResponse{UserMessage: msg})
+	fmt.Fprintln(w, string(data))
+	return 0
+}
+
+// parseTranscript extracts the Transcript fields claude-guard rules need.
+//
+// Claude Code transcript format:
+//   - role="user":      string or []content-block
+//   - role="assistant": string or []content-block, which includes type="text"
+//     AND type="tool_use" blocks (this is where Bash/TodoWrite calls live)
+//
+// Tool calls appear inside assistant content as type="tool_use" — NOT as
+// separate role="tool" entries. This is the key structural fact.
+func parseTranscript(raw []json.RawMessage) stop.Transcript {
+	var tr stop.Transcript
+
+	type contentBlock struct {
+		Type  string          `json:"type"`
+		Text  string          `json:"text"`
+		Name  string          `json:"name"`
+		Input json.RawMessage `json:"input"`
+	}
+	type turn struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	type bashInput struct {
+		Command string `json:"command"`
+	}
+	type todoInput struct {
+		Todos []stop.TodoItem `json:"todos"`
+	}
+
+	var lastAssistantParts []string
+	firstUser := true
+
+	for _, rawTurn := range raw {
+		var t turn
+		if err := json.Unmarshal(rawTurn, &t); err != nil {
+			continue
+		}
+
+		switch t.Role {
+		case "user":
+			if firstUser {
+				firstUser = false
+				var s string
+				if err := json.Unmarshal(t.Content, &s); err == nil {
+					tr.FirstUserText = s
+				}
+			}
+
+		case "assistant":
+			lastAssistantParts = nil
+
+			var s string
+			if err := json.Unmarshal(t.Content, &s); err == nil {
+				lastAssistantParts = append(lastAssistantParts, s)
+				break
+			}
+
+			var blocks []contentBlock
+			if err := json.Unmarshal(t.Content, &blocks); err != nil {
+				break
+			}
+			for _, blk := range blocks {
+				switch blk.Type {
+				case "text":
+					if blk.Text != "" {
+						lastAssistantParts = append(lastAssistantParts, blk.Text)
+					}
+				case "tool_use":
+					if blk.Name == "Bash" {
+						var inp bashInput
+						if err := json.Unmarshal(blk.Input, &inp); err == nil && inp.Command != "" {
+							tr.BashCalls = append(tr.BashCalls, inp.Command)
+						}
+					}
+					if blk.Name == "TodoWrite" {
+						var inp todoInput
+						if err := json.Unmarshal(blk.Input, &inp); err == nil && len(inp.Todos) > 0 {
+							tr.HasTodoWrite = true
+							tr.LastTodoItems = inp.Todos
+						}
+					}
+				}
+			}
+		}
+	}
+	tr.LastAssistantText = strings.Join(lastAssistantParts, "\n")
+	return tr
+}

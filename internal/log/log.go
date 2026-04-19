@@ -33,7 +33,23 @@ const (
 	// Monitor/explain/stats filter on this to separate decisions from
 	// app-level messages that might share a file.
 	MsgDecision = "decision"
+
+	// MsgStopHook is the slog msg used for Stop hook evaluation events.
+	MsgStopHook = "stop_hook"
 )
+
+// StopHookRecord is the shape for reading stop_hook events from decisions.jsonl.
+type StopHookRecord struct {
+	Time           string `json:"time"`
+	Msg            string `json:"msg"`
+	SessionID      string `json:"session_id,omitempty"`
+	StopHookActive bool   `json:"stop_hook_active"`
+	FiredRule      string `json:"fired_rule,omitempty"`
+	Injected       bool   `json:"injected"`
+	Suppressed     string `json:"suppressed,omitempty"` // "max_continues_reached" or ""
+	ContinueCount  int    `json:"continue_count"`
+	LatencyUS      int64  `json:"latency_us"`
+}
 
 // ReadRecord is the shape for reading decision records back from the
 // JSONL log. It mirrors the attribute list produced by decisionAttrs,
