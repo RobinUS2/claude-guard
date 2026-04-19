@@ -221,3 +221,59 @@ func TestDecideGeneric_WriteVerbFallsThrough(t *testing.T) {
 		t.Errorf("Verdict = %v, want Continue for write-verb MCP (no LLM)", out.Verdict)
 	}
 }
+
+func TestDecideGeneric_StructurallySafeTools(t *testing.T) {
+	cases := []struct {
+		name     string
+		toolName string
+		wantRule string
+	}{
+		// Built-ins
+		{"Agent subagent spawn", "Agent", "safe-builtin-tool"},
+		{"ToolSearch schema fetch", "ToolSearch", "safe-builtin-tool"},
+		{"TodoWrite state", "TodoWrite", "safe-builtin-tool"},
+		// MCP server prefixes
+		{"ccd_session mark_chapter", "mcp__ccd_session__mark_chapter", "safe-mcp-server"},
+		{"ccd_session spawn_task", "mcp__ccd_session__spawn_task", "safe-mcp-server"},
+		{"mcp-registry search", "mcp__mcp-registry__search_mcp_registry", "safe-mcp-server"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newTestEngine(t, false)
+			out := e.Decide(Input{
+				ToolName: tc.toolName,
+				Command:  "MCP tool call (not bash) " + tc.toolName + ": {}",
+				CWD:      "/tmp",
+			})
+			if out.Verdict != Allow {
+				t.Errorf("Verdict = %v, want Allow for structurally safe tool %s", out.Verdict, tc.toolName)
+			}
+			if out.Rule != tc.wantRule {
+				t.Errorf("Rule = %q, want %q", out.Rule, tc.wantRule)
+			}
+			if out.Tier != "instant_allow" {
+				t.Errorf("Tier = %q, want instant_allow", out.Tier)
+			}
+		})
+	}
+}
+
+// TestDecideGeneric_ScheduledTasksFallsThrough documents that
+// scheduled-tasks MCP is NOT in the structural allowlist because
+// create_scheduled_task persists intent across sessions.
+func TestDecideGeneric_ScheduledTasksFallsThrough(t *testing.T) {
+	e, _ := newTestEngine(t, false)
+	out := e.Decide(Input{
+		ToolName: "mcp__scheduled-tasks__create_scheduled_task",
+		Command:  "MCP tool call (not bash) mcp__scheduled-tasks__create_scheduled_task: {}",
+		CWD:      "/tmp",
+	})
+	// "create" is not a read-verb; no structural allow → falls through
+	// to LLM → no LLM in test engine → Continue.
+	if out.Verdict != Continue {
+		t.Errorf("Verdict = %v, want Continue for scheduled-tasks create", out.Verdict)
+	}
+	if out.Rule == "safe-mcp-server" {
+		t.Errorf("scheduled-tasks must NOT be auto-allowed via structural rule")
+	}
+}

@@ -291,8 +291,68 @@ var mcpReadVerbs = []string{
 	"view", "fetch", "query", "check", "status", "info",
 }
 
+// safeBuiltinTools are first-party Claude Code tools that have no
+// shell / file / network side effects. Agent spawns subagents that
+// re-enter the hook for every inner tool call (verified via decision
+// log: subagents' inner tool calls do trigger PreToolUse, so auto-
+// allowing the outer Agent call is NOT a bypass — the inner work
+// still gets evaluated). ToolSearch loads tool schemas; TodoWrite
+// is local conversation state. None reach outside the harness.
+var safeBuiltinTools = map[string]bool{
+	"Agent":      true,
+	"ToolSearch": true,
+	"TodoWrite":  true,
+}
+
+// safeMCPServerPrefixes match MCP servers whose entire surface is
+// harness-internal (UI markers, session state, tool discovery). All
+// tools under these servers are auto-allowed at tier 2.
+//
+// DO NOT add servers that touch external systems (gdrive,
+// google-calendar, atlassian, etc.) — those can have write shapes
+// and need LLM review.
+//
+// Deliberately omitted: `mcp__scheduled-tasks__` — create_scheduled_task
+// persists intent across sessions, which is a real side effect. Falls
+// through to LLM tier.
+var safeMCPServerPrefixes = []string{
+	"mcp__ccd_session__",  // mark_chapter, spawn_task (spawn creates a new session whose actions re-enter PreToolUse)
+	"mcp__mcp-registry__", // search_mcp_registry (read-only discovery)
+}
+
+// isStructurallySafeTool reports whether a tool name is known safe
+// without further analysis. Returns (true, rule) on match.
+func isStructurallySafeTool(toolName string) (bool, string) {
+	if safeBuiltinTools[toolName] {
+		return true, "safe-builtin-tool"
+	}
+	for _, p := range safeMCPServerPrefixes {
+		if strings.HasPrefix(toolName, p) {
+			return true, "safe-mcp-server"
+		}
+	}
+	return false, ""
+}
+
 func (e *Engine) decideGeneric(in Input, start time.Time) Output {
 	out := Output{Verdict: Continue, Tier: "default"}
+
+	// Tier-2: structural allowlist for harness-internal tools that
+	// have no shell / file / network surface. Avoids the non-Bash
+	// fallthrough where Agent / ToolSearch / session-markers would
+	// hit the user prompt default when the LLM tier is unavailable.
+	if safe, rule := isStructurallySafeTool(in.ToolName); safe {
+		if !e.cfg.ShadowMode {
+			out.Verdict = Allow
+			out.Tier = "instant_allow"
+			out.Rule = rule
+			out.Reason = "structurally safe non-Bash tool: " + in.ToolName
+			out.Latency = time.Since(start)
+			e.record(in, out)
+			return out
+		}
+		out.Shadow.Tier2Rule = rule
+	}
 
 	// Tier-2: MCP read-verb heuristic.
 	action := extractMCPAction(in.ToolName)
