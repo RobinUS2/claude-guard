@@ -497,8 +497,15 @@ func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 //   - program is in Programs (literal OR basename match)
 //   - every positional is a "safe identifier" (letters, digits,
 //     `-`, `_`, `.`) — no `:`, no `/`, no `gs://…`, no path traversal
-//   - the LAST positional is in SafeVerbs — this is the verb in
-//     the (noun, verb) pair, e.g. `gcloud projects list` → `list`
+//   - the FIRST or LAST positional is in SafeVerbs. Two CLI shapes
+//     in the wild:
+//       - noun-verb (gcloud, terraform): `gcloud projects list` →
+//         verb is last.
+//       - verb-noun (kubectl, docker, firebase): `kubectl get pods`
+//         → verb is first.
+//     Accepting either position covers both without requiring
+//     per-CLI parsers. An arbitrary middle positional is still
+//     gated by isSafeIdentifier (no URLs, selectors, or traversal).
 //   - no ForbidFlags present (impersonation, credential override,
 //     account override, etc.)
 //
@@ -548,8 +555,9 @@ func (r *NestedSubcommandAllow) Eval(p *shellparse.Parsed) (Verdict, string) {
 			return NoMatch, ""
 		}
 	}
+	first := c.Positional[0]
 	last := c.Positional[len(c.Positional)-1]
-	if !stringIn(last, r.SafeVerbs) {
+	if !stringIn(first, r.SafeVerbs) && !stringIn(last, r.SafeVerbs) {
 		return NoMatch, ""
 	}
 	for _, forbidden := range r.ForbidFlags {

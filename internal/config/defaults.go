@@ -420,23 +420,66 @@ func DefaultAllowRules() []rules.Rule {
 		},
 	}
 
-	// gcloud is intentionally NOT in tier 2. Its subcommand tree is too
-	// deep for anchored_command to express "must be a read subcommand"
-	// — `gcloud run deploy`, `gcloud builds submit`, `gcloud projects
-	// delete` would all sneak through a naive `Programs: ["gcloud"]`
-	// rule (they're a single anchored call, no pipes, no redirects).
-	// Without a nested-subcommand matcher (Phase 2 work), gcloud calls
-	// must fall through to the LLM tier where the model can reason
-	// about the full command tree.
+	// gcloud read-only — NestedSubcommandAllow handles the deep
+	// subcommand tree that AnchoredCommand can't: `gcloud projects
+	// list`, `gcloud compute instances list`, `gcloud iam
+	// service-accounts list`. The rule requires the LAST positional
+	// to be a SafeVerb (the read verb), every positional to be a
+	// safe identifier (no `gs://…`, `projects/foo`, `:` shapes),
+	// and blocks impersonation/credential-override flags that would
+	// change the effective principal.
 	//
-	// This is a deliberate tradeoff: more LLM cost for gcloud-heavy
-	// sessions, but no risk of auto-approving a gcloud mutation.
+	// Mutating verbs (`create`, `delete`, `deploy`, `update`, `set`,
+	// `submit`) are absent → they fall through to LLM / user prompt.
+	// Tier-1 `gcloud-auth-write` still denies config/auth mutations
+	// regardless of whether tier 2 would approve.
+	gcloudReadonly := &rules.NestedSubcommandAllow{
+		RuleName: "gcloud-readonly",
+		Programs: []string{"gcloud"},
+		SafeVerbs: []string{
+			"list", "describe", "get-value",
+			"get-iam-policy", "get-ancestors-iam-policy",
+			"list-available-services", "list-enabled-services",
+			"version", "help",
+		},
+		ForbidFlags: []string{
+			"--impersonate-service-account",
+			"--account",
+			"--configuration",
+			"--credential-file-override",
+			"--billing-project",
+			"--access-token-file",
+		},
+	}
 
-	// bq (BigQuery) read-only
-	bqReadonly := &rules.AnchoredCommand{
-		RuleName:         "bq-readonly",
-		Programs:         []string{"bq"},
-		RequireSubcmdAny: []string{"show", "ls", "query", "head"},
+	// gsutil read-only — same pattern as gcloud. `gsutil ls` (bare,
+	// no bucket arg) matches; `gsutil ls gs://bucket` does NOT because
+	// `gs://bucket` fails the safe-identifier check. That's by design
+	// — bucket-scoped ops should go through the LLM tier or explicit
+	// user approval.
+	gsutilReadonly := &rules.NestedSubcommandAllow{
+		RuleName:  "gsutil-readonly",
+		Programs:  []string{"gsutil"},
+		SafeVerbs: []string{"ls", "stat", "du", "hash", "version", "help"},
+		ForbidFlags: []string{
+			"--impersonate-service-account",
+			"--account",
+		},
+	}
+
+	// bq (BigQuery) read-only — NestedSubcommandAllow for the nested
+	// cases (`bq show`, `bq ls`, `bq query`), replacing the old
+	// AnchoredCommand shape. Safe-identifier rule means
+	// `bq show my-dataset.my-table` matches (`.` is allowed) but
+	// `bq show my-proj:my-dataset.my-table` does not (`:` blocked).
+	bqReadonly := &rules.NestedSubcommandAllow{
+		RuleName:  "bq-readonly",
+		Programs:  []string{"bq"},
+		SafeVerbs: []string{"show", "ls", "query", "head", "version", "help"},
+		ForbidFlags: []string{
+			"--service_account",
+			"--service_account_credential_file",
+		},
 	}
 
 	// terraform read-only
@@ -447,10 +490,19 @@ func DefaultAllowRules() []rules.Rule {
 	// to the LLM tier which reasons about the full command.
 	// Tier-1 `terraform-state-mutation` still denies the
 	// destructive verbs regardless of tier 2.
-	terraformReadonly := &rules.AnchoredCommand{
-		RuleName:         "terraform-readonly",
-		Programs:         []string{"terraform"},
-		RequireSubcmdAny: []string{"plan", "validate", "fmt", "show", "version", "output", "console", "workspace"},
+	terraformReadonly := &rules.NestedSubcommandAllow{
+		RuleName: "terraform-readonly",
+		Programs: []string{"terraform"},
+		// Note: `state` is included here for the bare `terraform state`
+		// (lists the state). Specific destructive verbs like
+		// `terraform state rm` fall through because `rm` isn't in
+		// SafeVerbs — and tier-1 `terraform-state-mutation` blocks
+		// them anyway. `plan -out=tfplan` writes a file but is
+		// considered safe (no infra change).
+		SafeVerbs: []string{
+			"plan", "validate", "fmt", "show", "version",
+			"output", "console", "workspace", "providers", "state",
+		},
 	}
 
 	// docker read-only
@@ -460,11 +512,26 @@ func DefaultAllowRules() []rules.Rule {
 		RequireSubcmdAny: []string{"ps", "images", "inspect", "logs", "port", "top", "stats", "version", "info", "history", "events"},
 	}
 
-	// kubectl read-only
-	kubectlReadonly := &rules.AnchoredCommand{
-		RuleName:         "kubectl-readonly",
-		Programs:         []string{"kubectl", "oc"},
-		RequireSubcmdAny: []string{"get", "describe", "logs", "top", "version", "cluster-info", "api-resources", "explain"},
+	// kubectl read-only — nested (noun, verb) shape (e.g.
+	// `kubectl get pods`, `kubectl describe deployment x`). Exec/
+	// apply/delete/patch/edit/scale are writes (absent from SafeVerbs)
+	// and fall to LLM. Tier-1 `kubectl-config-write` already blocks
+	// `kubectl config set-*`.
+	kubectlReadonly := &rules.NestedSubcommandAllow{
+		RuleName: "kubectl-readonly",
+		Programs: []string{"kubectl", "oc"},
+		SafeVerbs: []string{
+			"get", "describe", "logs", "top", "explain",
+			"api-resources", "api-versions", "version", "cluster-info",
+		},
+	}
+
+	// firebase read-only — small surface, still tightly controlled
+	// since deploy/database:set are destructive.
+	firebaseReadonly := &rules.NestedSubcommandAllow{
+		RuleName:  "firebase-readonly",
+		Programs:  []string{"firebase"},
+		SafeVerbs: []string{"list", "help", "version"},
 	}
 
 	// go read-only / safe
@@ -494,10 +561,13 @@ func DefaultAllowRules() []rules.Rule {
 		posixReadonly,
 		findReadonly,
 		gitReadonly,
+		gcloudReadonly,
+		gsutilReadonly,
 		bqReadonly,
 		terraformReadonly,
 		dockerReadonly,
 		kubectlReadonly,
+		firebaseReadonly,
 		goReadonly,
 		nodePmReadonly,
 		ghReadonly,
@@ -525,10 +595,13 @@ func DefaultAllowRules() []rules.Rule {
 				posixReadonly,
 				findReadonly,
 				gitReadonly,
+				gcloudReadonly,
+				gsutilReadonly,
 				bqReadonly,
 				terraformReadonly,
 				dockerReadonly,
 				kubectlReadonly,
+				firebaseReadonly,
 				goReadonly,
 				nodePmReadonly,
 				ghReadonly,

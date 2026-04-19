@@ -585,8 +585,11 @@ func TestNestedSubcommandAllow(t *testing.T) {
 		// Verb not in SafeVerbs
 		{"gcloud projects delete myproj", NoMatch},
 		{"gcloud compute instances create x", NoMatch},
-		{"gcloud config get-value project", NoMatch},     // "project" not a SafeVerb
-		{"gcloud projects describe myproj", NoMatch},     // tail positional not a SafeVerb (by design)
+		{"gcloud config get-value project", NoMatch}, // neither first nor last is SafeVerb
+		// gcloud-readonly SafeVerbs include "describe", so "gcloud projects describe myproj"
+		// matches via first positional check ("describe" is NOT first; "projects" is).
+		// Actually "describe" is middle here → first="projects" (not safe), last="myproj" (not safe) → NoMatch
+		{"gcloud projects describe myproj", NoMatch},
 		// Unsafe identifier in positional
 		{"gsutil ls gs://my-bucket", NoMatch},     // wrong program anyway, but also unsafe pos
 		{"gcloud projects describe proj/foo", NoMatch},
@@ -609,7 +612,6 @@ func TestNestedSubcommandAllow(t *testing.T) {
 		{"gcloud $ACTION list", NoMatch},
 		{"gcloud projects list --project=$PROJ", NoMatch},
 		// Wrong program
-		{"kubectl get pods", NoMatch},
 		{"aws s3 ls", NoMatch},
 		// Empty positional
 		{"gcloud", NoMatch},
@@ -621,6 +623,40 @@ func TestNestedSubcommandAllow(t *testing.T) {
 			v, _ := r.Eval(p)
 			if v != tc.want {
 				t.Errorf("Eval(%q) = %v, want %v (features=%+v)", tc.cmd, v, tc.want, p.Features)
+			}
+		})
+	}
+}
+
+func TestNestedSubcommandAllow_VerbNounShape(t *testing.T) {
+	// kubectl-style: verb comes FIRST (e.g. "kubectl get pods").
+	r := &NestedSubcommandAllow{
+		RuleName:  "kubectl-readonly",
+		Programs:  []string{"kubectl", "oc"},
+		SafeVerbs: []string{"get", "describe", "logs", "top", "explain", "version", "cluster-info"},
+	}
+	cases := []struct {
+		cmd  string
+		want Verdict
+	}{
+		{"kubectl get pods", Match},                       // verb first
+		{"kubectl describe deployment foo", Match},        // verb first, middle positional safe
+		{"kubectl logs foo", Match},
+		{"kubectl version", Match},
+		{"kubectl cluster-info", Match},
+		{"oc get routes", Match},                          // oc too
+		{"kubectl apply -f foo", NoMatch},                 // write verb
+		{"kubectl delete pod foo", NoMatch},
+		{"kubectl exec pod -- ls", NoMatch},               // '--' is not safe identifier, also exec isn't in verbs
+		{"kubectl get foo/bar", NoMatch},                  // unsafe positional (/)
+		{"kubectl get pods | head", NoMatch},              // pipe breaks tier-2
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != tc.want {
+				t.Errorf("Eval(%q) = %v, want %v", tc.cmd, v, tc.want)
 			}
 		})
 	}

@@ -96,14 +96,46 @@ docker info
 podman ps
 podman images
 
-# --- kubectl read-only ---
+# --- kubectl read-only (verb-noun shape) ---
 kubectl get
 kubectl get pods
 kubectl describe
+kubectl describe deployment my-deploy
 kubectl logs foo
 kubectl version
 kubectl cluster-info
 kubectl explain
+oc get routes
+
+# --- gcloud read-only (noun-verb shape) ---
+gcloud version
+gcloud projects list
+gcloud builds list
+gcloud compute instances list
+gcloud iam service-accounts list
+gcloud run services list
+gcloud projects list 2>&1
+
+# --- gsutil / bq read-only ---
+gsutil version
+bq ls
+bq show
+bq show my-dataset.my-table
+
+# --- terraform read-only (noun-verb shape) ---
+terraform plan
+terraform validate
+terraform fmt
+terraform show
+terraform output
+terraform version
+terraform state list
+terraform state show
+terraform state pull
+
+# --- firebase read-only ---
+firebase list
+firebase version
 
 # --- go safe subcommands ---
 go version

@@ -28,12 +28,9 @@ yarn install
 yarn build
 pnpm install
 gcloud
-gcloud version
 gcloud builds submit
 gcloud run deploy
-gcloud projects list
 gcloud projects describe foo
-gcloud builds list
 gcloud secrets versions access latest --secret=foo
 docker build .
 docker run alpine
@@ -63,10 +60,9 @@ find . -name "*.go" | xargs wc -l
 # --- Variable-wrapped rm bypass attempts (tier 1 conservative on unresolved) ---
 R=rm; $R -rf /
 
-# --- step 2: terraform state reads (now fall through to LLM) ---
-terraform state list
-terraform state show aws_instance.foo
-terraform state pull
+# --- terraform state reads now instant-allow via terraform-readonly.
+# state-mutating verbs (rm/mv/push) still fall through via the
+# SafeVerbs check AND are denied by tier-1 `terraform-state-mutation`.
 
 # --- step 13: shell without -c still falls through to LLM ---
 bash script.sh
