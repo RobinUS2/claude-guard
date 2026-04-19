@@ -41,6 +41,19 @@ terraform init
 terraform apply
 terraform destroy
 
+# --- Step 4.1: GCP CLI write/destructive shapes (must NOT auto-allow) ---
+gcloud projects delete my-project
+gcloud iam service-accounts create new-sa
+gcloud run deploy my-service --image=gcr.io/foo/bar
+gsutil cp /tmp/foo gs://my-bucket/
+gsutil rm gs://my-bucket/foo
+bq query --use_legacy_sql=false "DROP TABLE foo"
+kubectl delete pod my-pod
+gcloud projects list | xargs -I{} gcloud projects delete {}
+gcloud projects list > /tmp/out
+gcloud projects list --impersonate-service-account=attacker@evil.iam.gserviceaccount.com
+# gcloud auth login is tier-1 denied (gcloud-auth-write) — see bash_deny.txt
+
 # --- Variable-expanded commands fall through (HasUnresolved) ---
 cat $HOME/.bashrc
 echo $PATH

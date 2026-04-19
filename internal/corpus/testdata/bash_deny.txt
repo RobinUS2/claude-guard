@@ -93,3 +93,6 @@ less /etc/shadow
 # --- Cloud cred files from non-vendor tools ---
 cat ~/.aws/credentials
 less ~/.aws/credentials
+
+# --- gcloud auth/config mutation (tier-1 gcloud-auth-write) ---
+gcloud auth login

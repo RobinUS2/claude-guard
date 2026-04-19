@@ -1,4 +1,4 @@
-.PHONY: all build test lint check install install-local clean fmt vet bench eval-prompt
+.PHONY: all build test test-integration lint check check-integration install install-local clean fmt vet bench eval-prompt
 
 BIN      := claude-guard
 BIN_DIR  := $(HOME)/.claude/bin
@@ -29,6 +29,11 @@ test:
 test-short:
 	go test -short ./...
 
+# Integration tests shell out (e.g. `go run`) and are gated by build tag.
+# Not run by default `make test` / `make check` because they're slower.
+test-integration:
+	go test -tags=integration ./...
+
 bench:
 	go test -bench=. -benchmem -run=^$$ ./...
 
@@ -43,6 +48,8 @@ vet:
 	go vet ./...
 
 check: fmt vet test
+
+check-integration: check test-integration
 
 eval-prompt:
 	@echo "(eval-prompt target: runs classifier against configs/eval-corpus — implemented in Phase 2)"

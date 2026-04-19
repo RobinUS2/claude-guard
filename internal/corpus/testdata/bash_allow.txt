@@ -115,12 +115,22 @@ gcloud compute instances list
 gcloud iam service-accounts list
 gcloud run services list
 gcloud projects list 2>&1
+gcloud iam service-accounts list --project=my-proj
+gcloud iam service-accounts list --project=my-proj 2>&1
+gcloud compute instances list --zones=europe-west4-a
+gcloud run services list --region=europe-west4
+gcloud config list
+gcloud auth list
 
 # --- gsutil / bq read-only ---
 gsutil version
+gsutil ls
 bq ls
 bq show
 bq show my-dataset.my-table
+
+# --- kubectl extra (verb-noun shape) ---
+kubectl describe pods
 
 # --- terraform read-only (noun-verb shape) ---
 terraform plan
