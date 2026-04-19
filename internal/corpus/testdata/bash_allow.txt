@@ -222,4 +222,40 @@ cd /tmp && git log --oneline | wc -l
 cd /Users/robin/Documents/code/ai-site-gen && git log --oneline -5 && echo "---" && git show e48ecd1 --stat | head -10
 cd /tmp && gh pr list
 
+# --- pipeline-readonly: pipe tails to safe sinks ---
+git log | head
+git log | head -10
+git log --oneline -5 | tail
+ls -la | head -5
+ls /tmp | wc -l
+ls /tmp | grep foo
+cat /etc/hosts | grep localhost
+git log --oneline origin/main..HEAD 2>&1
+git log --oneline 2>&1 | head -20
+git show HEAD --stat | head -30
+find . -name "*.go" | head -20
+find /tmp -name "*.log" | head
+
+# --- pipeline-readonly: compound && / ; / || of safe reads ---
+ls /tmp && cat /tmp/foo
+ls; cat /tmp/foo
+git log --oneline -5 && git branch
+git log -5 && echo "---" && git status
+echo "---" ; git status
+git log --oneline origin/main..HEAD && git status
+
+# --- pipeline-readonly: claude-guard with pipe + stderr merge ---
+claude-guard explain --last-n 50 2>&1 | head -200
+claude-guard stats | head -20
+
+# --- sed-readonly: -n + print-only script, no side-effecting commands ---
+sed -n '60,100p' /tmp/file
+sed -n '10p' /tmp/file
+sed -n '1,50p' /tmp/file
+sed -n '/foo/p' /tmp/file
+
+# --- posix-readonly: dir (GNU coreutils ls alias) ---
+dir
+dir /tmp
+
 # --- blocker 3: ssh-add regression — ssh family still reads keys ---

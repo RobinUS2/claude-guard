@@ -381,7 +381,8 @@ func DefaultAllowRules() []rules.Rule {
 	posixReadonly := &rules.AnchoredCommand{
 		RuleName: "posix-readonly",
 		Programs: []string{
-			"ls", "cat", "head", "tail", "wc", "sort", "uniq",
+			"ls", "dir", "vdir",
+			"cat", "head", "tail", "wc", "sort", "uniq",
 			"grep", "rg", "ripgrep", "ack", "ag",
 			"tree", "file", "stat",
 			"du", "df",
@@ -402,6 +403,10 @@ func DefaultAllowRules() []rules.Rule {
 		Programs:    []string{"find"},
 		ForbidFlags: []string{"-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls"},
 	}
+
+	// sed — read-only, print-only shape. See SedReadonly docstring
+	// for the exact restrictions.
+	sedReadonly := &rules.SedReadonly{RuleName: "sed-readonly"}
 
 	// git read-only subcommands
 	gitReadonly := &rules.AnchoredCommand{
@@ -640,9 +645,40 @@ func DefaultAllowRules() []rules.Rule {
 		Programs: []string{"cat"},
 	}
 
+	// Shared inner-rule list + safe pipe targets for the compound-
+	// command allow rules (CdPrefixed and PipelineReadonly). Kept as
+	// locals so both rules see the exact same set — any tightening
+	// in one applies to the other.
+	innerReadRules := []rules.Rule{
+		posixReadonly,
+		findReadonly,
+		sedReadonly,
+		gitReadonly,
+		gcloudReadonly,
+		gsutilReadonly,
+		bqReadonly,
+		terraformReadonly,
+		dockerReadonly,
+		kubectlReadonly,
+		firebaseReadonly,
+		goReadonly,
+		nodePmReadonly,
+		ghReadonly,
+		claudeGuardReadonly,
+	}
+	safePipeTargets := []string{
+		"head", "tail", "wc", "sort", "uniq",
+		"grep", "rg", "ack", "ag",
+		"jq", "yq",
+		"cat", "less", "more",
+		"tr", "cut", "paste",
+		"tee",
+	}
+
 	return []rules.Rule{
 		posixReadonly,
 		findReadonly,
+		sedReadonly,
 		gitReadonly,
 		gcloudReadonly,
 		gsutilReadonly,
@@ -675,31 +711,22 @@ func DefaultAllowRules() []rules.Rule {
 		// implications; each subsequent command is evaluated against the
 		// same allow rules as standalone commands.
 		&rules.CdPrefixed{
-			RuleName: "cd-prefixed-readonly",
-			InnerRules: []rules.Rule{
-				posixReadonly,
-				findReadonly,
-				gitReadonly,
-				gcloudReadonly,
-				gsutilReadonly,
-				bqReadonly,
-				terraformReadonly,
-				dockerReadonly,
-				kubectlReadonly,
-				firebaseReadonly,
-				goReadonly,
-				nodePmReadonly,
-				ghReadonly,
-				claudeGuardReadonly,
-			},
-			SafePipeTargets: []string{
-				"head", "tail", "wc", "sort", "uniq",
-				"grep", "rg", "ack", "ag",
-				"jq", "yq",
-				"cat", "less", "more",
-				"tr", "cut", "paste",
-				"tee",
-			},
+			RuleName:        "cd-prefixed-readonly",
+			InnerRules:      innerReadRules,
+			SafePipeTargets: safePipeTargets,
+		},
+
+		// Non-cd compound / pipe shapes that combine read-only heads
+		// with safe pipe tails. Covers `git log | head -5`,
+		// `git log --oneline 2>&1 | tail`, `ls -la | grep foo`,
+		// `git status && git log -5`, etc. — shapes that AnchoredCommand
+		// refuses because of the pipe/binary-op/redirect. Each pipeline
+		// head must match an inner read-only rule; each pipe tail must
+		// be in SafePipeTargets.
+		&rules.PipelineReadonly{
+			RuleName:        "pipeline-readonly",
+			InnerRules:      innerReadRules,
+			SafePipeTargets: safePipeTargets,
 		},
 	}
 }

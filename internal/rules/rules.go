@@ -1042,6 +1042,197 @@ func (r *CdPrefixed) matchesInnerRule(c *shellparse.Call) bool {
 	return false
 }
 
+// --- PipelineReadonly: an allow rule for read-only commands composed with
+// pipes (`|`) to safe sinks and/or compound operators (`&&`, `||`, `;`).
+//
+// Handles the common shapes Claude and subagents produce that
+// AnchoredCommand refuses because they include shell trickery:
+//   git log --oneline -5 | head
+//   git log --oneline origin/main..HEAD 2>&1
+//   ls -la | grep foo
+//   find . -name '*.go' | head -20
+//   git log -5 && git status
+//   echo hi; git status
+//   claude-guard explain --last-n 50 2>&1 | head -200
+//
+// Every pipeline's head command must match one of InnerRules (a read-only
+// anchored rule), and any subsequent calls in the same pipeline must be in
+// SafePipeTargets (also read-only, no shell escapes). Rejects subshells,
+// command substitution, process substitution, background jobs, and file
+// redirects (fd-only rewirings like `2>&1` are harmless and permitted).
+//
+// Distinct from CdPrefixed: CdPrefixed allows a `cd <path>` lead-in and
+// requires a binary op. PipelineReadonly covers every other compound /
+// pipe shape — the two together cover the full space of safe read-only
+// compound commands.
+
+// PipelineReadonly matches compound/pipe commands where every head is a
+// read-only program and every pipe tail is a safe sink.
+type PipelineReadonly struct {
+	RuleName        string
+	InnerRules      []Rule
+	SafePipeTargets []string // read-only programs allowed in pipe tails
+}
+
+func (r *PipelineReadonly) Name() string { return r.RuleName }
+func (r *PipelineReadonly) Kind() string { return "pipeline_readonly" }
+
+func (r *PipelineReadonly) Eval(p *shellparse.Parsed) (Verdict, string) {
+	f := p.Features
+	// Reject shell features that can hide side effects or change program
+	// semantics. fd-to-fd redirects (2>&1) are harmless and allowed.
+	if f.HasSubshell || f.HasCmdSub || f.HasProcSub || f.HasBackground {
+		return NoMatch, ""
+	}
+	if f.HasRedirect && !f.HasFdOnlyRedirects {
+		return NoMatch, ""
+	}
+	if len(p.Pipelines) == 0 {
+		return NoMatch, ""
+	}
+	// A simple single-call command with no shell features at all is
+	// AnchoredCommand's job. PipelineReadonly covers the
+	// compound/piped/fd-redirected shapes that AnchoredCommand
+	// refuses. (We don't need to explicitly reject the simple
+	// shape — AnchoredCommand will match it first — but staying out
+	// of its lane keeps rule responsibilities clean.)
+	if !f.HasPipe && !f.HasBinaryOp && !f.HasRedirect {
+		return NoMatch, ""
+	}
+	for _, pipeline := range p.Pipelines {
+		if len(pipeline) == 0 {
+			return NoMatch, ""
+		}
+		headCall := pipeline[0]
+		if !r.matchesInnerRule(&headCall) {
+			return NoMatch, ""
+		}
+		for _, tailCall := range pipeline[1:] {
+			if tailCall.HasUnresolved {
+				return NoMatch, ""
+			}
+			if !stringIn(baseProgram(tailCall.Program), r.SafePipeTargets) {
+				return NoMatch, ""
+			}
+		}
+	}
+	return Match, r.RuleName
+}
+
+func (r *PipelineReadonly) matchesInnerRule(c *shellparse.Call) bool {
+	if c.Nesting != shellparse.NestTopLevel || c.HasUnresolved {
+		return false
+	}
+	miniParsed := &shellparse.Parsed{
+		Calls:     []shellparse.Call{*c},
+		Pipelines: [][]shellparse.Call{{*c}},
+		Features:  shellparse.Features{}, // all false — single clean call
+	}
+	for _, rule := range r.InnerRules {
+		if verdict, _ := rule.Eval(miniParsed); verdict == Match {
+			return true
+		}
+	}
+	return false
+}
+
+// --- SedReadonly: sed invoked in a guaranteed read-only shape.
+//
+// GNU sed has escape hatches that make blanket allow-listing unsafe:
+//   - `w <file>` / `W <file>` write to file from inside the script
+//   - `r <file>` / `R <file>` read arbitrary files
+//   - `e <cmd>` executes a shell command
+//   - `-i` / `--in-place` rewrites the input file
+//   - `-f <scriptfile>` loads an opaque script from disk
+//
+// This rule allows sed only when:
+//   - `-n` (quiet / suppress default output) is present — ensures the
+//     output is limited to what the script explicitly prints
+//   - no `-i` / `--in-place` / `-f` / `--file` flag is present
+//   - no positional (including the script) contains any of the
+//     side-effecting sed command letters w/W/e/r/R. Conservative: a
+//     regex pattern containing those letters (e.g. `/warn/p`) will
+//     be rejected and fall through to the LLM / user prompt.
+//
+// Covers the common read shapes: `sed -n '60,100p' file`,
+// `sed -n '10p' file`, `sed -n '/pattern/p' file` (when pattern
+// contains no w/e/r letters).
+
+// SedReadonly matches sed in a side-effect-free, print-only shape.
+type SedReadonly struct {
+	RuleName string
+}
+
+func (r *SedReadonly) Name() string { return r.RuleName }
+func (r *SedReadonly) Kind() string { return "sed_readonly" }
+
+func (r *SedReadonly) Eval(p *shellparse.Parsed) (Verdict, string) {
+	f := p.Features
+	if f.HasRedirect || f.HasPipe || f.HasSubshell || f.HasCmdSub ||
+		f.HasProcSub || f.HasBackground || f.HasBinaryOp || f.HasMultiStmt {
+		return NoMatch, ""
+	}
+	if len(p.Calls) != 1 {
+		return NoMatch, ""
+	}
+	c := p.Calls[0]
+	if c.Nesting != shellparse.NestTopLevel || c.HasUnresolved {
+		return NoMatch, ""
+	}
+	if baseProgram(c.Program) != "sed" && c.Program != "sed" {
+		return NoMatch, ""
+	}
+	// Parse flags: require -n, forbid -i/--in-place/-f/--file (incl.
+	// combined short flags like `-ni`).
+	hasN := false
+	for _, fl := range c.Flags {
+		if fl == "-n" || fl == "--quiet" || fl == "--silent" {
+			hasN = true
+			continue
+		}
+		if fl == "-i" || fl == "--in-place" || fl == "-f" || fl == "--file" {
+			return NoMatch, ""
+		}
+		if strings.HasPrefix(fl, "--in-place=") || strings.HasPrefix(fl, "--file=") {
+			return NoMatch, ""
+		}
+		// Combined short flags like `-ni`, `-in`, `-nf`.
+		if strings.HasPrefix(fl, "-") && !strings.HasPrefix(fl, "--") && len(fl) > 1 {
+			for _, ch := range fl[1:] {
+				switch ch {
+				case 'n':
+					hasN = true
+				case 'i', 'f':
+					return NoMatch, ""
+				}
+			}
+		}
+	}
+	if !hasN {
+		return NoMatch, ""
+	}
+	// The first positional is the sed script. Subsequent positionals
+	// are input file paths — not scanned (a filename like `/tmp/file`
+	// would false-positive on the 'e' in "file").
+	if len(c.Positional) == 0 {
+		return NoMatch, ""
+	}
+	if containsSedEscape(c.Positional[0]) {
+		return NoMatch, ""
+	}
+	return Match, r.RuleName
+}
+
+func containsSedEscape(script string) bool {
+	for _, ch := range script {
+		switch ch {
+		case 'w', 'W', 'e', 'E', 'r', 'R':
+			return true
+		}
+	}
+	return false
+}
+
 // --- HeredocWrite ---
 
 // HeredocWrite matches `cat > <path> <<'MARKER' ... EOF` patterns where the

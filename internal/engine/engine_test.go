@@ -200,8 +200,8 @@ func newEngineWithLLM(t *testing.T, classifier llm.Classifier, shadow bool) *Eng
 func TestEngine_LLM_SafeAllowsWhenLowerTiersDidntFire(t *testing.T) {
 	stub := &stubClassifier{verdict: llm.VerdictSafe}
 	e := newEngineWithLLM(t, stub, false)
-	// Use a command that has a pipe so anchored_command can't fire.
-	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep -i localhost"})
+	// Use a command that no tier-1/2 rule matches so LLM tier fires.
+	out := e.Decide(Input{ToolName: "Bash", Command: "gcloud projects describe my-proj"})
 	if out.Verdict != Allow {
 		t.Errorf("Verdict = %v, want Allow (LLM safe)", out.Verdict)
 	}
@@ -217,7 +217,7 @@ func TestEngine_LLM_UnsafeFallsThrough(t *testing.T) {
 	// "unsafe" is approve-only — engine must NOT block, falls through.
 	stub := &stubClassifier{verdict: llm.VerdictUnsafe}
 	e := newEngineWithLLM(t, stub, false)
-	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep -i localhost"})
+	out := e.Decide(Input{ToolName: "Bash", Command: "gcloud projects describe my-proj"})
 	if out.Verdict != Continue {
 		t.Errorf("Verdict = %v, want Continue (unsafe → fall-through)", out.Verdict)
 	}
@@ -236,7 +236,7 @@ func TestEngine_LLM_UnsafeFallsThrough(t *testing.T) {
 func TestEngine_LLM_UnsureFallsThrough(t *testing.T) {
 	stub := &stubClassifier{verdict: llm.VerdictUnsure}
 	e := newEngineWithLLM(t, stub, false)
-	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep -i localhost"})
+	out := e.Decide(Input{ToolName: "Bash", Command: "gcloud projects describe my-proj"})
 	if out.Verdict != Continue {
 		t.Errorf("Verdict = %v, want Continue (unsure)", out.Verdict)
 	}
@@ -282,7 +282,7 @@ func TestEngine_LLM_BlockedByOpenCircuit(t *testing.T) {
 		Breaker:  br,
 	})
 
-	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep foo"})
+	out := e.Decide(Input{ToolName: "Bash", Command: "gcloud projects describe my-proj"})
 	if stub.calls != 0 {
 		t.Errorf("LLM should be skipped while circuit open; got %d calls", stub.calls)
 	}
@@ -306,7 +306,7 @@ func TestEngine_LLM_RecordsBreakerFailureOnError(t *testing.T) {
 		Breaker:  br,
 	})
 
-	e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep foo"})
+	e.Decide(Input{ToolName: "Bash", Command: "gcloud projects describe my-proj"})
 
 	state, _ := br.State()
 	if state == nil || state.Status != "open" {
@@ -318,7 +318,7 @@ func TestEngine_LLM_ShadowMode_PopulatesTraceWithoutAllowing(t *testing.T) {
 	stub := &stubClassifier{verdict: llm.VerdictSafe}
 	e := newEngineWithLLM(t, stub, true) // shadow mode
 
-	out := e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep foo"})
+	out := e.Decide(Input{ToolName: "Bash", Command: "gcloud projects describe my-proj"})
 	if out.Verdict != Continue {
 		t.Errorf("shadow mode must never auto-allow; got %v", out.Verdict)
 	}
@@ -345,7 +345,7 @@ func TestEngine_Verifier_AgreementMarksEntryVerified(t *testing.T) {
 		Cache:    cch,
 	})
 
-	cmd := "cat /etc/hosts | grep foo"
+	cmd := "gcloud projects describe my-proj"
 	e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 	e.AwaitVerifications(5 * time.Second)
 
@@ -423,7 +423,7 @@ func TestEngine_Verifier_NilDoesNotPanic(t *testing.T) {
 		Cache:    cch,
 	})
 
-	out := e.Decide(Input{ToolName: "Bash", Command: "ls -la | grep foo", CWD: "/tmp"})
+	out := e.Decide(Input{ToolName: "Bash", Command: "gcloud projects describe my-proj", CWD: "/tmp"})
 	if out.Verdict != Allow {
 		t.Errorf("Verdict = %v", out.Verdict)
 	}
@@ -449,7 +449,7 @@ func TestEngine_Verifier_FailureLeavesEntryUnverified(t *testing.T) {
 		Cache:    cch,
 	})
 
-	cmd := "ls -la | grep foo"
+	cmd := "gcloud projects describe my-proj"
 	e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 	e.AwaitVerifications(5 * time.Second)
 
@@ -760,7 +760,7 @@ func TestEngine_ProjectConfig_HashFeedsIntoCacheKey(t *testing.T) {
 		},
 	})
 
-	cmd := "cat /etc/hosts | grep foo"
+	cmd := "gcloud projects describe my-proj"
 	cwd := "/tmp/project"
 
 	// e1 writes a cache entry under hash-v1.
@@ -921,7 +921,7 @@ func TestAsync_SyncArrivalUnchanged(t *testing.T) {
 	e, cch, _ := newEngineForAsync(t, stub)
 
 	// Use a command without tier-1/2 match so the LLM tier fires.
-	cmd := "cat /etc/hosts | grep localhost"
+	cmd := "gcloud projects describe my-proj"
 	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 
 	if out.Verdict != Allow {
@@ -947,7 +947,7 @@ func TestAsync_TimeoutThenSafe(t *testing.T) {
 	withLLMDeadlines(t, 100*time.Millisecond, 2*time.Second)
 	e, cch, logBuf := newEngineForAsync(t, stub)
 
-	cmd := "cat /etc/hosts | grep localhost"
+	cmd := "gcloud projects describe my-proj"
 	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 
 	if out.Verdict != Continue {
@@ -994,7 +994,7 @@ func TestAsync_TimeoutThenUnsafe(t *testing.T) {
 	withLLMDeadlines(t, 100*time.Millisecond, 2*time.Second)
 	e, cch, logBuf := newEngineForAsync(t, stub)
 
-	cmd := "cat /etc/hosts | grep localhost"
+	cmd := "gcloud projects describe my-proj"
 	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 
 	if out.Verdict != Continue {
@@ -1049,7 +1049,7 @@ func TestAsync_TimeoutThenError(t *testing.T) {
 		AppLog:   slog.New(slog.NewJSONHandler(buf, nil)),
 	})
 
-	cmd := "cat /etc/hosts | grep localhost"
+	cmd := "gcloud projects describe my-proj"
 	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 
 	if ok := e.AwaitVerifications(5 * time.Second); !ok {
@@ -1096,7 +1096,7 @@ func TestAsync_AbsoluteDeadlineAbandon(t *testing.T) {
 		AppLog:   slog.New(slog.NewJSONHandler(buf, nil)),
 	})
 
-	cmd := "cat /etc/hosts | grep localhost"
+	cmd := "gcloud projects describe my-proj"
 	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 
 	// AwaitVerifications should return once the goroutine cleans up,
@@ -1136,7 +1136,7 @@ func TestAsync_AwaitVerifications_EarlyDeadlineDoesNotLeak(t *testing.T) {
 	withLLMDeadlines(t, 100*time.Millisecond, 3*time.Second)
 	e, cch, _ := newEngineForAsync(t, stub)
 
-	cmd := "cat /etc/hosts | grep localhost"
+	cmd := "gcloud projects describe my-proj"
 	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 
 	// First: short deadline — goroutine still running, returns false.
@@ -1168,7 +1168,7 @@ func TestAsync_ConcurrentDecideCalls(t *testing.T) {
 	const n = 10
 	cmds := make([]string, n)
 	for i := 0; i < n; i++ {
-		cmds[i] = "echo concurrent" + string(rune('A'+i)) + " | wc -l"
+		cmds[i] = "gcloud projects describe concurrent" + string(rune('A'+i))
 	}
 
 	var wg sync.WaitGroup
@@ -1208,7 +1208,7 @@ func TestAsync_SyncWinsRaceRegression(t *testing.T) {
 	withLLMDeadlines(t, 500*time.Millisecond, 2*time.Second)
 	e, cch, logBuf := newEngineForAsync(t, stub)
 
-	cmd := "cat /etc/hosts | grep localhost"
+	cmd := "gcloud projects describe my-proj"
 	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 
 	if out.Verdict != Allow {
@@ -1258,7 +1258,7 @@ func TestUnsafeReview_VerifierFlipsToSafe(t *testing.T) {
 		AppLog:   slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)),
 	})
 
-	cmd := "cat /etc/hosts | grep -i localhost"
+	cmd := "gcloud projects describe my-proj"
 	out := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 
 	// This call falls through to user (fast said unsafe).
@@ -1317,7 +1317,7 @@ func TestUnsafeReview_VerifierAgrees(t *testing.T) {
 		Cache:    cch,
 		AppLog:   slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)),
 	})
-	cmd := "cat /etc/hosts | grep -i localhost"
+	cmd := "gcloud projects describe my-proj"
 	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 	if ok := e.AwaitVerifications(5 * time.Second); !ok {
 		t.Fatal("AwaitVerifications timed out")
@@ -1344,7 +1344,7 @@ func TestUnsafeReview_VerifierUnsure(t *testing.T) {
 		Cache:    cch,
 		AppLog:   slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)),
 	})
-	cmd := "cat /etc/hosts | grep -i localhost"
+	cmd := "gcloud projects describe my-proj"
 	_ = e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
 	if ok := e.AwaitVerifications(5 * time.Second); !ok {
 		t.Fatal("AwaitVerifications timed out")
@@ -1369,7 +1369,7 @@ func TestUnsafeReview_NoVerifier(t *testing.T) {
 		Cache:    cch,
 		// Verifier intentionally nil
 	})
-	_ = e.Decide(Input{ToolName: "Bash", Command: "cat /etc/hosts | grep x", CWD: "/tmp"})
+	_ = e.Decide(Input{ToolName: "Bash", Command: "gcloud projects describe my-proj", CWD: "/tmp"})
 	if ok := e.AwaitVerifications(100 * time.Millisecond); !ok {
 		t.Error("AwaitVerifications hung when no verifier is configured")
 	}

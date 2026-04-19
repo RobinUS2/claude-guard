@@ -7,7 +7,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/RobinUS2/claude-guard/internal/version"
@@ -88,14 +87,6 @@ func run(args []string) int {
 		return cmdEvalPrompt(args[1:])
 	case "bench":
 		return cmdBench(args[1:])
-	case "stop":
-		// Stop hook stub. The full implementation lives on
-		// feat/stop-hook (commit 5705dfe). On branches without
-		// it, settings.json may already point a Stop hook here;
-		// we drain stdin and exit 0 so Claude Code's stop
-		// pipeline isn't disrupted.
-		_, _ = io.Copy(io.Discard, os.Stdin)
-		return 0
 	case "version", "--version", "-v":
 		fmt.Println(version.Version)
 		return 0

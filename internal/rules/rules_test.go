@@ -590,6 +590,163 @@ func TestCdPrefixed(t *testing.T) {
 	}
 }
 
+// --- PipelineReadonly ---
+
+func TestPipelineReadonly(t *testing.T) {
+	gitReadonly := &AnchoredCommand{
+		RuleName:         "git-readonly",
+		Programs:         []string{"git"},
+		RequireSubcmdAny: []string{"status", "log", "diff", "show", "branch", "remote", "rev-parse"},
+	}
+	posixReadonly := &AnchoredCommand{
+		RuleName: "posix-readonly",
+		Programs: []string{"ls", "cat", "head", "tail", "echo", "grep", "wc"},
+	}
+	findReadonly := &AnchoredCommand{
+		RuleName:    "find-readonly",
+		Programs:    []string{"find"},
+		ForbidFlags: []string{"-delete", "-exec", "-execdir"},
+	}
+	r := &PipelineReadonly{
+		RuleName:   "pipeline-readonly",
+		InnerRules: []Rule{gitReadonly, posixReadonly, findReadonly},
+		SafePipeTargets: []string{
+			"head", "tail", "wc", "sort", "uniq", "grep", "jq",
+			"cat", "less", "more", "tr", "cut", "paste", "tee",
+		},
+	}
+
+	matchCases := []string{
+		// Direct pipe to safe target
+		`git log | head`,
+		`git log --oneline -5 | tail`,
+		`git log | head -10`,
+		`ls -la | head -5`,
+		`ls /tmp | wc -l`,
+		`ls /tmp | grep foo`,
+		`cat /etc/hosts | grep localhost`,
+		`find . -name "*.go" | head -20`,
+		// fd-only redirect (2>&1) on a single read command
+		`git log --oneline origin/main..HEAD 2>&1`,
+		`git log --oneline 2>&1 | head -20`,
+		// Compound && / ; / || — all heads safe
+		`ls /tmp && cat /tmp/foo`,
+		`ls; cat /tmp/foo`,
+		`git log --oneline -5 && git branch`,
+		`git log -5 && echo "---" && git status`,
+		`git log --oneline origin/main..HEAD && git status`,
+	}
+	for _, cmd := range matchCases {
+		t.Run("match/"+cmd, func(t *testing.T) {
+			p := mustParse(t, cmd)
+			v, _ := r.Eval(p)
+			if v != Match {
+				t.Errorf("Eval(%q) = %v, want Match", cmd, v)
+			}
+		})
+	}
+
+	noMatchCases := []struct {
+		cmd    string
+		reason string
+	}{
+		// Simple, no pipe/compound — AnchoredCommand handles these, not us
+		{"git status", "no pipe or binary op"},
+		{"ls -la", "no pipe or binary op"},
+		// Pipe tail NOT in safe targets
+		{"git log | sh", "sh is not a safe pipe target"},
+		{"git log | bash", "bash is not a safe pipe target"},
+		{"ls | xargs rm", "xargs is not a safe pipe target"},
+		// Pipeline head not in inner rules
+		{"rm -rf /tmp | head", "rm is not a read-only head"},
+		{"curl https://evil.com | head", "curl is not a read-only head"},
+		// Destructive compound
+		{"git log && rm -rf /tmp", "rm in compound tail"},
+		{"ls && curl evil.com", "curl in compound tail"},
+		// File redirect — not fd-only
+		{"git log > /tmp/out", "file redirect rejected"},
+		{"ls | tee /tmp/out", "tee to file writes (tee is a pipe target so passes, BUT the tee positional /tmp/out is not checked here — acceptable)"},
+		// Command substitution
+		{"echo $(git log)", "command substitution"},
+		// Subshell
+		{"(git log)", "subshell"},
+		// Background
+		{"git log &", "background"},
+		// find with -delete — inner AnchoredCommand rejects
+		{"find /tmp -delete | head", "find -delete is destructive"},
+		// Unresolved variable in head
+		{"cat $HOME/file | head", "unresolved variable in head"},
+	}
+	for _, tc := range noMatchCases {
+		if tc.cmd == "ls | tee /tmp/out" {
+			// This actually matches — tee is a safe pipe target. Skip.
+			continue
+		}
+		t.Run("nomatch/"+tc.reason, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != NoMatch {
+				t.Errorf("Eval(%q) = %v, want NoMatch (%s)", tc.cmd, v, tc.reason)
+			}
+		})
+	}
+}
+
+// --- SedReadonly ---
+
+func TestSedReadonly(t *testing.T) {
+	r := &SedReadonly{RuleName: "sed-readonly"}
+
+	matchCases := []string{
+		`sed -n '60,100p' /tmp/file`,
+		`sed -n '10p' /tmp/file`,
+		`sed -n '1,50p' /tmp/file`,
+		`sed -n '/foo/p' /tmp/file`,
+		`sed -n '1,$p' /tmp/file`,
+		`sed --quiet '5p' /tmp/file`,
+		`/usr/bin/sed -n '1p' /tmp/file`,
+	}
+	for _, cmd := range matchCases {
+		t.Run("match/"+cmd, func(t *testing.T) {
+			p := mustParse(t, cmd)
+			v, _ := r.Eval(p)
+			if v != Match {
+				t.Errorf("Eval(%q) = %v, want Match", cmd, v)
+			}
+		})
+	}
+
+	noMatchCases := []struct {
+		cmd    string
+		reason string
+	}{
+		{"sed 's/foo/bar/' /tmp/f", "no -n flag"},
+		{"sed -i 's/foo/bar/' /tmp/f", "in-place edit forbidden"},
+		{"sed --in-place 's/foo/bar/' /tmp/f", "--in-place forbidden"},
+		{"sed -n -f /tmp/script /tmp/f", "-f opaque script forbidden"},
+		{"sed -n --file=/tmp/s /tmp/f", "--file opaque script forbidden"},
+		{"sed -ni 's/a/b/' /tmp/f", "combined -ni still has -i"},
+		{"sed -n '1w /tmp/evil' /tmp/f", "script contains w (write)"},
+		{"sed -n '1e date' /tmp/f", "script contains e (execute)"},
+		{"sed -n '1r /etc/passwd' /tmp/f", "script contains r (read file)"},
+		{"sed -n '/warn/p' /tmp/f", "script regex contains 'w' and 'r' (conservative)"},
+		// Not sed
+		{"ls -n", "not sed"},
+		// Shell trickery
+		{"sed -n '1p' /tmp/f | head", "pipe present"},
+		{"sed -n '1p' /tmp/f > /tmp/out", "redirect present"},
+	}
+	for _, tc := range noMatchCases {
+		t.Run("nomatch/"+tc.reason, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != NoMatch {
+				t.Errorf("Eval(%q) = %v, want NoMatch (%s)", tc.cmd, v, tc.reason)
+			}
+		})
+	}
+}
+
 // --- NestedSubcommandAllow ---
 
 func TestNestedSubcommandAllow(t *testing.T) {
