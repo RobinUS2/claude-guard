@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -91,6 +93,11 @@ func TestParseTranscript_StringContent(t *testing.T) {
 }
 
 func TestCmdStop_OpenTodosFires(t *testing.T) {
+	// Remove any stale session state from prior runs so the cool-down doesn't skip the rule.
+	stale := filepath.Join(os.TempDir(), "claude-guard-stop-todo-test.json")
+	os.Remove(stale)
+	t.Cleanup(func() { os.Remove(stale) })
+
 	// A session with an uncompleted todo → open-todo-items rule should fire.
 	payload := `{
 		"session_id":"todo-test",
