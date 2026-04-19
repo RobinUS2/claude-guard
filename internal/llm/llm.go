@@ -115,6 +115,12 @@ type ClassifyInput struct {
 	// targets) that helps the LLM reason about what the command will
 	// actually do. Already capped in size by internal/projectctx.
 	ProjectContext string
+	// FileContent is the content of the file referenced by a runner
+	// command (go run, python, etc.). Empty if not a runner, file too
+	// large, or budget exhausted.
+	FileContent string
+	// FilePath is the path of the referenced file (for prompt context).
+	FilePath string
 }
 
 // Classifier is the provider-agnostic interface. AnthropicClassifier and
@@ -260,6 +266,11 @@ func buildUserMessage(in ClassifyInput) string {
 	if in.ProjectContext != "" {
 		b.WriteString("\nPROJECT CONTEXT (for commands that execute project-defined scripts):\n")
 		b.WriteString(in.ProjectContext)
+		b.WriteString("\n")
+	}
+	if in.FileContent != "" {
+		b.WriteString(fmt.Sprintf("\nREFERENCED FILE (%s, %d bytes):\n", in.FilePath, len(in.FileContent)))
+		b.WriteString(in.FileContent)
 		b.WriteString("\n")
 	}
 	b.WriteString("\nReturn JSON only with these fields:\n")

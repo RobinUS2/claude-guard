@@ -60,6 +60,28 @@ func TestKey_PromptVersionChangesKey(t *testing.T) {
 	}
 }
 
+func TestKey_DiffersWithFileContentHash(t *testing.T) {
+	base := KeyInputs{
+		Tool:    "Bash",
+		Command: "go run /tmp/test.go",
+		CWD:     "/home/user/project",
+	}
+	withHash := base
+	withHash.FileContentHash = "abc123"
+
+	k1 := Key(base)
+	k2 := Key(withHash)
+	if k1 == k2 {
+		t.Fatal("keys should differ when FileContentHash differs")
+	}
+}
+
+func TestSchemaVersion_Is7(t *testing.T) {
+	if SchemaVersion != "7" {
+		t.Errorf("SchemaVersion = %q, want \"7\"", SchemaVersion)
+	}
+}
+
 func TestPutGet(t *testing.T) {
 	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
 	c := newTestCache(t, now)

@@ -81,6 +81,7 @@ func cmdDecide(_ []string) int {
 		cch = cache.New(filepath.Join(cacheRoot, "verdicts"))
 	}
 	redactor := redact.New(nil, nil)
+	bgt := budget.New(cacheRoot, cfg.DailyBudget.LLMCalls, cfg.DailyBudget.FileAnalysisCalls)
 
 	// BQ byte budget: 100 GB per day by default.
 	const defaultBQDailyLimitGB = 100
@@ -185,6 +186,7 @@ func cmdDecide(_ []string) int {
 		LLM:                 classifier,
 		Verifier:            verifier,
 		Breaker:             br,
+		Budget:              bgt,
 		Cache:               cch,
 		Legacy:              legacyList,
 		ProjectConfigLoader: projectconfig.Load,

@@ -11,6 +11,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +25,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/budget"
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/filectx"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
@@ -88,6 +91,11 @@ type Input struct {
 	FilePath string // Read, Write, Edit
 	IsWrite  bool   // true for Write, Edit
 	Content  string // Write content (for secret scan; NOT sent to LLM)
+
+	// FileContent and RunnerFilePath are populated by Decide() for runner
+	// commands. Not set by external callers (decide.go).
+	FileContent    string // file contents for LLM context
+	RunnerFilePath string // path of the referenced file (distinct from FilePath used by Read/Write/Edit)
 }
 
 // Output is the engine's decision plus metadata for logging/debugging.
@@ -126,6 +134,7 @@ type Engine struct {
 	llm      llm.Classifier
 	verifier llm.Classifier // optional cross-provider verifier
 	breaker  *breaker.Breaker
+	budget   *budget.Budget
 	cache    *cache.Cache
 	legacy   *legacy.AllowList   // tier 5: migrated allow list from settings.json
 	bqBudget *budget.BQBudget    // BQ pre-flight budget tracker (nil = disabled)
@@ -168,6 +177,7 @@ type Options struct {
 	// LLM for the strongest cross-model signal.
 	Verifier llm.Classifier
 	Breaker  *breaker.Breaker
+	Budget   *budget.Budget
 	Cache    *cache.Cache
 	// Legacy is the migrated allow list from settings.json. Tier 5.
 	// Used as a safety net during phase 4 of the rollout — anything
@@ -203,6 +213,7 @@ func NewWithOptions(opts Options) *Engine {
 		llm:                 opts.LLM,
 		verifier:            opts.Verifier,
 		breaker:             opts.Breaker,
+		budget:              opts.Budget,
 		cache:               opts.Cache,
 		legacy:              opts.Legacy,
 		projectConfigLoader: opts.ProjectConfigLoader,
@@ -448,6 +459,36 @@ func (e *Engine) Decide(in Input) Output {
 		}
 	}
 
+	// File content extraction for runner commands. Must happen before
+	// cache lookup so the FileContentHash participates in the cache key.
+	var fileContent, filePath, fileContentHash string
+	if parsed != nil {
+		for _, call := range parsed.Calls {
+			fc := filectx.Extract(call)
+			if fc == nil {
+				continue
+			}
+			if fc.Skipped {
+				break
+			}
+			// Check file-analysis budget.
+			if e.budget != nil && !e.budget.Check(true) {
+				e.appLog().Warn("file_analysis_budget_exhausted",
+					"path", fc.Path,
+					"tool_use_id", in.ToolUseID,
+				)
+				break
+			}
+			fileContent = fc.Content
+			filePath = fc.Path
+			h := sha256.Sum256([]byte(fc.Content))
+			fileContentHash = hex.EncodeToString(h[:])
+			break // first file only
+		}
+	}
+	in.FileContent = fileContent
+	in.RunnerFilePath = filePath
+
 	// Tier 3: cache lookup (only when there's an LLM to back it — caching
 	// deterministic verdicts adds latency for no gain since they're already
 	// sub-millisecond).
@@ -467,7 +508,8 @@ func (e *Engine) Decide(in Input) Output {
 		// MakefileHash: populated for `make <target>` shapes so a
 		// cached LLM verdict invalidates when the Makefile content
 		// changes. Empty for all other commands.
-		MakefileHash: projectctx.MakefileHash(in.CWD, in.Command),
+		MakefileHash:    projectctx.MakefileHash(in.CWD, in.Command),
+		FileContentHash: fileContentHash,
 	}
 	var globalKey, projectKey string
 	if e.cache != nil && e.llm != nil {
@@ -574,9 +616,14 @@ func (e *Engine) Decide(in Input) Output {
 	}
 
 	// Tier 4: LLM classifier (approve-only).
-	if e.llm != nil {
+	llmBudgetOK := e.budget == nil || e.budget.Check(false)
+	if e.llm != nil && llmBudgetOK {
 		llmVerdict := e.runLLMTier(in, keyInputs, globalKey, projectKey)
 		out.Shadow.Tier4LLM = llmVerdict.shadow
+		// Record budget usage after LLM call (sync path).
+		if e.budget != nil {
+			e.budget.Record(fileContent != "")
+		}
 		// Cache safe verdicts so the next identical command is instant.
 		// persistLLMAllow handles scope selection, canonical-form
 		// caching, and verifier spawn. Shared with the async timeout
@@ -609,6 +656,8 @@ func (e *Engine) Decide(in Input) Output {
 			e.record(in, out)
 			return out
 		}
+	} else if !llmBudgetOK {
+		e.appLog().Warn("llm_budget_exhausted", "tool_use_id", in.ToolUseID)
 	}
 
 	// Tier 5: legacy allow list (migrated from settings.json).
@@ -714,6 +763,8 @@ func (e *Engine) runLLMTier(
 		Description:    in.Description,
 		CWD:            in.CWD,
 		ProjectContext: projCtx,
+		FileContent:    in.FileContent,
+		FilePath:       in.RunnerFilePath,
 	}
 
 	type outcome struct {
@@ -818,6 +869,10 @@ func (e *Engine) runLLMTier(
 				slots:  o.dec.VariableSlots,
 			}
 			e.persistLLMAllow(in, v, keyInputs, globalKey, projectKey)
+			// Record budget usage (async path).
+			if e.budget != nil {
+				e.budget.Record(in.FileContent != "")
+			}
 			e.appLog().Info("async_llm_completed",
 				"verdict", "safe",
 				"scope", string(scope),
@@ -974,6 +1029,8 @@ func (e *Engine) spawnUnsafeReview(
 			Command:     cmd,
 			Description: in.Description,
 			CWD:         in.CWD,
+			FileContent: in.FileContent,
+			FilePath:    in.RunnerFilePath,
 		})
 		if err != nil {
 			e.appLog().Warn("unsafe_review_error",
@@ -1316,6 +1373,8 @@ func (e *Engine) spawnVerification(cacheKey, canonicalKey string, in Input) {
 			Command:     cmd,
 			Description: in.Description,
 			CWD:         in.CWD,
+			FileContent: in.FileContent,
+			FilePath:    in.RunnerFilePath,
 		})
 		if err != nil {
 			e.appLog().Warn("verifier_error",

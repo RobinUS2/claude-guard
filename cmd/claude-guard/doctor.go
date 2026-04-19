@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/RobinUS2/claude-guard/internal/budget"
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
@@ -134,6 +135,18 @@ func cmdDoctor(_ []string) int {
 				check("llm:cache", true, detail)
 			}
 		}
+	}
+
+	// 6b2. Budget status
+	cacheRoot := filepath.Join(home, ".cache", "claude-guard")
+	bgt := budget.New(cacheRoot, cfg.DailyBudget.LLMCalls, cfg.DailyBudget.FileAnalysisCalls)
+	bs := bgt.Status()
+	budgetDetail := fmt.Sprintf("%d/%d LLM, %d/%d file-analysis",
+		bs.LLMUsed, bs.LLMLimit, bs.FileUsed, bs.FileLimit)
+	if bs.LLMUsed >= bs.LLMLimit || bs.FileUsed >= bs.FileLimit {
+		warn("budget", budgetDetail+" (EXHAUSTED)")
+	} else {
+		check("budget", true, budgetDetail)
 	}
 
 	// 6c. Tier 5 legacy allow list

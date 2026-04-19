@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -96,6 +97,39 @@ func TestAutoSelect_EarlierAliasWins(t *testing.T) {
 	}
 	if ac.APIKey != "first" {
 		t.Errorf("expected canonical key to win; got %q", ac.APIKey)
+	}
+}
+
+// --- buildUserMessage with file content ---
+
+func TestBuildUserMessage_WithFileContent(t *testing.T) {
+	in := ClassifyInput{
+		Command:     "go run /tmp/test.go",
+		Description: "Run test file",
+		CWD:         "/home/user",
+		FileContent: "package main\nfunc main() {}\n",
+		FilePath:    "/tmp/test.go",
+	}
+	msg := buildUserMessage(in)
+	if !strings.Contains(msg, "REFERENCED FILE") {
+		t.Error("message should contain REFERENCED FILE section")
+	}
+	if !strings.Contains(msg, "/tmp/test.go") {
+		t.Error("message should contain file path")
+	}
+	if !strings.Contains(msg, "package main") {
+		t.Error("message should contain file content")
+	}
+}
+
+func TestBuildUserMessage_WithoutFileContent(t *testing.T) {
+	in := ClassifyInput{
+		Command: "git status",
+		CWD:     "/home/user",
+	}
+	msg := buildUserMessage(in)
+	if strings.Contains(msg, "REFERENCED FILE") {
+		t.Error("message should NOT contain REFERENCED FILE when no file content")
 	}
 }
 
