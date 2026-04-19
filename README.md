@@ -6,16 +6,40 @@ Smart PreToolUse guard for Claude Code. AST-based deterministic deny, semantic L
 
 ## What it does
 
-Runs as a `PreToolUse` hook on the `Bash` tool. Every Bash command Claude Code is about to run is parsed into a shell AST and evaluated against a tiered rule engine:
+Runs as a `PreToolUse` hook on every tool Claude Code invokes. Each tool is routed to a dedicated evaluator:
+
+- **Bash** — shell AST analysis. The same six-tier pipeline applies: instant block / instant allow / cache / LLM classifier / legacy globs / default user prompt.
+- **Read / Write / Edit** — CWD scope check + secret scan + protected-path deny (`.ssh/`, `.aws/credentials`, `.bashrc`, etc.).
+- **WebFetch / WebSearch** — SSRF guards (loopback, private CIDRs, cloud metadata, `file://`, `gopher://`) + credential-path deny.
+- **Agent / MCP** — structural allowlist for harness-only tools (`Agent`, `ToolSearch`, `TodoWrite`, `mcp__ccd_session__*`, `mcp__mcp-registry__*`); read-verb heuristic for other MCPs (`list-*`, `get-*`); writes fall through to LLM tier.
+- **Everything else** — fall through to LLM, or to the user prompt if no LLM is configured.
+
+The Bash six-tier pipeline:
 
 1. **Instant block** (AST-based) — `rm -rf` on system dirs, `curl | sh`, force-push to protected branches, `sudo`, credential exfil patterns. Matches against parsed command nodes, not raw strings, so `R=rm; $R -rf /` is caught the same as `rm -rf /`.
-2. **Instant allow** (AST-based) — read-only commands (`ls`, `cat`, `git status`, `gcloud ... list`, `terraform plan`, etc.) but only when they have no redirections, pipes, subshells, or command substitution.
+2. **Instant allow** (AST-based) — read-only commands (`ls`, `cat`, `git status`, `gcloud ... list`, `terraform plan`, `kubectl get pods`, etc.) but only when they have no pipes, subshells, command substitution, or redirections (other than `2>&1`).
 3. **Cache** — prior verdicts keyed by `sha256(tool + command + cwd + branch + prompt_version + config_hash)`.
 4. **LLM classifier** (approve-only) — Haiku 4.5 judges semantic safety. Can only auto-approve; blocks stay deterministic.
 5. **Legacy allow list** — migrated glob patterns from your existing `settings.json` `permissions.allow`.
 6. **Default** — fall through to normal Claude Code user prompt.
 
 Design doc: [`docs/plans/2026-04-15-claude-guard.md`](https://github.com/RobinUS2/cto-as-a-service/blob/main/docs/plans/2026-04-15-claude-guard.md) (in the cto-as-a-service repo).
+
+## Known limits
+
+- **`NestedSubcommandAllow` matches the FIRST or LAST positional against the safe-verb list.** So
+  `gcloud projects list` and `kubectl get pods` both auto-allow, but `gcloud projects describe my-project`
+  does not (`my-project` is the tail and isn't a safe verb). Falls through to the LLM tier — or the user
+  prompt when no LLM key is set.
+- **Under Claude Code, no API key is exported to subprocesses.** Claude Code uses OAuth, so the hook's
+  LLM tier is silently disabled inside `claude-guard decide`. Commands that don't match a tier-1 or
+  tier-2 rule fall through to a `continue` verdict and the user is prompted. Two fixes:
+  1. `export ANTHROPIC_API_KEY=...` in your shell profile / `.envrc` so the subprocess inherits it; or
+  2. Rely on tier-2 only and accept user prompts for everything else.
+  `claude-guard doctor` flags this as ERROR-level (not just warn) when `CLAUDECODE=1` is detected.
+- **`gsutil ls gs://my-bucket` does NOT auto-allow** — the positional `gs://my-bucket` fails the safe-identifier
+  check (`/`, `:` not allowed). `gsutil ls` (bare) does. This is intentional: arbitrary paths/URLs
+  shouldn't be implicitly trusted by structural rules.
 
 ## Quickstart
 
