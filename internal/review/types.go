@@ -10,8 +10,8 @@ import "time"
 type Case struct {
 	Timestamp time.Time `json:"ts"`
 	ToolName  string    `json:"tool"`
-	Command   string    `json:"command"`   // truncated to 200 chars
-	Verdict   string    `json:"verdict"`   // allow, deny, continue
+	Command   string    `json:"command"` // truncated to 200 chars
+	Verdict   string    `json:"verdict"` // allow, deny, continue
 	Tier      string    `json:"tier"`
 	Rule      string    `json:"rule"`
 	Reason    string    `json:"reason"`
@@ -94,9 +94,9 @@ type PromptHint struct {
 // ReviewLogEntry is one line in review-log.jsonl.
 type ReviewLogEntry struct {
 	Timestamp      time.Time `json:"ts"`
-	Action         string    `json:"action"`         // add_rule, add_hint, trim_legacy
-	Target         string    `json:"target"`         // file name
-	Key            string    `json:"key"`            // rule name / hint index / pattern
+	Action         string    `json:"action"` // add_rule, add_hint, trim_legacy
+	Target         string    `json:"target"` // file name
+	Key            string    `json:"key"`    // rule name / hint index / pattern
 	Reason         string    `json:"reason"`
 	RollbackAction string    `json:"rollback_action"` // remove_rule, remove_hint, add_legacy
 	PreviousState  string    `json:"previous_state,omitempty"`
@@ -105,12 +105,12 @@ type ReviewLogEntry struct {
 // ValidatedPlan is the output of Validate — changes that passed
 // safety checks, ready to apply.
 type ValidatedPlan struct {
-	AcceptedRules  []ShapeRecommendation
-	AcceptedHints  []HintRecommendation
-	AcceptedTrims  []TrimRecommendation
-	RejectedRules  []RejectedItem
-	RejectedHints  []RejectedItem
-	Summary        string
+	AcceptedRules []ShapeRecommendation
+	AcceptedHints []HintRecommendation
+	AcceptedTrims []TrimRecommendation
+	RejectedRules []RejectedItem
+	RejectedHints []RejectedItem
+	Summary       string
 }
 
 // RejectedItem is a recommendation that failed validation.

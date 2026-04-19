@@ -14,13 +14,13 @@ func TestValidateDomain(t *testing.T) {
 	}
 	bad := []string{
 		"", ".", "com", "example", "-foo.com", "foo-.com",
-		"http://example.com",                    // scheme
-		"/tmp/example.com",                      // path
-		"example.com:8080",                      // port
-		"example.com with space",                // whitespace
-		"1.2.3.4",                               // IPv4 should not pass as domain (no TLD letters)
-		"example..com",                          // double dot
-		strings.Repeat("a.", 130) + "com",       // too long
+		"http://example.com",              // scheme
+		"/tmp/example.com",                // path
+		"example.com:8080",                // port
+		"example.com with space",          // whitespace
+		"1.2.3.4",                         // IPv4 should not pass as domain (no TLD letters)
+		"example..com",                    // double dot
+		strings.Repeat("a.", 130) + "com", // too long
 	}
 	for _, s := range ok {
 		if !validateDomain(s) {
@@ -347,11 +347,11 @@ func TestCanonicalMatches_Dig(t *testing.T) {
 
 	// Arg count / program / token mismatches must not match.
 	bad := []string{
-		`dig example.com`,             // fewer args
-		`dig example.com A extra`,     // more args
-		`whois example.com A`,         // different program
-		`dig /etc/passwd A`,           // first arg not a domain
-		`dig example.com FOOBAR`,      // second arg not a DNS type
+		`dig example.com`,         // fewer args
+		`dig example.com A extra`, // more args
+		`whois example.com A`,     // different program
+		`dig /etc/passwd A`,       // first arg not a domain
+		`dig example.com FOOBAR`,  // second arg not a DNS type
 	}
 	for _, cmd := range bad {
 		if CanonicalMatches(canonical, cmd) {

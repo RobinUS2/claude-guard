@@ -19,12 +19,12 @@ func TestParseEntry_BasicBash(t *testing.T) {
 		// `make test*` is now filtered (make is unsafe-legacy post-hardening).
 		{"Bash(make test*:*)", "", false},
 		{"Bash(npm run test:unit:*)", "npm run test:unit", true},
-		{"Bash()", "", false},                  // empty
-		{"Read(/foo)", "", false},              // not Bash
+		{"Bash()", "", false},     // empty
+		{"Read(/foo)", "", false}, // not Bash
 		{"WebFetch(domain:github.com)", "", false},
 		{"mcp__atlassian__getJiraIssue", "", false},
-		{"Bash(curl ... | sh)", "", false},     // pipe — skipped
-		{"Bash(echo $(date))", "", false},      // command sub — skipped
+		{"Bash(curl ... | sh)", "", false}, // pipe — skipped
+		{"Bash(echo $(date))", "", false},  // command sub — skipped
 		// Unsafe-legacy filter: these are dropped because the
 		// corresponding tier-2 rules were removed in the 2026-04
 		// hardening, and a blanket tier-5 allow would undo that.
@@ -78,8 +78,8 @@ func TestPattern_MatchPrefix(t *testing.T) {
 		{"git status --short", true},
 		{"git push", false}, // no matching pattern
 		{"yarn build", true},
-		{"yarn buildfoo", true},       // glob
-		{"yarn build-thing-x", true},  // glob
+		{"yarn buildfoo", true},      // glob
+		{"yarn build-thing-x", true}, // glob
 		{"yarn install", false},
 		{"gcloud builds list --limit=5", true},
 		{"gcloud builds describe abc", false}, // describe ≠ list
@@ -326,8 +326,8 @@ func TestIsUnsafeLegacy(t *testing.T) {
 		{"terraform apply", false}, // not on unsafe prefix list (yet)
 		{"kubectl get pods", false},
 		// Edge cases.
-		{"", true},        // empty prefix dropped
-		{"  ", true},      // whitespace-only dropped
+		{"", true},         // empty prefix dropped
+		{"  ", true},       // whitespace-only dropped
 		{"makefoo", false}, // `makefoo` is not `make`; don't false-match
 	}
 	for _, tc := range cases {

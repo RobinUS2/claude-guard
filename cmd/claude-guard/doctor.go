@@ -37,6 +37,10 @@ func cmdDoctor(_ []string) int {
 	warn := func(name, detail string) {
 		fmt.Printf("[warn] %-34s %s\n", name, detail)
 	}
+	errf := func(name, detail string) {
+		fmt.Printf("[err]  %-34s %s\n", name, detail)
+		pass = false
+	}
 
 	// 1. Config load
 	cfgPath := config.DefaultConfigPath()
@@ -77,7 +81,20 @@ func cmdDoctor(_ []string) int {
 	// 5. LLM provider auto-selection from environment
 	classifier := llm.AutoSelect("anthropic", os.Getenv)
 	if classifier == nil {
-		warn("llm:provider", "no API key in env (set ANTHROPIC_API_KEY or GEMINI_API_KEY)")
+		// Under Claude Code (CLAUDECODE=1) this is load-bearing: OAuth
+		// does not expose an API key to subprocesses, so the hook's
+		// LLM tier silently disables. Commands that need LLM review
+		// fall through to a user prompt. Error, not warn.
+		if os.Getenv("CLAUDECODE") != "" {
+			errf("llm:provider",
+				"no ANTHROPIC_API_KEY / GEMINI_API_KEY in claude-guard subprocess env. Claude Code "+
+					"uses OAuth and does NOT export an API key to subprocesses — LLM tier is disabled. "+
+					"Commands that don't match tier 1/2 rules will fall through to a user prompt. Fix: "+
+					"export ANTHROPIC_API_KEY in your shell profile or .envrc, OR rely on tier-2 "+
+					"structural rules only.")
+		} else {
+			warn("llm:provider", "no API key in env (set ANTHROPIC_API_KEY or GEMINI_API_KEY)")
+		}
 	} else {
 		check("llm:provider", true, fmt.Sprintf("%s (model=%s)", classifier.Provider(), classifier.Model()))
 	}
@@ -196,7 +213,7 @@ func cmdDoctor(_ []string) int {
 		fmt.Println("overall: OK")
 		return 0
 	}
-	fmt.Println("overall: PROBLEMS FOUND — see lines marked [fail]")
+	fmt.Println("overall: PROBLEMS FOUND — see lines marked [fail] or [err]")
 	return 1
 }
 

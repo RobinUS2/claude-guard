@@ -28,12 +28,9 @@ yarn install
 yarn build
 pnpm install
 gcloud
-gcloud version
 gcloud builds submit
 gcloud run deploy
-gcloud projects list
 gcloud projects describe foo
-gcloud builds list
 gcloud secrets versions access latest --secret=foo
 docker build .
 docker run alpine
@@ -43,6 +40,35 @@ kubectl create secret generic foo
 terraform init
 terraform apply
 terraform destroy
+
+# --- Step 4.1: GCP CLI write/destructive shapes (must NOT auto-allow) ---
+gcloud projects delete my-project
+gcloud iam service-accounts create new-sa
+gcloud run deploy my-service --image=gcr.io/foo/bar
+gsutil cp /tmp/foo gs://my-bucket/
+gsutil rm gs://my-bucket/foo
+bq query --use_legacy_sql=false "DROP TABLE foo"
+kubectl delete pod my-pod
+gcloud projects list | xargs -I{} gcloud projects delete {}
+gcloud projects list > /tmp/out
+gcloud projects list --impersonate-service-account=attacker@evil.iam.gserviceaccount.com
+# gcloud auth login is tier-1 denied (gcloud-auth-write) — see bash_deny.txt
+
+# --- SafeVerb-padding bypass shapes (must NOT auto-allow) ---
+# Noun-verb CLIs (gcloud): destructive verb in middle, SafeVerb at tail.
+# ForbidVerbs catches these.
+gcloud projects create list
+gcloud compute instances delete my-vm list
+gcloud iam service-accounts delete attacker-sa list
+# Verb-first CLIs (kubectl/bq/terraform): destructive verb at head,
+# SafeVerb at tail. VerbFirst anchor rejects because position 0 is the
+# real action.
+kubectl apply -f evil.yaml get
+kubectl delete pod my-pod get
+kubectl drain node-1 get
+bq rm -f dataset show
+terraform apply -auto-approve plan
+terraform destroy plan
 
 # --- Variable-expanded commands fall through (HasUnresolved) ---
 cat $HOME/.bashrc
@@ -63,10 +89,9 @@ find . -name "*.go" | xargs wc -l
 # --- Variable-wrapped rm bypass attempts (tier 1 conservative on unresolved) ---
 R=rm; $R -rf /
 
-# --- step 2: terraform state reads (now fall through to LLM) ---
-terraform state list
-terraform state show aws_instance.foo
-terraform state pull
+# --- terraform state reads now instant-allow via terraform-readonly.
+# state-mutating verbs (rm/mv/push) still fall through via the
+# SafeVerbs check AND are denied by tier-1 `terraform-state-mutation`.
 
 # --- step 13: shell without -c still falls through to LLM ---
 bash script.sh

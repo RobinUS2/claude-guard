@@ -342,4 +342,3 @@ func isTerminal(f *os.File) bool {
 func ttlDurationFromNano(nanos int64) time.Duration {
 	return time.Duration(nanos)
 }
-

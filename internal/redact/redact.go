@@ -96,7 +96,9 @@ func New(extraSkip, extraReplace []Pattern) *Redactor {
 // no secret — only a variable name — and sending it to the LLM is
 // harmless. We accept the match but demote to Send. This avoids
 // false-positives on patterns like
-//   Authorization: Bearer $CF_TOKEN
+//
+//	Authorization: Bearer $CF_TOKEN
+//
 // where $CF_TOKEN is resolved by the shell at exec time and never
 // appears in the literal command string.
 func (r *Redactor) Scan(command string) Result {

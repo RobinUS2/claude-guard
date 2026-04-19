@@ -48,10 +48,10 @@ const MaxAllowRules = 100
 
 // File is the on-disk YAML shape.
 type File struct {
-	Version       int           `yaml:"version"`
-	ProjectName   string        `yaml:"project_name"`
-	Allow         []AllowSpec   `yaml:"allow"`
-	PromoteGlobal []string      `yaml:"promote_global"`
+	Version       int         `yaml:"version"`
+	ProjectName   string      `yaml:"project_name"`
+	Allow         []AllowSpec `yaml:"allow"`
+	PromoteGlobal []string    `yaml:"promote_global"`
 }
 
 // AllowSpec is one allow-rule entry in the project config.
@@ -393,4 +393,3 @@ func validateAndMaterialize(file *File) ([]rules.Rule, error) {
 	}
 	return out, combined
 }
-

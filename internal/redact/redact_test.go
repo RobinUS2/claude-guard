@@ -795,9 +795,9 @@ func TestShellVarRef_IsShellVarReference(t *testing.T) {
 		{"password=$PW", true},
 		{"Authorization: Bearer sk-ant-real-token", false},
 		{"api_key=actual-literal-value", false},
-		{"Authorization: Bearer $(command)", false},      // command substitution — conservative
-		{"Authorization: Bearer $VAR$OTHER", false},      // multiple vars concatenated — conservative
-		{"Authorization: Bearer prefix$VAR", false},      // var embedded in literal — conservative
+		{"Authorization: Bearer $(command)", false}, // command substitution — conservative
+		{"Authorization: Bearer $VAR$OTHER", false}, // multiple vars concatenated — conservative
+		{"Authorization: Bearer prefix$VAR", false}, // var embedded in literal — conservative
 	}
 	for _, tc := range cases {
 		got := isShellVarReference(tc.matched)

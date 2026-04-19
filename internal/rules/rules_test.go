@@ -110,11 +110,11 @@ func TestAnchoredCommand_WithSubcommand(t *testing.T) {
 		{"git status", Match},
 		{"git log -n 5", Match},
 		{"git diff main", Match},
-		{"git push origin main", NoMatch},     // wrong subcommand
-		{"git rebase -i HEAD~3", NoMatch},     // wrong subcommand
-		{"git status > /tmp/out", NoMatch},    // redirect breaks anchor
-		{"git status && rm -rf /", NoMatch},   // binary op breaks anchor
-		{"cat /etc/hosts", NoMatch},           // wrong program
+		{"git push origin main", NoMatch},   // wrong subcommand
+		{"git rebase -i HEAD~3", NoMatch},   // wrong subcommand
+		{"git status > /tmp/out", NoMatch},  // redirect breaks anchor
+		{"git status && rm -rf /", NoMatch}, // binary op breaks anchor
+		{"cat /etc/hosts", NoMatch},         // wrong program
 	}
 	for _, tc := range cases {
 		t.Run(tc.cmd, func(t *testing.T) {
@@ -343,8 +343,8 @@ func TestGitForcePush(t *testing.T) {
 		"git push origin main",                       // no force
 		"git push --force origin feature/x",          // force but not protected
 		"git push --force-with-lease origin feature", // same
-		"git status",                                 // not a push
-		"git push origin feature:feature",            // no +, not protected
+		"git status",                      // not a push
+		"git push origin feature:feature", // no +, not protected
 	}
 	for _, cmd := range passCases {
 		t.Run("pass/"+cmd, func(t *testing.T) {
@@ -587,6 +587,158 @@ func TestCdPrefixed(t *testing.T) {
 				t.Errorf("Eval(%q) = %v, want NoMatch (%s)", tc.cmd, v, tc.reason)
 			}
 		})
+	}
+}
+
+// --- NestedSubcommandAllow ---
+
+func TestNestedSubcommandAllow(t *testing.T) {
+	r := &NestedSubcommandAllow{
+		RuleName:     "gcloud-readonly",
+		Programs:     []string{"gcloud"},
+		VerbPosition: VerbLast,
+		SafeVerbs:    []string{"list", "describe", "get-value", "get-iam-policy"},
+		ForbidVerbs:  []string{"create", "delete", "deploy", "update", "set"},
+		ForbidFlags: []string{
+			"--impersonate-service-account", "--account",
+			"--configuration", "--credential-file-override",
+			"--billing-project", "--access-token-file",
+		},
+	}
+	cases := []struct {
+		cmd  string
+		want Verdict
+	}{
+		// Auto-allow shapes
+		{"gcloud projects list", Match},
+		{"gcloud compute instances list", Match},
+		{"gcloud projects describe", Match},
+		{"gcloud iam service-accounts list", Match},
+		{"gcloud projects get-iam-policy", Match},
+		{"gcloud projects list 2>&1", Match},     // stderr merge OK
+		{"/usr/bin/gcloud projects list", Match}, // basename fallback
+		{"gcloud projects list --format=json", Match},
+		{"gcloud projects list --limit=10", Match},
+
+		// Verb not in SafeVerbs
+		{"gcloud projects delete myproj", NoMatch},
+		{"gcloud compute instances create x", NoMatch},
+		{"gcloud config get-value project", NoMatch}, // last=project, not a SafeVerb
+		// Last-position anchor: last="myproj" which isn't a SafeVerb,
+		// so this falls through. Known tradeoff — see plan Known Limits.
+		{"gcloud projects describe myproj", NoMatch},
+		// Blocker fix: trailing SafeVerb padding must not bypass the
+		// first-position destructive verb. "create" sits at position 2;
+		// "list" at the tail would have matched under the old
+		// first-or-last rule. Last-only correctly rejects.
+		{"gcloud projects create list", NoMatch},
+		{"gcloud compute instances delete my-vm list", NoMatch},
+		{"gcloud iam service-accounts delete attacker-sa list", NoMatch},
+		// Unsafe identifier in positional
+		{"gsutil ls gs://my-bucket", NoMatch}, // wrong program anyway, but also unsafe pos
+		{"gcloud projects describe proj/foo", NoMatch},
+		{"gcloud projects describe foo:bar", NoMatch},
+		// Forbidden flags
+		{"gcloud projects list --impersonate-service-account=x@y.iam", NoMatch},
+		{"gcloud projects list --account=foo@bar.com", NoMatch},
+		{"gcloud projects list --billing-project=x", NoMatch},
+		{"gcloud projects list --credential-file-override=/tmp/key", NoMatch},
+		// Shell trickery
+		{"gcloud projects list | head", NoMatch},
+		{"gcloud projects list && rm -rf /", NoMatch},
+		{"gcloud projects list > /tmp/out", NoMatch},       // file redirect
+		{"gcloud projects list > /dev/null 2>&1", NoMatch}, // still has file redirect
+		{"(gcloud projects list)", NoMatch},
+		{"gcloud projects list; cat /etc/hosts", NoMatch},
+		{"echo $(gcloud projects list)", NoMatch},
+		{"gcloud projects list &", NoMatch},
+		// Variable expansion
+		{"gcloud $ACTION list", NoMatch},
+		{"gcloud projects list --project=$PROJ", NoMatch},
+		// Wrong program
+		{"aws s3 ls", NoMatch},
+		// Empty positional
+		{"gcloud", NoMatch},
+		{"gcloud --help", NoMatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != tc.want {
+				t.Errorf("Eval(%q) = %v, want %v (features=%+v)", tc.cmd, v, tc.want, p.Features)
+			}
+		})
+	}
+}
+
+func TestNestedSubcommandAllow_VerbNounShape(t *testing.T) {
+	// kubectl-style: verb comes FIRST (e.g. "kubectl get pods").
+	r := &NestedSubcommandAllow{
+		RuleName:     "kubectl-readonly",
+		Programs:     []string{"kubectl", "oc"},
+		VerbPosition: VerbFirst,
+		SafeVerbs:    []string{"get", "describe", "logs", "top", "explain", "version", "cluster-info"},
+	}
+	cases := []struct {
+		cmd  string
+		want Verdict
+	}{
+		{"kubectl get pods", Match},                // verb first
+		{"kubectl describe deployment foo", Match}, // verb first, middle positional safe
+		{"kubectl logs foo", Match},
+		{"kubectl version", Match},
+		{"kubectl cluster-info", Match},
+		{"oc get routes", Match},          // oc too
+		{"kubectl apply -f foo", NoMatch}, // write verb
+		{"kubectl delete pod foo", NoMatch},
+		{"kubectl exec pod -- ls", NoMatch},  // '--' is not safe identifier, also exec isn't in verbs
+		{"kubectl get foo/bar", NoMatch},     // unsafe positional (/)
+		{"kubectl get pods | head", NoMatch}, // pipe breaks tier-2
+		// Blocker fix: trailing SafeVerb padding on a destructive
+		// verb-noun command must not bypass. Previously "kubectl
+		// delete pod get" matched via last=get; first-only anchor
+		// rejects.
+		{"kubectl apply -f evil.yaml get", NoMatch},
+		{"kubectl delete pod get", NoMatch},
+		{"kubectl delete deployment my-app get", NoMatch},
+		{"kubectl drain node-1 get", NoMatch},
+		{"kubectl cordon node-1 get", NoMatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != tc.want {
+				t.Errorf("Eval(%q) = %v, want %v", tc.cmd, v, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsSafeIdentifier(t *testing.T) {
+	cases := []struct {
+		s    string
+		want bool
+	}{
+		{"list", true},
+		{"get-value", true},
+		{"my-project", true},
+		{"my.dataset.tbl", true},
+		{"proj_123", true},
+		{"", false},
+		{"gs://bucket", false},
+		{"projects/foo", false},
+		{"foo:bar", false},
+		{"../etc", false},
+		{"foo bar", false},
+		{"$(evil)", false},
+		{"foo*", false},
+	}
+	for _, tc := range cases {
+		if got := isSafeIdentifier(tc.s); got != tc.want {
+			t.Errorf("isSafeIdentifier(%q) = %v, want %v", tc.s, got, tc.want)
+		}
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 
 func TestCheckURLDeny_SSRF(t *testing.T) {
 	cases := []struct {
-		url     string
+		url      string
 		wantDeny bool
 	}{
 		// Blocked schemes.
@@ -17,9 +17,9 @@ func TestCheckURLDeny_SSRF(t *testing.T) {
 		{"gopher://evil.com/payload", true},
 		// Loopback.
 		{"http://localhost/admin", true},
-		{"http://LOCALHOST/admin", true},       // case
+		{"http://LOCALHOST/admin", true}, // case
 		{"http://127.0.0.1/admin", true},
-		{"http://[::1]/admin", true},           // IPv6 loopback
+		{"http://[::1]/admin", true}, // IPv6 loopback
 		// Private CIDRs.
 		{"http://10.0.0.1/internal", true},
 		{"http://172.16.0.1/internal", true},
@@ -89,9 +89,9 @@ func TestExtractMCPAction(t *testing.T) {
 		{"mcp__google-calendar__list-events", "list-events"},
 		{"mcp__atlassian__getJiraIssue", "getJiraIssue"},
 		{"mcp__claude_ai_Gmail__authenticate", "authenticate"},
-		{"Read", "Read"},          // non-MCP
-		{"Bash", "Bash"},          // non-MCP
-		{"mcp__x__y", "y"},        // short action, no prefix to strip
+		{"Read", "Read"},   // non-MCP
+		{"Bash", "Bash"},   // non-MCP
+		{"mcp__x__y", "y"}, // short action, no prefix to strip
 	}
 	for _, tc := range cases {
 		t.Run(tc.tool, func(t *testing.T) {
@@ -219,5 +219,61 @@ func TestDecideGeneric_WriteVerbFallsThrough(t *testing.T) {
 	// No LLM configured in basic test engine → falls through to Continue.
 	if out.Verdict != Continue {
 		t.Errorf("Verdict = %v, want Continue for write-verb MCP (no LLM)", out.Verdict)
+	}
+}
+
+func TestDecideGeneric_StructurallySafeTools(t *testing.T) {
+	cases := []struct {
+		name     string
+		toolName string
+		wantRule string
+	}{
+		// Built-ins
+		{"Agent subagent spawn", "Agent", "safe-builtin-tool"},
+		{"ToolSearch schema fetch", "ToolSearch", "safe-builtin-tool"},
+		{"TodoWrite state", "TodoWrite", "safe-builtin-tool"},
+		// MCP server prefixes
+		{"ccd_session mark_chapter", "mcp__ccd_session__mark_chapter", "safe-mcp-server"},
+		{"ccd_session spawn_task", "mcp__ccd_session__spawn_task", "safe-mcp-server"},
+		{"mcp-registry search", "mcp__mcp-registry__search_mcp_registry", "safe-mcp-server"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newTestEngine(t, false)
+			out := e.Decide(Input{
+				ToolName: tc.toolName,
+				Command:  "MCP tool call (not bash) " + tc.toolName + ": {}",
+				CWD:      "/tmp",
+			})
+			if out.Verdict != Allow {
+				t.Errorf("Verdict = %v, want Allow for structurally safe tool %s", out.Verdict, tc.toolName)
+			}
+			if out.Rule != tc.wantRule {
+				t.Errorf("Rule = %q, want %q", out.Rule, tc.wantRule)
+			}
+			if out.Tier != "instant_allow" {
+				t.Errorf("Tier = %q, want instant_allow", out.Tier)
+			}
+		})
+	}
+}
+
+// TestDecideGeneric_ScheduledTasksFallsThrough documents that
+// scheduled-tasks MCP is NOT in the structural allowlist because
+// create_scheduled_task persists intent across sessions.
+func TestDecideGeneric_ScheduledTasksFallsThrough(t *testing.T) {
+	e, _ := newTestEngine(t, false)
+	out := e.Decide(Input{
+		ToolName: "mcp__scheduled-tasks__create_scheduled_task",
+		Command:  "MCP tool call (not bash) mcp__scheduled-tasks__create_scheduled_task: {}",
+		CWD:      "/tmp",
+	})
+	// "create" is not a read-verb; no structural allow → falls through
+	// to LLM → no LLM in test engine → Continue.
+	if out.Verdict != Continue {
+		t.Errorf("Verdict = %v, want Continue for scheduled-tasks create", out.Verdict)
+	}
+	if out.Rule == "safe-mcp-server" {
+		t.Errorf("scheduled-tasks must NOT be auto-allowed via structural rule")
 	}
 }

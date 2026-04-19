@@ -179,15 +179,15 @@ func TestContext_DoesNotReadDotEnv(t *testing.T) {
 
 func TestExtractNpmScriptName(t *testing.T) {
 	cases := map[string]string{
-		"npm run build":                   "build",
-		"npm run build --silent":          "build",
-		"npm run-script test":             "test",
-		"yarn start":                      "start",
-		"yarn run check":                  "check",
-		"pnpm run lint":                   "lint",
-		"yarn install":                    "", // builtin, not a script
-		"npm install":                     "",
-		"yarn add react":                  "",
+		"npm run build":          "build",
+		"npm run build --silent": "build",
+		"npm run-script test":    "test",
+		"yarn start":             "start",
+		"yarn run check":         "check",
+		"pnpm run lint":          "lint",
+		"yarn install":           "", // builtin, not a script
+		"npm install":            "",
+		"yarn add react":         "",
 	}
 	for cmd, want := range cases {
 		got := extractNpmScriptName(cmd)

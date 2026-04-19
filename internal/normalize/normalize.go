@@ -295,12 +295,12 @@ var validators = map[SlotType]validatorFunc{
 }
 
 var (
-	domainRE    = regexp.MustCompile(`^(?i)(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\.?$`)
-	ipv4RE      = regexp.MustCompile(`^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$`)
-	uuidRE      = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	integerRE   = regexp.MustCompile(`^-?[0-9]+$`)
-	hexHashRE   = regexp.MustCompile(`^[0-9a-fA-F]{8,64}$`)
-	pathSegRE   = regexp.MustCompile(`^[A-Za-z0-9._~%!$&'()*+,;=:@\-]+$`)
+	domainRE  = regexp.MustCompile(`^(?i)(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\.?$`)
+	ipv4RE    = regexp.MustCompile(`^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$`)
+	uuidRE    = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	integerRE = regexp.MustCompile(`^-?[0-9]+$`)
+	hexHashRE = regexp.MustCompile(`^[0-9a-fA-F]{8,64}$`)
+	pathSegRE = regexp.MustCompile(`^[A-Za-z0-9._~%!$&'()*+,;=:@\-]+$`)
 )
 
 func validateDomain(s string) bool {

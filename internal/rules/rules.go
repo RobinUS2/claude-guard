@@ -484,6 +484,148 @@ func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// --- NestedSubcommandAllow: a tier-2 allow rule for CLIs with a
+// (noun, verb) shape where only read verbs should auto-allow.
+//
+// Fires when:
+//   - exactly one top-level call
+//   - no pipes, subshells, command-subst, proc-subst, background,
+//     binary ops, or multi-statement scripts
+//   - any redirect in the script is exactly `2>&1` (see
+//     shellparse.OnlyStderrMergeRedirect)
+//   - call is fully resolved
+//   - program is in Programs (literal OR basename match)
+//   - every positional is a "safe identifier" (letters, digits,
+//     `-`, `_`, `.`) — no `:`, no `/`, no `gs://…`, no path traversal
+//   - VerbPosition identifies which positional carries the action:
+//   - VerbLast (gcloud, gsutil, bq, terraform): noun-verb shape —
+//     `gcloud projects list` has verb `list` at the tail.
+//   - VerbFirst (kubectl, docker, firebase): verb-noun shape —
+//     `kubectl get pods` has verb `get` at the head.
+//     Exactly one position is checked per rule (no "first or last"
+//     fallback) because that fallback is a bypass: a user can pad
+//     any destructive noun-verb command with a trailing SafeVerb
+//     (`kubectl delete pod get`) and vice versa.
+//   - no ForbidFlags present (impersonation, credential override,
+//     account override, etc.)
+//
+// Distinct from AnchoredCommand (which checks the FIRST positional
+// and refuses all redirects) because gcloud/gsutil/bq/kubectl read
+// shapes put the verb last and frequently stream via `2>&1`.
+//
+// The safe-identifier gate is deliberately strict: `gsutil ls
+// gs://my-bucket` has `gs://my-bucket` as its tail positional and
+// fails the check. Users wanting bucket-specific ops get the LLM
+// tier (or the user-prompt default). This avoids building a
+// per-CLI argument parser just to auto-allow reads.
+type NestedSubcommandAllow struct {
+	RuleName     string
+	Programs     []string
+	SafeVerbs    []string
+	VerbPosition VerbPosition
+	// ForbidVerbs rejects the rule if ANY positional matches one of
+	// these. Defense-in-depth against the "SafeVerb padding" bypass
+	// in noun-verb CLIs: `gcloud projects create list` has `list`
+	// at the tail (a SafeVerb) but `create` in the middle, so
+	// ForbidVerbs=[create, delete, deploy, …] rejects. Keeps the
+	// rule type independent of per-CLI argument parsers.
+	ForbidVerbs []string
+	ForbidFlags []string
+}
+
+// VerbPosition selects which positional in a command is the verb
+// anchor. Zero-value is VerbLast (matches gcloud/terraform/bq
+// noun-verb shape).
+type VerbPosition int
+
+const (
+	// VerbLast — verb is the last positional (noun-verb CLIs).
+	// Default because it's how gcloud/gsutil/bq/terraform work.
+	VerbLast VerbPosition = iota
+	// VerbFirst — verb is the first positional (verb-noun CLIs:
+	// kubectl, oc, docker, firebase).
+	VerbFirst
+)
+
+func (r *NestedSubcommandAllow) Name() string { return r.RuleName }
+func (r *NestedSubcommandAllow) Kind() string { return "nested_subcommand_allow" }
+
+func (r *NestedSubcommandAllow) Eval(p *shellparse.Parsed) (Verdict, string) {
+	f := p.Features
+	if f.HasPipe || f.HasSubshell || f.HasCmdSub || f.HasProcSub ||
+		f.HasBackground || f.HasBinaryOp || f.HasMultiStmt {
+		return NoMatch, ""
+	}
+	if f.HasRedirect && !p.OnlyStderrMergeRedirect() {
+		return NoMatch, ""
+	}
+	if len(p.Calls) != 1 {
+		return NoMatch, ""
+	}
+	c := p.Calls[0]
+	if c.Nesting != shellparse.NestTopLevel || c.HasUnresolved {
+		return NoMatch, ""
+	}
+	if !stringIn(c.Program, r.Programs) && !stringIn(baseProgram(c.Program), r.Programs) {
+		return NoMatch, ""
+	}
+	if len(c.Positional) == 0 {
+		return NoMatch, ""
+	}
+	for _, pos := range c.Positional {
+		if !isSafeIdentifier(pos) {
+			return NoMatch, ""
+		}
+		// Defense-in-depth: reject if any positional looks like a
+		// destructive verb, regardless of its position. Closes the
+		// SafeVerb-padding bypass (`gcloud projects create list` —
+		// `list` at the tail satisfies VerbLast, but `create` in
+		// the middle is the real action).
+		if stringIn(pos, r.ForbidVerbs) {
+			return NoMatch, ""
+		}
+	}
+	var verb string
+	switch r.VerbPosition {
+	case VerbFirst:
+		verb = c.Positional[0]
+	case VerbLast:
+		verb = c.Positional[len(c.Positional)-1]
+	default:
+		return NoMatch, ""
+	}
+	if !stringIn(verb, r.SafeVerbs) {
+		return NoMatch, ""
+	}
+	for _, forbidden := range r.ForbidFlags {
+		if anchoredFlagForbidden(c.Flags, forbidden) {
+			return NoMatch, ""
+		}
+	}
+	return Match, r.RuleName
+}
+
+// isSafeIdentifier returns true when s is a bare identifier
+// (letters, digits, `-`, `_`, `.`). Blocks path traversal, URLs
+// (`gs://…`), resource selectors (`projects/foo`), command
+// substitution remnants, etc. in positional args.
+func isSafeIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // --- GitConfigWrite: block rule for `git config` writes.
 //
 // `git config` writes to gitconfig files (setting core.hooksPath,
@@ -608,9 +750,9 @@ func (r *GitConfigWrite) Eval(p *shellparse.Parsed) (Verdict, string) {
 
 // GhApiMutation blocks `gh api` calls with mutating HTTP methods.
 type GhApiMutation struct {
-	RuleName       string
-	MutatingVerbs  []string
-	Reason         string
+	RuleName      string
+	MutatingVerbs []string
+	Reason        string
 }
 
 func (r *GhApiMutation) Name() string { return r.RuleName }
