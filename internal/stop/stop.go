@@ -39,10 +39,11 @@ type StopRule interface {
 // user-visible continue string ("" = let Claude stop). The remaining
 // fields are for logging / explainability.
 type Result struct {
-	Message    string // continue message, "" if no rule fired or cap reached
-	Rule       string // name of the rule that fired, "" otherwise
-	CapReached bool   // true when a rule would have fired but the session cap was hit
-	RulesSeen  int    // how many rules were evaluated (not skipped by gates)
+	Message       string // continue message, "" if no rule fired or cap reached
+	Rule          string // name of the rule that fired, "" otherwise
+	CapReached    bool   // true when a rule would have fired but the session cap was hit
+	RulesSeen     int    // how many rules were evaluated (not skipped by gates)
+	ContinueCount int    // total continues this session after this evaluation
 }
 
 // Evaluate runs all rules against the transcript and returns the first
@@ -88,7 +89,8 @@ func EvaluateResult(sessionID, sessionDir string, stopHookActive bool, t Transcr
 		}
 
 		// Check continue cap before injecting.
-		_, withinCap := sess.increment()
+		count, withinCap := sess.increment()
+		res.ContinueCount = count
 		if !withinCap {
 			res.CapReached = true
 			res.Rule = rule.Name()
@@ -100,5 +102,8 @@ func EvaluateResult(sessionID, sessionDir string, stopHookActive bool, t Transcr
 		res.Message = reason
 		return res
 	}
+	// No rule fired — report the current continue count so logging
+	// reflects session state even for "stop allowed" events.
+	res.ContinueCount = sess.load().Continues
 	return res
 }

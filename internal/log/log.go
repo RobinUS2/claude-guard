@@ -223,6 +223,36 @@ func (l *DecisionLogger) Decision(rec DecisionRecord) {
 	}
 }
 
+// StopHook writes a Stop-hook evaluation record to the firehose. Field
+// names and order must match StopHookRecord exactly — both stats and
+// hotspots read this shape back, and operators grep the raw JSONL.
+// A stable, schema-declared order keeps lines diffable.
+func (l *DecisionLogger) StopHook(rec StopHookRecord) {
+	if l == nil {
+		return
+	}
+	// Attrs appear in this exact order in the output, matching the
+	// json-tag order of StopHookRecord. Optional strings ("") are
+	// omitted to stay consistent with the `,omitempty` tags.
+	attrs := make([]slog.Attr, 0, 6)
+	if rec.SessionID != "" {
+		attrs = append(attrs, slog.String("session_id", rec.SessionID))
+	}
+	attrs = append(attrs, slog.Bool("stop_hook_active", rec.StopHookActive))
+	if rec.FiredRule != "" {
+		attrs = append(attrs, slog.String("fired_rule", rec.FiredRule))
+	}
+	attrs = append(attrs, slog.Bool("injected", rec.Injected))
+	if rec.Suppressed != "" {
+		attrs = append(attrs, slog.String("suppressed", rec.Suppressed))
+	}
+	attrs = append(attrs,
+		slog.Int("continue_count", rec.ContinueCount),
+		slog.Int64("latency_us", rec.LatencyUS),
+	)
+	l.firehose.LogAttrs(context.Background(), slog.LevelInfo, MsgStopHook, attrs...)
+}
+
 // decisionAttrs produces the stable attribute list. Field names here
 // are the wire schema — do not rename without a schema version bump.
 func decisionAttrs(rec DecisionRecord) []slog.Attr {

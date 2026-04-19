@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -33,15 +32,15 @@ func cmdStop(_ []string) int {
 func cmdStopWithIO(r io.Reader, w io.Writer) int {
 	start := time.Now()
 
-	// Resolve the app log path from config (same file decide writes to).
-	// A failure to open the logger must never block Claude — fall back
-	// to a discarding slog so the rest of the flow is unchanged.
-	logger := openStopAppLogger()
+	// Open the decision logger so we can emit a stop_hook record to
+	// decisions.jsonl — same file `stats` and `hotspots` read. Failure
+	// to open must never block Claude: a nil logger is a safe no-op.
+	dlog := openStopDecisionLogger()
+	defer dlog.Close()
 
 	data, err := io.ReadAll(r)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stop: read stdin: %v\n", err)
-		logger.Error("stop_read_error", "error", err.Error())
 		return 1
 	}
 
@@ -49,7 +48,6 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 	if err := json.Unmarshal(data, &in); err != nil {
 		// Malformed input: fail-open, let Claude stop.
 		fmt.Fprintf(os.Stderr, "stop: parse input: %v\n", err)
-		logger.Warn("stop_parse_error", "error", err.Error())
 		return writeStopResp(w, "")
 	}
 
@@ -65,26 +63,27 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 		timeout,
 	)
 
-	logger.Info("stop_decision",
-		"session_id", in.SessionID,
-		"stop_hook_active", in.StopHookActive,
-		"rule", res.Rule,
-		"fired", res.Message != "",
-		"cap_reached", res.CapReached,
-		"rules_seen", res.RulesSeen,
-		"bash_calls", len(tr.BashCalls),
-		"has_todo_write", tr.HasTodoWrite,
-		"reason", res.Message,
-		"latency_ms", time.Since(start).Milliseconds(),
-	)
+	suppressed := ""
+	if res.CapReached {
+		suppressed = "max_continues_reached"
+	}
+	dlog.StopHook(clog.StopHookRecord{
+		SessionID:      in.SessionID,
+		StopHookActive: in.StopHookActive,
+		FiredRule:      res.Rule,
+		Injected:       res.Message != "",
+		Suppressed:     suppressed,
+		ContinueCount:  res.ContinueCount,
+		LatencyUS:      time.Since(start).Microseconds(),
+	})
 
 	return writeStopResp(w, res.Message)
 }
 
-// openStopAppLogger returns a logger that appends to the same app.jsonl
-// the decide path uses. Failures degrade to a no-op logger so the stop
-// hook still runs.
-func openStopAppLogger() *slog.Logger {
+// openStopDecisionLogger opens the same decisions.jsonl + denies.jsonl
+// pair the decide path uses. Returns nil on failure so callers can
+// treat the logger as a no-op and never block Claude.
+func openStopDecisionLogger() *clog.DecisionLogger {
 	result := config.Load("")
 	cfg := result.Config
 
@@ -94,9 +93,9 @@ func openStopAppLogger() *slog.Logger {
 	}
 	paths := clog.DefaultPaths(logDir)
 
-	lg, _, err := clog.OpenAppLogger(paths.App, cfg.Log.MaxSizeMB, cfg.Log.KeepFiles)
-	if err != nil || lg == nil {
-		return slog.New(slog.NewJSONHandler(io.Discard, nil))
+	lg, err := clog.OpenDecisionLogger(paths, cfg.Log.MaxSizeMB, cfg.Log.KeepFiles)
+	if err != nil {
+		return nil
 	}
 	return lg
 }

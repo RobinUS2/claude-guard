@@ -185,8 +185,74 @@ func TestDecisionLogger_ConcurrentWrites(t *testing.T) {
 
 func TestDecisionLogger_NilSafe(t *testing.T) {
 	var dl *DecisionLogger
-	dl.Decision(DecisionRecord{Command: "ls"}) // must not panic
-	dl.Close()                                 // must not panic
+	dl.Decision(DecisionRecord{Command: "ls"})   // must not panic
+	dl.StopHook(StopHookRecord{SessionID: "s1"}) // must not panic
+	dl.Close()                                   // must not panic
+}
+
+// The stop_hook record written by DecisionLogger.StopHook must round-trip
+// cleanly through StopHookRecord — stats and hotspots read this shape
+// back, so any drift in field names breaks both.
+func TestDecisionLogger_StopHookRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	paths := DefaultPaths(dir)
+	dl, err := OpenDecisionLogger(paths, 10, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dl.StopHook(StopHookRecord{
+		SessionID:      "sess-1",
+		StopHookActive: true,
+		FiredRule:      "open-todo-items",
+		Injected:       true,
+		Suppressed:     "",
+		ContinueCount:  2,
+		LatencyUS:      12345,
+	})
+	dl.StopHook(StopHookRecord{
+		SessionID:     "sess-2",
+		Injected:      false,
+		Suppressed:    "max_continues_reached",
+		ContinueCount: 3,
+		LatencyUS:     6789,
+	})
+	dl.Close()
+
+	data, err := os.ReadFile(paths.Decisions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines, got %d:\n%s", len(lines), data)
+	}
+
+	var r1 StopHookRecord
+	if err := json.Unmarshal([]byte(lines[0]), &r1); err != nil {
+		t.Fatalf("line 1 not valid StopHookRecord: %v", err)
+	}
+	if r1.Msg != MsgStopHook {
+		t.Errorf("msg = %q, want %q", r1.Msg, MsgStopHook)
+	}
+	if r1.SessionID != "sess-1" || r1.FiredRule != "open-todo-items" ||
+		!r1.Injected || !r1.StopHookActive || r1.ContinueCount != 2 || r1.LatencyUS != 12345 {
+		t.Errorf("line 1 fields mismatch: %+v", r1)
+	}
+
+	var r2 StopHookRecord
+	if err := json.Unmarshal([]byte(lines[1]), &r2); err != nil {
+		t.Fatalf("line 2 not valid StopHookRecord: %v", err)
+	}
+	if r2.Suppressed != "max_continues_reached" || r2.Injected || r2.ContinueCount != 3 {
+		t.Errorf("line 2 fields mismatch: %+v", r2)
+	}
+
+	// Verify denies.jsonl did NOT receive these — stop_hook is not a deny.
+	deniesData, _ := os.ReadFile(paths.Denies)
+	if strings.TrimSpace(string(deniesData)) != "" {
+		t.Errorf("denies.jsonl should be empty, got:\n%s", deniesData)
+	}
 }
 
 func TestOpenAppLogger(t *testing.T) {

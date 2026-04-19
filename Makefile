@@ -1,4 +1,4 @@
-.PHONY: all build test test-integration lint check check-integration install install-local clean fmt vet bench eval-prompt
+.PHONY: all build test test-integration lint check check-integration install install-local clean fmt vet bench eval-prompt monitor stats
 
 BIN      := claude-guard
 BIN_DIR  := $(HOME)/.claude/bin
@@ -53,6 +53,19 @@ check-integration: check test-integration
 
 eval-prompt:
 	@echo "(eval-prompt target: runs classifier against configs/eval-corpus — implemented in Phase 2)"
+
+# Live-tail decisions.jsonl — use the locally built binary so changes
+# you just made are reflected. Accepts extra args via ARGS.
+#   make monitor              # tail all decisions
+#   make monitor ARGS='--deny' # only denies
+monitor: build
+	$(OUT_DIR)/$(BIN) monitor $(ARGS)
+
+# Snapshot stats from decisions.jsonl (stop hooks + decide events).
+#   make stats                     # default window
+#   make stats ARGS='--since 1h'
+stats: build
+	$(OUT_DIR)/$(BIN) stats $(ARGS)
 
 clean:
 	rm -rf $(OUT_DIR) coverage.out coverage.html
