@@ -558,9 +558,11 @@ func TestCdPrefixed(t *testing.T) {
 
 func TestNestedSubcommandAllow(t *testing.T) {
 	r := &NestedSubcommandAllow{
-		RuleName:  "gcloud-readonly",
-		Programs:  []string{"gcloud"},
-		SafeVerbs: []string{"list", "describe", "get-value", "get-iam-policy"},
+		RuleName:     "gcloud-readonly",
+		Programs:     []string{"gcloud"},
+		VerbPosition: VerbLast,
+		SafeVerbs:    []string{"list", "describe", "get-value", "get-iam-policy"},
+		ForbidVerbs:  []string{"create", "delete", "deploy", "update", "set"},
 		ForbidFlags: []string{
 			"--impersonate-service-account", "--account",
 			"--configuration", "--credential-file-override",
@@ -585,11 +587,17 @@ func TestNestedSubcommandAllow(t *testing.T) {
 		// Verb not in SafeVerbs
 		{"gcloud projects delete myproj", NoMatch},
 		{"gcloud compute instances create x", NoMatch},
-		{"gcloud config get-value project", NoMatch}, // neither first nor last is SafeVerb
-		// gcloud-readonly SafeVerbs include "describe", so "gcloud projects describe myproj"
-		// matches via first positional check ("describe" is NOT first; "projects" is).
-		// Actually "describe" is middle here → first="projects" (not safe), last="myproj" (not safe) → NoMatch
+		{"gcloud config get-value project", NoMatch}, // last=project, not a SafeVerb
+		// Last-position anchor: last="myproj" which isn't a SafeVerb,
+		// so this falls through. Known tradeoff — see plan Known Limits.
 		{"gcloud projects describe myproj", NoMatch},
+		// Blocker fix: trailing SafeVerb padding must not bypass the
+		// first-position destructive verb. "create" sits at position 2;
+		// "list" at the tail would have matched under the old
+		// first-or-last rule. Last-only correctly rejects.
+		{"gcloud projects create list", NoMatch},
+		{"gcloud compute instances delete my-vm list", NoMatch},
+		{"gcloud iam service-accounts delete attacker-sa list", NoMatch},
 		// Unsafe identifier in positional
 		{"gsutil ls gs://my-bucket", NoMatch}, // wrong program anyway, but also unsafe pos
 		{"gcloud projects describe proj/foo", NoMatch},
@@ -631,9 +639,10 @@ func TestNestedSubcommandAllow(t *testing.T) {
 func TestNestedSubcommandAllow_VerbNounShape(t *testing.T) {
 	// kubectl-style: verb comes FIRST (e.g. "kubectl get pods").
 	r := &NestedSubcommandAllow{
-		RuleName:  "kubectl-readonly",
-		Programs:  []string{"kubectl", "oc"},
-		SafeVerbs: []string{"get", "describe", "logs", "top", "explain", "version", "cluster-info"},
+		RuleName:     "kubectl-readonly",
+		Programs:     []string{"kubectl", "oc"},
+		VerbPosition: VerbFirst,
+		SafeVerbs:    []string{"get", "describe", "logs", "top", "explain", "version", "cluster-info"},
 	}
 	cases := []struct {
 		cmd  string
@@ -650,6 +659,15 @@ func TestNestedSubcommandAllow_VerbNounShape(t *testing.T) {
 		{"kubectl exec pod -- ls", NoMatch},  // '--' is not safe identifier, also exec isn't in verbs
 		{"kubectl get foo/bar", NoMatch},     // unsafe positional (/)
 		{"kubectl get pods | head", NoMatch}, // pipe breaks tier-2
+		// Blocker fix: trailing SafeVerb padding on a destructive
+		// verb-noun command must not bypass. Previously "kubectl
+		// delete pod get" matched via last=get; first-only anchor
+		// rejects.
+		{"kubectl apply -f evil.yaml get", NoMatch},
+		{"kubectl delete pod get", NoMatch},
+		{"kubectl delete deployment my-app get", NoMatch},
+		{"kubectl drain node-1 get", NoMatch},
+		{"kubectl cordon node-1 get", NoMatch},
 	}
 	for _, tc := range cases {
 		t.Run(tc.cmd, func(t *testing.T) {

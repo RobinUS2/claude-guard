@@ -54,6 +54,22 @@ gcloud projects list > /tmp/out
 gcloud projects list --impersonate-service-account=attacker@evil.iam.gserviceaccount.com
 # gcloud auth login is tier-1 denied (gcloud-auth-write) — see bash_deny.txt
 
+# --- SafeVerb-padding bypass shapes (must NOT auto-allow) ---
+# Noun-verb CLIs (gcloud): destructive verb in middle, SafeVerb at tail.
+# ForbidVerbs catches these.
+gcloud projects create list
+gcloud compute instances delete my-vm list
+gcloud iam service-accounts delete attacker-sa list
+# Verb-first CLIs (kubectl/bq/terraform): destructive verb at head,
+# SafeVerb at tail. VerbFirst anchor rejects because position 0 is the
+# real action.
+kubectl apply -f evil.yaml get
+kubectl delete pod my-pod get
+kubectl drain node-1 get
+bq rm -f dataset show
+terraform apply -auto-approve plan
+terraform destroy plan
+
 # --- Variable-expanded commands fall through (HasUnresolved) ---
 cat $HOME/.bashrc
 echo $PATH

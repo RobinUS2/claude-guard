@@ -436,11 +436,41 @@ func DefaultAllowRules() []rules.Rule {
 	gcloudReadonly := &rules.NestedSubcommandAllow{
 		RuleName: "gcloud-readonly",
 		Programs: []string{"gcloud"},
+		// gcloud is noun-verb: `gcloud projects list` — verb at tail.
+		VerbPosition: rules.VerbLast,
 		SafeVerbs: []string{
 			"list", "describe", "get-value",
 			"get-iam-policy", "get-ancestors-iam-policy",
 			"list-available-services", "list-enabled-services",
 			"version", "help",
+		},
+		// Defense-in-depth against the SafeVerb-padding bypass on
+		// noun-verb gcloud (`gcloud projects create list` —
+		// `list` at tail satisfies VerbLast, but `create` in the
+		// middle is the real action). Reject if any positional
+		// matches a known destructive verb.
+		//
+		// Deliberately omits tokens that also serve as gcloud
+		// product nouns: `run` (Cloud Run), `build`/`builds`,
+		// `config`, `auth`, `iam`, `projects`, etc. Those are
+		// legitimately mid-positional in read commands like
+		// `gcloud run services list`, and forbidding them would
+		// cause false-positive rejects. The verb-last anchor
+		// still gates the final positional against SafeVerbs.
+		ForbidVerbs: []string{
+			"create", "delete", "deploy", "update", "set", "unset",
+			"submit", "add", "remove", "import", "export",
+			"enable", "disable", "revoke", "grant", "apply",
+			"ssh", "scp",
+			"activate", "deactivate", "attach", "detach", "push",
+			"migrate", "replace", "patch", "scale", "reset",
+			"rollback", "promote", "copy", "move", "clone",
+			"purge", "clear", "edit",
+			"install", "uninstall", "upgrade",
+			"set-iam-policy", "add-iam-policy-binding", "remove-iam-policy-binding",
+			"stop", "kill", "pause",
+			"snapshot", "restore", "untag",
+			"sign-blob", "sign-jwt", "sign-url",
 		},
 		ForbidFlags: []string{
 			"--impersonate-service-account",
@@ -449,6 +479,8 @@ func DefaultAllowRules() []rules.Rule {
 			"--credential-file-override",
 			"--billing-project",
 			"--access-token-file",
+			"--quota-project",
+			"--log-http",
 		},
 	}
 
@@ -458,12 +490,19 @@ func DefaultAllowRules() []rules.Rule {
 	// — bucket-scoped ops should go through the LLM tier or explicit
 	// user approval.
 	gsutilReadonly := &rules.NestedSubcommandAllow{
-		RuleName:  "gsutil-readonly",
-		Programs:  []string{"gsutil"},
-		SafeVerbs: []string{"ls", "stat", "du", "hash", "version", "help"},
+		RuleName: "gsutil-readonly",
+		Programs: []string{"gsutil"},
+		// gsutil is verb-first: `gsutil ls`, `gsutil stat gs://…`.
+		VerbPosition: rules.VerbFirst,
+		SafeVerbs:    []string{"ls", "stat", "du", "hash", "version", "help"},
 		ForbidFlags: []string{
 			"--impersonate-service-account",
 			"--account",
+			// gsutil also accepts short top-level flags -i (impersonate),
+			// -o (override boto config), -u (billing project).
+			"-i",
+			"-o",
+			"-u",
 		},
 	}
 
@@ -473,12 +512,16 @@ func DefaultAllowRules() []rules.Rule {
 	// `bq show my-dataset.my-table` matches (`.` is allowed) but
 	// `bq show my-proj:my-dataset.my-table` does not (`:` blocked).
 	bqReadonly := &rules.NestedSubcommandAllow{
-		RuleName:  "bq-readonly",
-		Programs:  []string{"bq"},
-		SafeVerbs: []string{"show", "ls", "query", "head", "version", "help"},
+		RuleName: "bq-readonly",
+		Programs: []string{"bq"},
+		// bq is verb-first: `bq show`, `bq ls`, `bq head …`.
+		VerbPosition: rules.VerbFirst,
+		SafeVerbs:    []string{"show", "ls", "query", "head", "version", "help"},
 		ForbidFlags: []string{
 			"--service_account",
 			"--service_account_credential_file",
+			"--application_default_credential_file",
+			"--oauth_access_token",
 		},
 	}
 
@@ -493,12 +536,15 @@ func DefaultAllowRules() []rules.Rule {
 	terraformReadonly := &rules.NestedSubcommandAllow{
 		RuleName: "terraform-readonly",
 		Programs: []string{"terraform"},
-		// Note: `state` is included here for the bare `terraform state`
-		// (lists the state). Specific destructive verbs like
-		// `terraform state rm` fall through because `rm` isn't in
-		// SafeVerbs — and tier-1 `terraform-state-mutation` blocks
-		// them anyway. `plan -out=tfplan` writes a file but is
-		// considered safe (no infra change).
+		// terraform is verb-first: `terraform plan`, `terraform state list`.
+		// For `terraform state list` the last positional `list` is fine,
+		// but the verb anchor is the first positional (`state`) which
+		// IS in SafeVerbs. Specific destructive state verbs (`state rm`,
+		// `state mv`, `state push`) fall through because only the head
+		// is matched and tier-1 `terraform-state-mutation` catches them
+		// anyway. `plan -out=tfplan` writes a file but is considered
+		// safe (no infra change).
+		VerbPosition: rules.VerbFirst,
 		SafeVerbs: []string{
 			"plan", "validate", "fmt", "show", "version",
 			"output", "console", "workspace", "providers", "state",
@@ -520,6 +566,8 @@ func DefaultAllowRules() []rules.Rule {
 	kubectlReadonly := &rules.NestedSubcommandAllow{
 		RuleName: "kubectl-readonly",
 		Programs: []string{"kubectl", "oc"},
+		// kubectl is verb-first: `kubectl get pods`, `kubectl describe node`.
+		VerbPosition: rules.VerbFirst,
 		SafeVerbs: []string{
 			"get", "describe", "logs", "top", "explain",
 			"api-resources", "api-versions", "version", "cluster-info",
@@ -529,9 +577,18 @@ func DefaultAllowRules() []rules.Rule {
 	// firebase read-only — small surface, still tightly controlled
 	// since deploy/database:set are destructive.
 	firebaseReadonly := &rules.NestedSubcommandAllow{
-		RuleName:  "firebase-readonly",
-		Programs:  []string{"firebase"},
-		SafeVerbs: []string{"list", "help", "version"},
+		RuleName: "firebase-readonly",
+		Programs: []string{"firebase"},
+		// firebase is verb-first: `firebase list`, `firebase version`.
+		VerbPosition: rules.VerbFirst,
+		SafeVerbs:    []string{"list", "help", "version"},
+		ForbidFlags: []string{
+			// --token pins to a CI token which may have broader scope
+			// than the local user; --project overrides the effective
+			// project. Both are principal redirects.
+			"--token",
+			"--project",
+		},
 	}
 
 	// go read-only / safe

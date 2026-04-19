@@ -497,15 +497,15 @@ func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 //   - program is in Programs (literal OR basename match)
 //   - every positional is a "safe identifier" (letters, digits,
 //     `-`, `_`, `.`) — no `:`, no `/`, no `gs://…`, no path traversal
-//   - the FIRST or LAST positional is in SafeVerbs. Two CLI shapes
-//     in the wild:
-//   - noun-verb (gcloud, terraform): `gcloud projects list` →
-//     verb is last.
-//   - verb-noun (kubectl, docker, firebase): `kubectl get pods`
-//     → verb is first.
-//     Accepting either position covers both without requiring
-//     per-CLI parsers. An arbitrary middle positional is still
-//     gated by isSafeIdentifier (no URLs, selectors, or traversal).
+//   - VerbPosition identifies which positional carries the action:
+//   - VerbLast (gcloud, gsutil, bq, terraform): noun-verb shape —
+//     `gcloud projects list` has verb `list` at the tail.
+//   - VerbFirst (kubectl, docker, firebase): verb-noun shape —
+//     `kubectl get pods` has verb `get` at the head.
+//     Exactly one position is checked per rule (no "first or last"
+//     fallback) because that fallback is a bypass: a user can pad
+//     any destructive noun-verb command with a trailing SafeVerb
+//     (`kubectl delete pod get`) and vice versa.
 //   - no ForbidFlags present (impersonation, credential override,
 //     account override, etc.)
 //
@@ -519,11 +519,33 @@ func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 // tier (or the user-prompt default). This avoids building a
 // per-CLI argument parser just to auto-allow reads.
 type NestedSubcommandAllow struct {
-	RuleName    string
-	Programs    []string
-	SafeVerbs   []string
+	RuleName     string
+	Programs     []string
+	SafeVerbs    []string
+	VerbPosition VerbPosition
+	// ForbidVerbs rejects the rule if ANY positional matches one of
+	// these. Defense-in-depth against the "SafeVerb padding" bypass
+	// in noun-verb CLIs: `gcloud projects create list` has `list`
+	// at the tail (a SafeVerb) but `create` in the middle, so
+	// ForbidVerbs=[create, delete, deploy, …] rejects. Keeps the
+	// rule type independent of per-CLI argument parsers.
+	ForbidVerbs []string
 	ForbidFlags []string
 }
+
+// VerbPosition selects which positional in a command is the verb
+// anchor. Zero-value is VerbLast (matches gcloud/terraform/bq
+// noun-verb shape).
+type VerbPosition int
+
+const (
+	// VerbLast — verb is the last positional (noun-verb CLIs).
+	// Default because it's how gcloud/gsutil/bq/terraform work.
+	VerbLast VerbPosition = iota
+	// VerbFirst — verb is the first positional (verb-noun CLIs:
+	// kubectl, oc, docker, firebase).
+	VerbFirst
+)
 
 func (r *NestedSubcommandAllow) Name() string { return r.RuleName }
 func (r *NestedSubcommandAllow) Kind() string { return "nested_subcommand_allow" }
@@ -554,10 +576,25 @@ func (r *NestedSubcommandAllow) Eval(p *shellparse.Parsed) (Verdict, string) {
 		if !isSafeIdentifier(pos) {
 			return NoMatch, ""
 		}
+		// Defense-in-depth: reject if any positional looks like a
+		// destructive verb, regardless of its position. Closes the
+		// SafeVerb-padding bypass (`gcloud projects create list` —
+		// `list` at the tail satisfies VerbLast, but `create` in
+		// the middle is the real action).
+		if stringIn(pos, r.ForbidVerbs) {
+			return NoMatch, ""
+		}
 	}
-	first := c.Positional[0]
-	last := c.Positional[len(c.Positional)-1]
-	if !stringIn(first, r.SafeVerbs) && !stringIn(last, r.SafeVerbs) {
+	var verb string
+	switch r.VerbPosition {
+	case VerbFirst:
+		verb = c.Positional[0]
+	case VerbLast:
+		verb = c.Positional[len(c.Positional)-1]
+	default:
+		return NoMatch, ""
+	}
+	if !stringIn(verb, r.SafeVerbs) {
 		return NoMatch, ""
 	}
 	for _, forbidden := range r.ForbidFlags {
