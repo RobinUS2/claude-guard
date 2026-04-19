@@ -66,6 +66,14 @@ claude-guard bench                          # engine latency against a corpus (n
 claude-guard version
 ```
 
+## Optional: vault gate
+
+[`scripts/claude-guard-vault-gate`](scripts/claude-guard-vault-gate) is a PreToolUse
+wrapper that requires an unlocked [`token-vault`](https://github.com/RobinUS2/token-vault)
+session before any Bash command runs. When the vault is locked it emits a
+deny decision that tells Claude to stop and ask the user to unlock. See
+[`docs/vault-gate.md`](docs/vault-gate.md) for wire-up and testing.
+
 ## License
 
 TBD (private)

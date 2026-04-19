@@ -1,0 +1,53 @@
+#!/bin/bash
+# claude-guard-vault-gate — PreToolUse Bash hook that requires an unlocked
+# token-vault before any shell command can run.
+#
+# Behaviour:
+#   - If `token-vault status` reports no vault in [unlocked ...] state,
+#     emit a PreToolUse deny decision with a reason that instructs Claude
+#     to stop and ask the user to unlock the vault.
+#   - Otherwise, forward stdin to `claude-guard decide` so the normal
+#     safety classifier still runs.
+#
+# Environment overrides:
+#   TOKEN_VAULT_BIN   path to the token-vault binary (default: token-vault on PATH)
+#   CLAUDE_GUARD_BIN  path to the claude-guard binary (default: claude-guard on PATH)
+#
+# Wire-up in ~/.claude/settings.json:
+#   {
+#     "hooks": {
+#       "PreToolUse": [
+#         {
+#           "matcher": "Bash",
+#           "hooks": [
+#             { "type": "command", "command": "/path/to/claude-guard-vault-gate" }
+#           ]
+#         }
+#       ]
+#     }
+#   }
+
+set -u
+
+input="$(cat)"
+
+TOKEN_VAULT_BIN="${TOKEN_VAULT_BIN:-token-vault}"
+CLAUDE_GUARD_BIN="${CLAUDE_GUARD_BIN:-claude-guard}"
+
+# token-vault prints status to stderr, so merge into stdout for grep.
+status="$("$TOKEN_VAULT_BIN" status 2>&1 || true)"
+
+if ! printf '%s\n' "$status" | grep -qi '\[unlocked'; then
+  /usr/bin/env jq -n '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: "claude-guard: token vault is locked. Stop here and ask the user to unlock before running any shell command. Suggested: `token-vault decrypt --all` (or `token-vault decrypt <customer>` for a single vault). Do not retry this tool call until the user confirms the vault is unlocked."
+    }
+  }'
+  exit 0
+fi
+
+# Vault unlocked — forward to the real claude-guard.
+[ -f "$HOME/.config/claude-guard/keys.env" ] && . "$HOME/.config/claude-guard/keys.env"
+printf '%s' "$input" | exec "$CLAUDE_GUARD_BIN" decide
