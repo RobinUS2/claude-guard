@@ -161,6 +161,12 @@ func cmdDoctor(_ []string) int {
 	} else {
 		warn("hook:wired", detail)
 	}
+	stopWired, stopDetail := checkStopHookWired(settingsPath)
+	if stopWired {
+		check("hook:stop", true, stopDetail)
+	} else {
+		warn("hook:stop", stopDetail)
+	}
 
 	// 7. Binary self-location
 	self, err := os.Executable()
@@ -200,6 +206,32 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// checkStopHookWired reports whether a Stop hook pointing to claude-guard stop
+// is registered in settings.json.
+func checkStopHookWired(settingsPath string) (bool, string) {
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return false, fmt.Sprintf("cannot read %s: %v", settingsPath, err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return false, fmt.Sprintf("%s not valid JSON: %v", settingsPath, err)
+	}
+	hooks, _ := parsed["hooks"].(map[string]any)
+	stopHooks, _ := hooks["Stop"].([]any)
+	for _, entry := range stopHooks {
+		m, _ := entry.(map[string]any)
+		inner, _ := m["hooks"].([]any)
+		for _, h := range inner {
+			hm, _ := h.(map[string]any)
+			if cmd, _ := hm["command"].(string); strings.Contains(cmd, "claude-guard stop") {
+				return true, cmd
+			}
+		}
+	}
+	return false, fmt.Sprintf("no Stop hook pointing to 'claude-guard stop' in %s", settingsPath)
 }
 
 // checkHookWired reads settings.json and reports whether a PreToolUse

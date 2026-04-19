@@ -57,6 +57,13 @@ func cmdStats(args []string) int {
 		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
 			continue
 		}
+		if rec.Msg == clog.MsgStopHook {
+			var sr clog.StopHookRecord
+			if err := json.Unmarshal(scanner.Bytes(), &sr); err == nil {
+				agg.addStopHook(&sr)
+			}
+			continue
+		}
 		if rec.Msg != clog.MsgDecision {
 			continue
 		}
@@ -121,6 +128,25 @@ func cmdStats(args []string) int {
 		rate := float64(cacheHits) / float64(cacheHits+llmHits) * 100
 		fmt.Printf("cache hit:   %d / %d LLM-eligible = %.1f%% hit rate\n",
 			cacheHits, cacheHits+llmHits, rate)
+	}
+
+	// Stop hook evaluation summary.
+	if agg.stopTotal > 0 {
+		fmt.Println()
+		fmt.Println("stop hooks:")
+		fmt.Printf("  evaluations: %d\n", agg.stopTotal)
+		fmt.Printf("  continues injected: %d (%.1f%%)\n",
+			agg.stopInjected, float64(agg.stopInjected)/float64(agg.stopTotal)*100)
+		if agg.stopCapped > 0 {
+			fmt.Printf("  max-continue cap hit: %d\n", agg.stopCapped)
+		}
+		if len(agg.stopByRule) > 0 {
+			parts := make([]string, 0, len(agg.stopByRule))
+			for rule, n := range agg.stopByRule {
+				parts = append(parts, fmt.Sprintf("%s=%d", rule, n))
+			}
+			fmt.Printf("  top rules: %s\n", strings.Join(parts, "  "))
+		}
 	}
 
 	// Canonical breakdown: how many cache hits went through canonical
@@ -205,6 +231,12 @@ type aggregation struct {
 	byTier        map[string]int
 	byTier4Shadow map[string]int
 	latencies     []float64 // milliseconds
+
+	// stop_hook event counters
+	stopTotal    int
+	stopInjected int
+	stopCapped   int
+	stopByRule   map[string]int
 }
 
 func newAggregation() *aggregation {
@@ -212,6 +244,20 @@ func newAggregation() *aggregation {
 		byVerdict:     map[string]int{},
 		byTier:        map[string]int{},
 		byTier4Shadow: map[string]int{},
+		stopByRule:    map[string]int{},
+	}
+}
+
+func (a *aggregation) addStopHook(rec *clog.StopHookRecord) {
+	a.stopTotal++
+	if rec.Injected {
+		a.stopInjected++
+		if rec.FiredRule != "" {
+			a.stopByRule[rec.FiredRule]++
+		}
+	}
+	if rec.Suppressed == "max_continues_reached" {
+		a.stopCapped++
 	}
 }
 

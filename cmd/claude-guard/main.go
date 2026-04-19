@@ -65,6 +65,8 @@ func run(args []string) int {
 		return cmdReplay(args[1:])
 	case "stats":
 		return cmdStats(args[1:])
+	case "stop":
+		return cmdStop(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
 	case "migrate":
