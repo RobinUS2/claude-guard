@@ -208,9 +208,11 @@ func prettyPrint(rec clog.ReadRecord) {
 }
 
 // formatLatency renders a µs latency compactly for human tailing:
-//   <1ms   → "  123µs"
-//   <1s    → " 47ms"
-//   >=1s   → " 2.4s"
+//
+//	<1ms   → "  123µs"
+//	<1s    → " 47ms"
+//	>=1s   → " 2.4s"
+//
 // Right-padded inside a 10-char slot so tier/command columns stay aligned.
 func formatLatency(us int64) string {
 	switch {

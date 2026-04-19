@@ -163,13 +163,18 @@ type KeyInputs struct {
 // v2: added scope-aware keys (global key strips cwd + branch).
 // v3: added Command + CWD + TrustedAt/TrustedReason fields on Entry.
 // v4: added ProjectConfigHash dimension to KeyInputs so per-project
-//     rule edits invalidate stale verdicts.
+//
+//	rule edits invalidate stale verdicts.
+//
 // v5: added CanonicalForm + MatchCount fields on Entry. Canonical
-//     entries are keyed by normalize.Normalize() output — one entry
-//     serves many concrete commands with matching variable-slot
-//     tokens. See internal/normalize.
+//
+//	entries are keyed by normalize.Normalize() output — one entry
+//	serves many concrete commands with matching variable-slot
+//	tokens. See internal/normalize.
+//
 // v6: added MakefileHash dimension so Makefile edits invalidate
-//     cached `make <target>` verdicts.
+//
+//	cached `make <target>` verdicts.
 const SchemaVersion = "6"
 
 // MaxCommandInEntry caps how many bytes of a command we persist in

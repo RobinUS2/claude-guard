@@ -405,8 +405,8 @@ func DefaultAllowRules() []rules.Rule {
 
 	// git read-only subcommands
 	gitReadonly := &rules.AnchoredCommand{
-		RuleName:         "git-readonly",
-		Programs:         []string{"git"},
+		RuleName: "git-readonly",
+		Programs: []string{"git"},
 		RequireSubcmdAny: []string{
 			// Read commands
 			"status", "log", "diff", "show", "branch", "remote",

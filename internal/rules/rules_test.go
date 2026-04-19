@@ -74,11 +74,11 @@ func TestAnchoredCommand_WithSubcommand(t *testing.T) {
 		{"git status", Match},
 		{"git log -n 5", Match},
 		{"git diff main", Match},
-		{"git push origin main", NoMatch},     // wrong subcommand
-		{"git rebase -i HEAD~3", NoMatch},     // wrong subcommand
-		{"git status > /tmp/out", NoMatch},    // redirect breaks anchor
-		{"git status && rm -rf /", NoMatch},   // binary op breaks anchor
-		{"cat /etc/hosts", NoMatch},           // wrong program
+		{"git push origin main", NoMatch},   // wrong subcommand
+		{"git rebase -i HEAD~3", NoMatch},   // wrong subcommand
+		{"git status > /tmp/out", NoMatch},  // redirect breaks anchor
+		{"git status && rm -rf /", NoMatch}, // binary op breaks anchor
+		{"cat /etc/hosts", NoMatch},         // wrong program
 	}
 	for _, tc := range cases {
 		t.Run(tc.cmd, func(t *testing.T) {
@@ -307,8 +307,8 @@ func TestGitForcePush(t *testing.T) {
 		"git push origin main",                       // no force
 		"git push --force origin feature/x",          // force but not protected
 		"git push --force-with-lease origin feature", // same
-		"git status",                                 // not a push
-		"git push origin feature:feature",            // no +, not protected
+		"git status",                      // not a push
+		"git push origin feature:feature", // no +, not protected
 	}
 	for _, cmd := range passCases {
 		t.Run("pass/"+cmd, func(t *testing.T) {
@@ -577,8 +577,8 @@ func TestNestedSubcommandAllow(t *testing.T) {
 		{"gcloud projects describe", Match},
 		{"gcloud iam service-accounts list", Match},
 		{"gcloud projects get-iam-policy", Match},
-		{"gcloud projects list 2>&1", Match}, // stderr merge OK
-		{"/usr/bin/gcloud projects list", Match},  // basename fallback
+		{"gcloud projects list 2>&1", Match},     // stderr merge OK
+		{"/usr/bin/gcloud projects list", Match}, // basename fallback
 		{"gcloud projects list --format=json", Match},
 		{"gcloud projects list --limit=10", Match},
 
@@ -591,7 +591,7 @@ func TestNestedSubcommandAllow(t *testing.T) {
 		// Actually "describe" is middle here → first="projects" (not safe), last="myproj" (not safe) → NoMatch
 		{"gcloud projects describe myproj", NoMatch},
 		// Unsafe identifier in positional
-		{"gsutil ls gs://my-bucket", NoMatch},     // wrong program anyway, but also unsafe pos
+		{"gsutil ls gs://my-bucket", NoMatch}, // wrong program anyway, but also unsafe pos
 		{"gcloud projects describe proj/foo", NoMatch},
 		{"gcloud projects describe foo:bar", NoMatch},
 		// Forbidden flags
@@ -602,7 +602,7 @@ func TestNestedSubcommandAllow(t *testing.T) {
 		// Shell trickery
 		{"gcloud projects list | head", NoMatch},
 		{"gcloud projects list && rm -rf /", NoMatch},
-		{"gcloud projects list > /tmp/out", NoMatch},     // file redirect
+		{"gcloud projects list > /tmp/out", NoMatch},       // file redirect
 		{"gcloud projects list > /dev/null 2>&1", NoMatch}, // still has file redirect
 		{"(gcloud projects list)", NoMatch},
 		{"gcloud projects list; cat /etc/hosts", NoMatch},
@@ -639,17 +639,17 @@ func TestNestedSubcommandAllow_VerbNounShape(t *testing.T) {
 		cmd  string
 		want Verdict
 	}{
-		{"kubectl get pods", Match},                       // verb first
-		{"kubectl describe deployment foo", Match},        // verb first, middle positional safe
+		{"kubectl get pods", Match},                // verb first
+		{"kubectl describe deployment foo", Match}, // verb first, middle positional safe
 		{"kubectl logs foo", Match},
 		{"kubectl version", Match},
 		{"kubectl cluster-info", Match},
-		{"oc get routes", Match},                          // oc too
-		{"kubectl apply -f foo", NoMatch},                 // write verb
+		{"oc get routes", Match},          // oc too
+		{"kubectl apply -f foo", NoMatch}, // write verb
 		{"kubectl delete pod foo", NoMatch},
-		{"kubectl exec pod -- ls", NoMatch},               // '--' is not safe identifier, also exec isn't in verbs
-		{"kubectl get foo/bar", NoMatch},                  // unsafe positional (/)
-		{"kubectl get pods | head", NoMatch},              // pipe breaks tier-2
+		{"kubectl exec pod -- ls", NoMatch},  // '--' is not safe identifier, also exec isn't in verbs
+		{"kubectl get foo/bar", NoMatch},     // unsafe positional (/)
+		{"kubectl get pods | head", NoMatch}, // pipe breaks tier-2
 	}
 	for _, tc := range cases {
 		t.Run(tc.cmd, func(t *testing.T) {

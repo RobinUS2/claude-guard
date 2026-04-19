@@ -8,7 +8,7 @@ import (
 
 func TestCheckURLDeny_SSRF(t *testing.T) {
 	cases := []struct {
-		url     string
+		url      string
 		wantDeny bool
 	}{
 		// Blocked schemes.
@@ -17,9 +17,9 @@ func TestCheckURLDeny_SSRF(t *testing.T) {
 		{"gopher://evil.com/payload", true},
 		// Loopback.
 		{"http://localhost/admin", true},
-		{"http://LOCALHOST/admin", true},       // case
+		{"http://LOCALHOST/admin", true}, // case
 		{"http://127.0.0.1/admin", true},
-		{"http://[::1]/admin", true},           // IPv6 loopback
+		{"http://[::1]/admin", true}, // IPv6 loopback
 		// Private CIDRs.
 		{"http://10.0.0.1/internal", true},
 		{"http://172.16.0.1/internal", true},
@@ -89,9 +89,9 @@ func TestExtractMCPAction(t *testing.T) {
 		{"mcp__google-calendar__list-events", "list-events"},
 		{"mcp__atlassian__getJiraIssue", "getJiraIssue"},
 		{"mcp__claude_ai_Gmail__authenticate", "authenticate"},
-		{"Read", "Read"},          // non-MCP
-		{"Bash", "Bash"},          // non-MCP
-		{"mcp__x__y", "y"},        // short action, no prefix to strip
+		{"Read", "Read"},   // non-MCP
+		{"Bash", "Bash"},   // non-MCP
+		{"mcp__x__y", "y"}, // short action, no prefix to strip
 	}
 	for _, tc := range cases {
 		t.Run(tc.tool, func(t *testing.T) {

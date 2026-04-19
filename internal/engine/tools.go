@@ -1,7 +1,9 @@
 // Package engine — per-tool evaluators for non-Bash tools.
 //
 // Each evaluator follows the same tier pattern as Bash:
-//   tier-1 deny → tier-2 allow → cache → LLM → default
+//
+//	tier-1 deny → tier-2 allow → cache → LLM → default
+//
 // but with tool-specific matchers instead of shell AST analysis.
 package engine
 
@@ -52,9 +54,9 @@ var ssrfDenyCIDRs = func() []*net.IPNet {
 }()
 
 var ssrfDenyHosts = map[string]struct{}{
-	"localhost":                  {},
-	"metadata.google.internal":  {},
-	"metadata.internal":         {},
+	"localhost":                {},
+	"metadata.google.internal": {},
+	"metadata.internal":        {},
 }
 
 var ssrfDenySchemes = map[string]struct{}{

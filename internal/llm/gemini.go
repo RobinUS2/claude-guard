@@ -151,9 +151,9 @@ func (c *GeminiClassifier) callOnce(ctx context.Context, body []byte) (*Decision
 // --- request shape ---
 
 type geminiRequest struct {
-	SystemInstruction *geminiSystem    `json:"systemInstruction,omitempty"`
-	Contents          []geminiContent  `json:"contents"`
-	GenerationConfig  geminiGenConfig  `json:"generationConfig"`
+	SystemInstruction *geminiSystem   `json:"systemInstruction,omitempty"`
+	Contents          []geminiContent `json:"contents"`
+	GenerationConfig  geminiGenConfig `json:"generationConfig"`
 }
 
 type geminiSystem struct {

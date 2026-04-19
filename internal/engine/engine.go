@@ -91,11 +91,11 @@ type Input struct {
 
 // Output is the engine's decision plus metadata for logging/debugging.
 type Output struct {
-	Verdict  Verdict
-	Tier     string // "instant_block", "instant_allow", "cache", "llm", "legacy", "default", "parse_error"
-	Rule     string // matched rule name, if any
-	Reason   string // human-readable reason
-	Latency  time.Duration
+	Verdict Verdict
+	Tier    string // "instant_block", "instant_allow", "cache", "llm", "legacy", "default", "parse_error"
+	Rule    string // matched rule name, if any
+	Reason  string // human-readable reason
+	Latency time.Duration
 
 	// Shadow-mode snapshot of each tier's (hypothetical) verdict.
 	// Populated even when a tier doesn't fire, so shadow mode can be
@@ -573,7 +573,7 @@ func (e *Engine) Decide(in Input) Output {
 	// Last-resort allow before falling through to the user prompt.
 	if e.legacy != nil {
 		if match := e.legacy.Match(in.Command); match != nil {
-			out.Shadow.Tier1Rule = out.Shadow.Tier1Rule // unchanged
+			// out.Shadow.Tier1Rule left unchanged from earlier tiers.
 			if !e.cfg.ShadowMode {
 				out.Verdict = Allow
 				out.Tier = "legacy"

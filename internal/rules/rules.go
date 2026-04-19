@@ -499,10 +499,10 @@ func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 //     `-`, `_`, `.`) — no `:`, no `/`, no `gs://…`, no path traversal
 //   - the FIRST or LAST positional is in SafeVerbs. Two CLI shapes
 //     in the wild:
-//       - noun-verb (gcloud, terraform): `gcloud projects list` →
-//         verb is last.
-//       - verb-noun (kubectl, docker, firebase): `kubectl get pods`
-//         → verb is first.
+//   - noun-verb (gcloud, terraform): `gcloud projects list` →
+//     verb is last.
+//   - verb-noun (kubectl, docker, firebase): `kubectl get pods`
+//     → verb is first.
 //     Accepting either position covers both without requiring
 //     per-CLI parsers. An arbitrary middle positional is still
 //     gated by isSafeIdentifier (no URLs, selectors, or traversal).
@@ -713,9 +713,9 @@ func (r *GitConfigWrite) Eval(p *shellparse.Parsed) (Verdict, string) {
 
 // GhApiMutation blocks `gh api` calls with mutating HTTP methods.
 type GhApiMutation struct {
-	RuleName       string
-	MutatingVerbs  []string
-	Reason         string
+	RuleName      string
+	MutatingVerbs []string
+	Reason        string
 }
 
 func (r *GhApiMutation) Name() string { return r.RuleName }

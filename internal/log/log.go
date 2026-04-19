@@ -39,24 +39,24 @@ const (
 // JSONL log. It mirrors the attribute list produced by decisionAttrs,
 // with slog's standard envelope fields (time, level, msg) at the top.
 type ReadRecord struct {
-	Time         string       `json:"time"`
-	Level        string       `json:"level"`
-	Msg          string       `json:"msg"`
-	GuardVersion string       `json:"guard_version,omitempty"`
-	SessionID    string       `json:"session_id,omitempty"`
-	ToolUseID    string       `json:"tool_use_id,omitempty"`
-	AgentID      string       `json:"agent_id,omitempty"`
-	AgentType    string       `json:"agent_type,omitempty"`
-	CWD          string       `json:"cwd,omitempty"`
-	ToolName     string       `json:"tool_name,omitempty"`
-	Command      string       `json:"command,omitempty"`
-	Description  string       `json:"description,omitempty"`
-	Tier         string       `json:"tier,omitempty"`
-	Verdict      string       `json:"verdict,omitempty"`
-	Rule         string       `json:"rule,omitempty"`
-	Reason       string       `json:"reason,omitempty"`
-	LatencyUS    int64        `json:"latency_us,omitempty"`
-	Shadow       *ReadShadow  `json:"shadow,omitempty"`
+	Time         string      `json:"time"`
+	Level        string      `json:"level"`
+	Msg          string      `json:"msg"`
+	GuardVersion string      `json:"guard_version,omitempty"`
+	SessionID    string      `json:"session_id,omitempty"`
+	ToolUseID    string      `json:"tool_use_id,omitempty"`
+	AgentID      string      `json:"agent_id,omitempty"`
+	AgentType    string      `json:"agent_type,omitempty"`
+	CWD          string      `json:"cwd,omitempty"`
+	ToolName     string      `json:"tool_name,omitempty"`
+	Command      string      `json:"command,omitempty"`
+	Description  string      `json:"description,omitempty"`
+	Tier         string      `json:"tier,omitempty"`
+	Verdict      string      `json:"verdict,omitempty"`
+	Rule         string      `json:"rule,omitempty"`
+	Reason       string      `json:"reason,omitempty"`
+	LatencyUS    int64       `json:"latency_us,omitempty"`
+	Shadow       *ReadShadow `json:"shadow,omitempty"`
 }
 
 // ReadShadow mirrors the shadow group written by decisionAttrs.

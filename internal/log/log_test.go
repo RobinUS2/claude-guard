@@ -186,7 +186,7 @@ func TestDecisionLogger_ConcurrentWrites(t *testing.T) {
 func TestDecisionLogger_NilSafe(t *testing.T) {
 	var dl *DecisionLogger
 	dl.Decision(DecisionRecord{Command: "ls"}) // must not panic
-	dl.Close()                                  // must not panic
+	dl.Close()                                 // must not panic
 }
 
 func TestOpenAppLogger(t *testing.T) {

@@ -93,10 +93,10 @@ var unsafeLegacyPrograms = map[string]struct{}{
 // the program (`docker`) is legitimate in isolation but the (noun,
 // verb) combo in legacy subsumes a tier-1-enforced deny.
 var unsafeLegacyPrefixes = []string{
-	"docker exec",         // shell into running container
-	"docker run",          // arbitrary image execution (red-team)
-	"terraform init",      // also handled by tier-1 state rules
-	"terraform import",    // mutates state; tier-1 denies now
+	"docker exec",      // shell into running container
+	"docker run",       // arbitrary image execution (red-team)
+	"terraform init",   // also handled by tier-1 state rules
+	"terraform import", // mutates state; tier-1 denies now
 }
 
 // isUnsafeLegacy reports whether the given legacy prefix should be

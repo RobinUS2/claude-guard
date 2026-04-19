@@ -52,7 +52,7 @@ type Config struct {
 // for anyone migrating from v0.
 type Log struct {
 	Dir       string `yaml:"dir"`
-	Path      string `yaml:"path"`         // legacy alias
+	Path      string `yaml:"path"` // legacy alias
 	MaxSizeMB int    `yaml:"max_size_mb"`
 	KeepFiles int    `yaml:"keep_files"`
 }
@@ -69,9 +69,9 @@ type LLM struct {
 
 // Cache configures the file-per-key verdict cache.
 type Cache struct {
-	Path         string `yaml:"path"`
-	TTLApproveD  int    `yaml:"ttl_approve_days"`
-	TTLBlockD    int    `yaml:"ttl_block_days"`
+	Path        string `yaml:"path"`
+	TTLApproveD int    `yaml:"ttl_approve_days"`
+	TTLBlockD   int    `yaml:"ttl_block_days"`
 }
 
 // Legacy points at the migrated allow-list file.
@@ -148,7 +148,7 @@ func DefaultConfigPath() string {
 // config bug.
 type LoadResult struct {
 	Config  *Config
-	Warning error // non-nil if defaults were used or the file was malformed
+	Warning error  // non-nil if defaults were used or the file was malformed
 	Source  string // "default", "yaml", or "yaml-with-warnings"
 }
 
@@ -206,4 +206,3 @@ func Load(path string) LoadResult {
 
 	return LoadResult{Config: cfg, Source: "yaml"}
 }
-

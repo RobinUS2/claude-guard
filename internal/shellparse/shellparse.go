@@ -304,7 +304,7 @@ func (p *Parsed) extract() {
 		if len(stmt.Redirs) > 0 {
 			p.Features.HasRedirect = true
 		}
-		p.collectFromStmt(stmt, NestTopLevel, /*inPipeline*/ true)
+		p.collectFromStmt(stmt, NestTopLevel /*inPipeline*/, true)
 	}
 
 	// Walk the whole AST once more to pick up features from nested contexts
