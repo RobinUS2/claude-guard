@@ -299,11 +299,15 @@ var mcpReadVerbs = []string{
 // log: subagents' inner tool calls do trigger PreToolUse, so auto-
 // allowing the outer Agent call is NOT a bypass — the inner work
 // still gets evaluated). ToolSearch loads tool schemas; TodoWrite
-// is local conversation state. None reach outside the harness.
+// is local conversation state. Monitor streams stdout from a
+// background process already started via Bash (which went through
+// the hook itself) — reading its output is harmless.
+// None reach outside the harness.
 var safeBuiltinTools = map[string]bool{
 	"Agent":      true,
 	"ToolSearch": true,
 	"TodoWrite":  true,
+	"Monitor":    true,
 }
 
 // safeMCPServerPrefixes match MCP servers whose entire surface is

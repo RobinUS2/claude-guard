@@ -35,12 +35,30 @@ type StopRule interface {
 	Eval(t Transcript, sh ShellContext) (shouldContinue bool, reason string)
 }
 
+// Result describes the outcome of a stop evaluation. Message is the
+// user-visible continue string ("" = let Claude stop). The remaining
+// fields are for logging / explainability.
+type Result struct {
+	Message    string // continue message, "" if no rule fired or cap reached
+	Rule       string // name of the rule that fired, "" otherwise
+	CapReached bool   // true when a rule would have fired but the session cap was hit
+	RulesSeen  int    // how many rules were evaluated (not skipped by gates)
+}
+
 // Evaluate runs all rules against the transcript and returns the first
 // continue-message that fires, or "" if Claude should stop.
 // sessionDir is used for the per-session state file (usually os.TempDir()).
 func Evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, rules []StopRule, shellTimeout time.Duration) string {
+	return EvaluateResult(sessionID, sessionDir, stopHookActive, t, rules, shellTimeout).Message
+}
+
+// EvaluateResult is the full-information variant of Evaluate. Callers
+// that log the decision should use this and propagate Result fields.
+func EvaluateResult(sessionID, sessionDir string, stopHookActive bool, t Transcript, rules []StopRule, shellTimeout time.Duration) Result {
 	sess := newSession(sessionID, sessionDir)
 	sh := newShellContext(shellTimeout)
+
+	res := Result{}
 
 	for _, rule := range rules {
 		// When stop_hook_active, only high-confidence rules may fire.
@@ -62,6 +80,8 @@ func Evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 			continue
 		}
 
+		res.RulesSeen++
+
 		ok, reason := rule.Eval(t, sh)
 		if !ok {
 			continue
@@ -70,11 +90,15 @@ func Evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 		// Check continue cap before injecting.
 		_, withinCap := sess.increment()
 		if !withinCap {
-			return "" // hard cap reached, let Claude stop
+			res.CapReached = true
+			res.Rule = rule.Name()
+			return res // hard cap reached, let Claude stop
 		}
 
 		sess.markFired(rule.Name(), shellHash(reason))
-		return reason
+		res.Rule = rule.Name()
+		res.Message = reason
+		return res
 	}
-	return ""
+	return res
 }

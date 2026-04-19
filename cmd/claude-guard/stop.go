@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/RobinUS2/claude-guard/internal/config"
+	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"github.com/RobinUS2/claude-guard/internal/stop"
 )
 
@@ -28,9 +31,17 @@ func cmdStop(_ []string) int {
 }
 
 func cmdStopWithIO(r io.Reader, w io.Writer) int {
+	start := time.Now()
+
+	// Resolve the app log path from config (same file decide writes to).
+	// A failure to open the logger must never block Claude — fall back
+	// to a discarding slog so the rest of the flow is unchanged.
+	logger := openStopAppLogger()
+
 	data, err := io.ReadAll(r)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stop: read stdin: %v\n", err)
+		logger.Error("stop_read_error", "error", err.Error())
 		return 1
 	}
 
@@ -38,13 +49,14 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 	if err := json.Unmarshal(data, &in); err != nil {
 		// Malformed input: fail-open, let Claude stop.
 		fmt.Fprintf(os.Stderr, "stop: parse input: %v\n", err)
+		logger.Warn("stop_parse_error", "error", err.Error())
 		return writeStopResp(w, "")
 	}
 
 	tr := parseTranscript(in.Transcript)
 	timeout := time.Duration(stopShellTimeoutMs) * time.Millisecond
 
-	msg := stop.Evaluate(
+	res := stop.EvaluateResult(
 		in.SessionID,
 		os.TempDir(),
 		in.StopHookActive,
@@ -53,7 +65,40 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 		timeout,
 	)
 
-	return writeStopResp(w, msg)
+	logger.Info("stop_decision",
+		"session_id", in.SessionID,
+		"stop_hook_active", in.StopHookActive,
+		"rule", res.Rule,
+		"fired", res.Message != "",
+		"cap_reached", res.CapReached,
+		"rules_seen", res.RulesSeen,
+		"bash_calls", len(tr.BashCalls),
+		"has_todo_write", tr.HasTodoWrite,
+		"reason", res.Message,
+		"latency_ms", time.Since(start).Milliseconds(),
+	)
+
+	return writeStopResp(w, res.Message)
+}
+
+// openStopAppLogger returns a logger that appends to the same app.jsonl
+// the decide path uses. Failures degrade to a no-op logger so the stop
+// hook still runs.
+func openStopAppLogger() *slog.Logger {
+	result := config.Load("")
+	cfg := result.Config
+
+	logDir := cfg.Log.Dir
+	if logDir == "" {
+		logDir = config.DefaultLogDir()
+	}
+	paths := clog.DefaultPaths(logDir)
+
+	lg, _, err := clog.OpenAppLogger(paths.App, cfg.Log.MaxSizeMB, cfg.Log.KeepFiles)
+	if err != nil || lg == nil {
+		return slog.New(slog.NewJSONHandler(io.Discard, nil))
+	}
+	return lg
 }
 
 func writeStopResp(w io.Writer, msg string) int {
