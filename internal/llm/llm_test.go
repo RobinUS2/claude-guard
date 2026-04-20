@@ -133,6 +133,40 @@ func TestBuildUserMessage_WithoutFileContent(t *testing.T) {
 	}
 }
 
+func TestBuildUserMessage_WithTrustedPrograms(t *testing.T) {
+	in := ClassifyInput{
+		Command: "for id in 19 20 21; do taufinity datasheet get $id; done",
+		CWD:     "/home/user",
+		TrustedPrograms: []string{
+			"gcloud", "git", "ls", "taufinity",
+		},
+	}
+	msg := buildUserMessage(in)
+	if !strings.Contains(msg, "OPERATOR-TRUSTED PROGRAMS") {
+		t.Error("message should contain OPERATOR-TRUSTED PROGRAMS section")
+	}
+	if !strings.Contains(msg, "taufinity") {
+		t.Error("trusted program name should appear in the prompt")
+	}
+	if !strings.Contains(msg, "LOOP COST") {
+		t.Error("LOOP COST guidance should appear when trusted programs are present")
+	}
+}
+
+func TestBuildUserMessage_WithoutTrustedPrograms(t *testing.T) {
+	in := ClassifyInput{
+		Command: "git status",
+		CWD:     "/home/user",
+	}
+	msg := buildUserMessage(in)
+	if strings.Contains(msg, "OPERATOR-TRUSTED PROGRAMS") {
+		t.Error("message should NOT contain OPERATOR-TRUSTED PROGRAMS when list is empty")
+	}
+	if strings.Contains(msg, "LOOP COST") {
+		t.Error("message should NOT contain LOOP COST when no trusted-program context")
+	}
+}
+
 // --- ParseError diagnostics ---
 
 func TestExtractDecision_TruncatedResponseIsStructured(t *testing.T) {

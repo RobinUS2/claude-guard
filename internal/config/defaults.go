@@ -814,5 +814,18 @@ func DefaultAllowRules() []rules.Rule {
 			InnerRules:      innerReadRules,
 			SafePipeTargets: safePipeTargets,
 		},
+
+		// Bounded for-loops over literal tokens whose body only
+		// invokes read-only programs. Covers the common pattern:
+		//   for id in 19 20 21; do taufinity datasheet get $id; done
+		// Iterator items must be literals (no $(...), no globs), body
+		// must be a plain CallExpr (no pipes/redirects), and every
+		// synthesized iteration must match an inner read-only rule.
+		// MaxIterations caps cost to prevent "massive loops".
+		&rules.LoopReadonly{
+			RuleName:      "loop-readonly",
+			InnerRules:    innerReadRules,
+			MaxIterations: 50,
+		},
 	}
 }

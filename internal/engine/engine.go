@@ -765,13 +765,20 @@ func (e *Engine) runLLMTier(
 	// cache on arrival.
 	asyncCtx, asyncCancel := context.WithTimeout(context.Background(), llmAsyncDeadline)
 	projCtx := projectctx.Context(in.CWD, in.Command)
+	// Operator-trusted CLIs (from the legacy allow list) — a list of
+	// pre-approved first-word programs the LLM uses to reason about
+	// compound shapes (for-loops, pipelines) whose body only invokes
+	// these. Capped to avoid prompt bloat; 60 is well above the size of
+	// any real settings.json allow list we've observed.
+	trusted := e.legacy.TrustedPrograms(60)
 	input := llm.ClassifyInput{
-		Command:        in.Command,
-		Description:    in.Description,
-		CWD:            in.CWD,
-		ProjectContext: projCtx,
-		FileContent:    in.FileContent,
-		FilePath:       in.RunnerFilePath,
+		Command:         in.Command,
+		Description:     in.Description,
+		CWD:             in.CWD,
+		ProjectContext:  projCtx,
+		FileContent:     in.FileContent,
+		FilePath:        in.RunnerFilePath,
+		TrustedPrograms: trusted,
 	}
 
 	type outcome struct {

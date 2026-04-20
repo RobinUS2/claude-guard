@@ -271,4 +271,11 @@ sed -n '/foo/p' /tmp/file
 dir
 dir /tmp
 
+# --- loop-readonly: for-loop over literal tokens, body is a read-only call ---
+for id in 19 20 21; do git status; done
+for i in 1 2 3; do echo $i; done
+for i in 1 2 3; do echo ${i}; done
+for f in /tmp/a /tmp/b; do cat "$f"; done
+for i in 1; do git log --oneline -5; done
+
 # --- blocker 3: ssh-add regression — ssh family still reads keys ---

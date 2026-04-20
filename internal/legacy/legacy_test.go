@@ -390,3 +390,62 @@ func TestLoad_DropsUnsafeLegacyEntries(t *testing.T) {
 		t.Error("git status must still match")
 	}
 }
+
+// --- TrustedPrograms ---
+
+func TestTrustedPrograms_DedupAndSort(t *testing.T) {
+	a := &AllowList{Patterns: []Pattern{
+		{Prefix: "ls"},
+		{Prefix: "git status"},
+		{Prefix: "git log"}, // same program, different subcommand
+		{Prefix: "gcloud builds list"},
+		{Prefix: "ls -la"}, // duplicate program
+		{Prefix: "taufinity datasheet get"},
+	}}
+	got := a.TrustedPrograms(0)
+	want := []string{"gcloud", "git", "ls", "taufinity"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d programs, want %d: %v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d] got %q, want %q (full: %v)", i, got[i], w, got)
+		}
+	}
+}
+
+func TestTrustedPrograms_Cap(t *testing.T) {
+	a := &AllowList{Patterns: []Pattern{
+		{Prefix: "a"}, {Prefix: "b"}, {Prefix: "c"}, {Prefix: "d"},
+	}}
+	got := a.TrustedPrograms(2)
+	if len(got) != 2 {
+		t.Fatalf("cap ignored: got %d, want 2 (%v)", len(got), got)
+	}
+	if got[0] != "a" || got[1] != "b" {
+		t.Errorf("cap should keep the first two sorted entries, got %v", got)
+	}
+}
+
+func TestTrustedPrograms_NilReceiverAndEmpty(t *testing.T) {
+	var nilList *AllowList
+	if got := nilList.TrustedPrograms(10); got != nil {
+		t.Errorf("nil receiver should return nil, got %v", got)
+	}
+	empty := &AllowList{}
+	if got := empty.TrustedPrograms(10); got != nil {
+		t.Errorf("empty list should return nil, got %v", got)
+	}
+}
+
+func TestTrustedPrograms_TrimsGlobStar(t *testing.T) {
+	// `make*` is filtered as unsafe-legacy, but defensively test that a
+	// trailing '*' on a first word is stripped so we never emit "make*".
+	a := &AllowList{Patterns: []Pattern{
+		{Prefix: "npmx*"}, // synthetic; not filtered by unsafe-legacy
+	}}
+	got := a.TrustedPrograms(0)
+	if len(got) != 1 || got[0] != "npmx" {
+		t.Errorf("trailing '*' should be stripped, got %v", got)
+	}
+}
