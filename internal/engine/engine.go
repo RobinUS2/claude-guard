@@ -559,11 +559,15 @@ func (e *Engine) Decide(in Input) Output {
 					e.record(in, out)
 					return out
 				case cache.VerdictDeny:
-					// Verifier disagreement → block.
-					out.Verdict = Deny
+					// Verifier disagreement → forward to user (not auto-deny).
+					// Only tier 1 (deterministic rules) should hard-block.
+					// LLM/verifier disagreements surface as a prompt so the
+					// human decides.
+					out.Verdict = Continue
 					out.Tier = "cache"
 					out.Rule = "verifier:" + entry.VerifierProvider + "/" + entry.VerifierModel
 					out.Reason = "verified by " + entry.VerifierProvider + " (disagreement with original): " + entry.VerifierReason
+					out.SkipReason = "verifier_disagree_forwarded_to_user"
 					out.Latency = time.Since(start)
 					e.record(in, out)
 					return out
@@ -609,12 +613,12 @@ func (e *Engine) Decide(in Input) Output {
 					return out
 				}
 				if !e.cfg.ShadowMode && eff == cache.VerdictDeny {
-					// A canonical entry can carry a verifier-disagreement
-					// just like an exact entry. Same semantics.
-					out.Verdict = Deny
+					// Verifier disagreement → forward to user, not auto-deny.
+					out.Verdict = Continue
 					out.Tier = "cache"
 					out.Rule = "canonical/" + entry.CanonicalForm
 					out.Reason = "verified by " + entry.VerifierProvider + " (disagreement): " + entry.VerifierReason
+					out.SkipReason = "verifier_disagree_forwarded_to_user"
 					out.Latency = time.Since(start)
 					e.record(in, out)
 					return out

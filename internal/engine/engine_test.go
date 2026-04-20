@@ -376,7 +376,7 @@ func TestEngine_Verifier_AgreementMarksEntryVerified(t *testing.T) {
 	}
 }
 
-func TestEngine_Verifier_DisagreementBlocksNextCall(t *testing.T) {
+func TestEngine_Verifier_DisagreementForwardsToUser(t *testing.T) {
 	fast := &stubClassifier{verdict: llm.VerdictSafe}
 	verifier := &stubClassifier{verdict: llm.VerdictUnsafe}
 
@@ -405,10 +405,10 @@ func TestEngine_Verifier_DisagreementBlocksNextCall(t *testing.T) {
 	// Wait for the verifier goroutine to complete.
 	e.AwaitVerifications(5 * time.Second)
 
-	// Second call hits the cache. Now the entry has Disagreement → Deny.
+	// Second call hits the cache. Disagreement → Continue (forwarded to user, not auto-deny).
 	second := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
-	if second.Verdict != Deny {
-		t.Errorf("second call Verdict = %v, want Deny (verifier disagreement)", second.Verdict)
+	if second.Verdict != Continue {
+		t.Errorf("second call Verdict = %v, want Continue (verifier disagreement forwards to user)", second.Verdict)
 	}
 	if second.Tier != "cache" {
 		t.Errorf("second call Tier = %q, want cache", second.Tier)

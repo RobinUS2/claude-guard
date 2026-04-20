@@ -26,9 +26,16 @@ func TestCmdStop_EmptyTranscript(t *testing.T) {
 		t.Fatalf("response not valid JSON: %v (got %q)", err, buf.String())
 	}
 	if msg, ok := resp["userMessage"]; ok && msg != "" {
-		// Acceptable: uncommitted-changes fired because test ran in dirty repo.
-		if !strings.Contains(msg.(string), "uncommitted") {
-			t.Errorf("unexpected userMessage (not uncommitted-changes): %q", msg)
+		// Acceptable: shell-based rules (uncommitted-changes, feature-branch-left,
+		// committed-not-pushed, worktree-left-open) fire because test runs in a
+		// real git repo that may be dirty or on a feature branch.
+		s := msg.(string)
+		known := strings.Contains(s, "uncommitted") ||
+			strings.Contains(s, "Still on branch") ||
+			strings.Contains(s, "unpushed commit") ||
+			strings.Contains(s, "worktrees active")
+		if !known {
+			t.Errorf("unexpected userMessage: %q", s)
 		}
 	}
 }

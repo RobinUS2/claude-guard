@@ -125,14 +125,124 @@ func (r *prCreatedNotVerifiedRule) Eval(t Transcript, _ ShellContext) (bool, str
 	return true, "A PR was created but CI status wasn't checked. Run `gh pr checks <num>` to verify, or note the PR number for manual follow-up."
 }
 
+// committedNotPushedRule fires when there are local commits not pushed
+// to the remote tracking branch.
+type committedNotPushedRule struct{}
+
+func (r *committedNotPushedRule) Name() string          { return "committed-not-pushed" }
+func (r *committedNotPushedRule) HighConfidence() bool  { return true }
+func (r *committedNotPushedRule) TextPreFilter() string { return "" }
+
+func (r *committedNotPushedRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
+	out, err := sh.Run("git log --oneline @{u}..HEAD 2>/dev/null")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return false, ""
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	return true, fmt.Sprintf(
+		"There are %d unpushed commit(s):\n%s\nPush to remote, or confirm you intend to keep these local.",
+		len(lines), strings.TrimSpace(out),
+	)
+}
+
+// failingTestsRule fires when a test command was run in the session
+// and the last assistant text mentions failures or errors.
+type failingTestsRule struct{}
+
+func (r *failingTestsRule) Name() string         { return "failing-tests" }
+func (r *failingTestsRule) HighConfidence() bool { return false }
+func (r *failingTestsRule) TextPreFilter() string {
+	return `(?i)\b(FAIL|FAILED|ERROR|panic|test.*fail)`
+}
+
+func (r *failingTestsRule) Eval(t Transcript, _ ShellContext) (bool, string) {
+	// Only fire if tests were actually run in this session.
+	testPatterns := []string{"go test", "npm test", "make test", "pytest", "cargo test", "jest", "vitest"}
+	ran := false
+	for _, bash := range t.BashCalls {
+		for _, pat := range testPatterns {
+			if strings.Contains(bash, pat) {
+				ran = true
+				break
+			}
+		}
+		if ran {
+			break
+		}
+	}
+	if !ran {
+		return false, ""
+	}
+	return true, "Tests appear to have failures. Review the output and fix before finishing, or confirm the failures are expected."
+}
+
+// featureBranchLeftRule fires when Claude stops on a feature branch
+// (not main/master) — a reminder to merge, PR, or note the branch.
+type featureBranchLeftRule struct{}
+
+func (r *featureBranchLeftRule) Name() string          { return "feature-branch-left" }
+func (r *featureBranchLeftRule) HighConfidence() bool  { return false }
+func (r *featureBranchLeftRule) TextPreFilter() string { return "" }
+
+func (r *featureBranchLeftRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
+	branch, err := sh.Run("git branch --show-current 2>/dev/null")
+	if err != nil {
+		return false, ""
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" || branch == "main" || branch == "master" || branch == "develop" {
+		return false, ""
+	}
+	return true, fmt.Sprintf(
+		"Still on branch '%s'. Merge to main, create a PR, or note the branch name before finishing.",
+		branch,
+	)
+}
+
+// worktreeLeftOpenRule fires when there are active git worktrees
+// under .claude/worktrees/.
+type worktreeLeftOpenRule struct{}
+
+func (r *worktreeLeftOpenRule) Name() string          { return "worktree-left-open" }
+func (r *worktreeLeftOpenRule) HighConfidence() bool  { return false }
+func (r *worktreeLeftOpenRule) TextPreFilter() string { return "" }
+
+func (r *worktreeLeftOpenRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
+	out, err := sh.Run("git worktree list --porcelain 2>/dev/null")
+	if err != nil {
+		return false, ""
+	}
+	// Count worktrees — first one is always the main worktree.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	worktrees := 0
+	for _, line := range lines {
+		if strings.HasPrefix(line, "worktree ") {
+			worktrees++
+		}
+	}
+	if worktrees <= 1 {
+		return false, "" // only the main worktree
+	}
+	return true, fmt.Sprintf(
+		"There are %d git worktrees active (including main). Clean up finished worktrees, or note them for follow-up.",
+		worktrees,
+	)
+}
+
 // DefaultRules returns the built-in rule set in evaluation order.
-// Transcript-only rules (no shell cost) run first.
+// Transcript-only rules (no shell cost) run first, then shell-based.
 func DefaultRules() []StopRule {
 	return []StopRule{
-		&openTodoItemsRule{},        // transcript-only, no shell cost
-		&prCreatedNotVerifiedRule{}, // transcript-only
-		&uncommittedChangesRule{},   // text pre-filter + git status
-		&installNotRunRule{},        // text pre-filter + transcript check
-		&proposedTestNotRunRule{},   // text pre-filter + transcript check
+		// Transcript-only (no shell cost).
+		&openTodoItemsRule{},
+		&prCreatedNotVerifiedRule{},
+		&failingTestsRule{},
+		&installNotRunRule{},
+		&proposedTestNotRunRule{},
+		// Shell-based (~5ms each).
+		&uncommittedChangesRule{},
+		&committedNotPushedRule{},
+		&featureBranchLeftRule{},
+		&worktreeLeftOpenRule{},
 	}
 }
