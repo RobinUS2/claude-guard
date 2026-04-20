@@ -67,14 +67,25 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 	if res.CapReached {
 		suppressed = "max_continues_reached"
 	}
+
+	// Truncate last assistant text for logging.
+	head := tr.LastAssistantText
+	if len(head) > 200 {
+		head = head[:200]
+	}
 	dlog.StopHook(clog.StopHookRecord{
-		SessionID:      in.SessionID,
-		StopHookActive: in.StopHookActive,
-		FiredRule:      res.Rule,
-		Injected:       res.Message != "",
-		Suppressed:     suppressed,
-		ContinueCount:  res.ContinueCount,
-		LatencyUS:      time.Since(start).Microseconds(),
+		SessionID:         in.SessionID,
+		StopHookActive:    in.StopHookActive,
+		FiredRule:         res.Rule,
+		Injected:          res.Message != "",
+		Suppressed:        suppressed,
+		ContinueCount:     res.ContinueCount,
+		LatencyUS:         time.Since(start).Microseconds(),
+		TranscriptTurns:   len(in.Transcript),
+		LastAssistantLen:  len(tr.LastAssistantText),
+		LastAssistantHead: head,
+		BashCallCount:     len(tr.BashCalls),
+		HasTodoWrite:      tr.HasTodoWrite,
 	})
 
 	return writeStopResp(w, res.Message)

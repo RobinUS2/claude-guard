@@ -5,15 +5,15 @@ import (
 	"strings"
 )
 
-// uncommittedChangesRule fires when Claude says it's done but git status
-// shows staged or unstaged changes.
+// uncommittedChangesRule fires when Claude stops but git status shows
+// staged or unstaged changes. No text pre-filter — always checks git
+// status (~5ms) because Claude often stops without explicit completion
+// words, especially when the last turn ends with a tool_use block.
 type uncommittedChangesRule struct{}
 
-func (r *uncommittedChangesRule) Name() string         { return "uncommitted-changes" }
-func (r *uncommittedChangesRule) HighConfidence() bool { return true }
-func (r *uncommittedChangesRule) TextPreFilter() string {
-	return `\b(done|complete|finished|all set|pushed|merged|shipped)\b`
-}
+func (r *uncommittedChangesRule) Name() string          { return "uncommitted-changes" }
+func (r *uncommittedChangesRule) HighConfidence() bool  { return true }
+func (r *uncommittedChangesRule) TextPreFilter() string { return "" }
 
 func (r *uncommittedChangesRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
 	out, err := sh.Run("git status --short")
