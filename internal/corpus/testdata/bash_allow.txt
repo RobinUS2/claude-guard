@@ -197,6 +197,13 @@ gh repo view foo/bar
 gh api /user
 gh api -X GET /user
 
+# --- gh pr review --approve: approving a PR is non-destructive ---
+gh pr review --approve 42
+gh pr review 42 --approve
+gh pr review 42 -a
+gh pr review 42 --approve -b "lgtm"
+gh pr review 42 --approve --body "lgtm"
+
 # --- step 3: git config reads (stay instant_allow via git-readonly) ---
 git config
 git config user.name

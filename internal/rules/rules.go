@@ -85,6 +85,14 @@ type AnchoredCommand struct {
 	RequireSubcmd2Any []string
 	ForbidFlags       []string // reject if any of these flags appear
 	RequireFlags      []string // if non-empty, ALL of these flags must be present
+	// RequireFlagsAny is a list of flag *groups*. Each group is a list of
+	// synonymous flags (e.g. long + short form). The rule matches only if
+	// at least one flag from EVERY group is present in the call. Example
+	// for `gh pr review --approve`:
+	//   [[--approve, -a]]
+	// Mirrors BlockedCommand.RequireFlagsAny so allow rules can express
+	// "either --flag or its short form".
+	RequireFlagsAny [][]string
 }
 
 func (r *AnchoredCommand) Name() string { return r.RuleName }
@@ -126,6 +134,9 @@ func (r *AnchoredCommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 		if !anchoredFlagPresent(c.Flags, required) {
 			return NoMatch, ""
 		}
+	}
+	if len(r.RequireFlagsAny) > 0 && !flagsMatchAllGroups(c.Flags, r.RequireFlagsAny) {
+		return NoMatch, ""
 	}
 	return Match, r.RuleName
 }
