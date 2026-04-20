@@ -292,14 +292,17 @@ func DefaultBlockRules() []rules.Rule {
 			Reason: "git remote mutation requires user approval",
 		},
 
-		// gh critical verbs — tier-1 hard block for irreversible data
-		// loss, credential/account changes, or arbitrary-code wrappers
-		// (aliases/extensions). Routine-but-destructive verbs like
-		// `pr/merge`, `pr/close`, `issue/close`, `run/rerun`,
-		// `workflow/run` are NOT in this list — they fall through to
-		// the LLM tier / user prompt so the operator can approve them
-		// in context. The gh-readonly rules below match only explicit
-		// read verbs, so those commands no longer auto-allow.
+		// gh critical verbs — tier-1 hard block reserved for shapes the
+		// operator cannot meaningfully approve in-context: irreversible
+		// data loss, principal-level identity takeover, or arbitrary-code
+		// wrappers. Routine-but-destructive verbs (`pr/merge`, `pr/close`,
+		// `issue/close`, `run/rerun`, `workflow/run`, repo-scoped
+		// `secret/set`, `variable/set`, …) are NOT in this list — they
+		// fall through to the LLM tier / user prompt so the operator can
+		// eyeball the exact target and approve. Blocking them outright
+		// broke legitimate DevOps flows (CI secret wiring, workload
+		// identity setup) without a safety benefit the prompt wouldn't
+		// also provide.
 		&rules.NestedSubcommand{
 			RuleName: "gh-destructive",
 			Program:  "gh",
@@ -307,11 +310,13 @@ func DefaultBlockRules() []rules.Rule {
 				// data loss — repos, PRs, issues, runs
 				"repo/delete", "repo/archive",
 				"pr/delete", "issue/delete", "run/delete",
-				// credentials / principal changes
+				// principal-level identity takeover — changes WHICH
+				// account subsequent gh calls operate as. Can't be
+				// undone without the user noticing.
 				"auth/login", "auth/logout", "auth/switch",
 				"auth/token", "auth/refresh", "auth/setup-git",
-				"secret/set", "secret/delete", "secret/remove",
-				"variable/set", "variable/delete",
+				// machine-level identity — adding an SSH/GPG key grants
+				// persistent access outside the current gh session.
 				"ssh-key/add", "ssh-key/delete",
 				"gpg-key/add", "gpg-key/delete",
 				// arbitrary-code wrappers
@@ -323,7 +328,7 @@ func DefaultBlockRules() []rules.Rule {
 				// `-f query='mutation { … }'`. Any graphql = deny.
 				"api/graphql",
 			},
-			Reason: "gh critical verb (data loss, credential change, or code wrapper)",
+			Reason: "gh critical verb (data loss, identity takeover, or code wrapper)",
 		},
 		// `gh api` with mutating HTTP methods — covers the shapes the
 		// (noun, verb) matcher above can't express because the method
