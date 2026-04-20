@@ -158,3 +158,12 @@ gh run rerun 123
 gh run cancel 123
 gh workflow run attack.yml
 gh workflow disable backup.yml
+# Repo-scoped secrets/variables — setting or deleting them is a
+# legitimate DevOps task (CI config, workload-identity wiring). Prompt
+# instead of hard-block; the user sees the exact name and value.
+gh secret set FOO -b value
+gh secret set GCP_WORKLOAD_IDENTITY_PROVIDER --repo owner/repo --body projects/123/locations/global/workloadIdentityPools/p/providers/x
+gh secret delete FOO
+gh secret remove FOO
+gh variable set FOO -b value
+gh variable delete FOO

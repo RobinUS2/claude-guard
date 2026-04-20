@@ -128,9 +128,6 @@ bash -c 'id'
 gh repo delete foo/bar
 gh repo archive foo/bar
 gh pr delete 42
-gh secret set FOO -b evil
-gh secret delete FOO
-gh variable set FOO -b evil
 gh auth token
 gh auth logout
 gh ssh-key add /tmp/evil.pub
