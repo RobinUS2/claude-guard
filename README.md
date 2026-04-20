@@ -45,10 +45,42 @@ Design doc: [`docs/plans/2026-04-15-claude-guard.md`](https://github.com/RobinUS
 
 ```bash
 make build          # builds bin/claude-guard
-make install        # installs to ~/.claude/bin/claude-guard
+make install        # installs to ~/.claude/bin/claude-guard (and verifies PATH)
 make test           # go test -race ./...
 make check          # fmt + vet + test
 ```
+
+**Always end a change session with `make install`.** Running just `go build` or
+`go install` leaves the Claude Code hook running an old binary — hooks invoke
+whatever is on disk, not whatever is in your source tree. After `make install`,
+check the last line: if it warns about a shadowing binary on PATH, fix it
+before continuing.
+
+### Binary paths & shadowing
+
+The hook binary is resolved in three places that can drift apart:
+
+| Location                         | Who uses it                                                   |
+|----------------------------------|---------------------------------------------------------------|
+| `~/.claude/bin/claude-guard`     | `claude-guard` hook entry in `~/.claude/settings.json`        |
+| `~/go/bin/claude-guard`          | created by `go install ./cmd/claude-guard` — **avoid this**   |
+| First `claude-guard` on `$PATH`  | wrappers like `claude-guard-vault-gate` that call by name     |
+
+Wrappers resolve via PATH, so if `~/go/bin` comes before `~/.claude/bin` on
+PATH (the default), a `go install` silently pins the wrapper to a stale build
+even when `~/.claude/bin/claude-guard` is current. `make install` now detects
+this and warns.
+
+**Preferred:** only use `make install`. If `~/go/bin/claude-guard` already
+exists, either remove it or overwrite it from `bin/claude-guard` so both
+locations match. Verify:
+
+```bash
+~/.claude/bin/claude-guard version    # what the hook runs
+claude-guard version                  # what wrappers (vault-gate, etc.) run
+```
+
+Both should print the same commit SHA.
 
 ## CLI
 
