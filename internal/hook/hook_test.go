@@ -127,7 +127,7 @@ func TestWriteResponse_Allow(t *testing.T) {
 
 func TestWriteResponse_Deny(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteResponse(&buf, Deny("rm -rf on system directory")); err != nil {
+	if err := WriteResponse(&buf, Deny("rm -rf on system directory", "")); err != nil {
 		t.Fatalf("WriteResponse: %v", err)
 	}
 	var decoded struct {
@@ -144,6 +144,37 @@ func TestWriteResponse_Deny(t *testing.T) {
 	}
 	if decoded.HSO.PermissionDecisionReason != "rm -rf on system directory" {
 		t.Errorf("Reason = %q", decoded.HSO.PermissionDecisionReason)
+	}
+}
+
+// Deny with a non-empty hint composes `<reason>\n\nRewrite: <hint>`.
+// This format is load-bearing: downstream deny-reason parsers treat the
+// blank line as a section break and the `Rewrite:` prefix as an action cue.
+// The raw-bytes golden pins the full wire format — changing it breaks the
+// separator contract for every consumer.
+func TestWriteResponse_Deny_WithHint(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, Deny("R", "H")); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+	const golden = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"R\n\nRewrite: H"}}` + "\n"
+	if buf.String() != golden {
+		t.Errorf("hint-path JSON drift:\n got: %q\nwant: %q", buf.String(), golden)
+	}
+}
+
+// Deny with an empty hint produces byte-identical output to pre-hint Deny.
+// Guards the backward-compat contract for the zero-hint path. The literal
+// golden below is the exact wire format — if you edit it, understand that
+// every Claude Code hook consumer sees this change.
+func TestWriteResponse_Deny_EmptyHint_NoRewriteLine(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, Deny("R", "")); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+	const golden = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"R"}}` + "\n"
+	if buf.String() != golden {
+		t.Errorf("zero-hint JSON drift:\n got: %q\nwant: %q", buf.String(), golden)
 	}
 }
 

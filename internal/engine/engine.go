@@ -111,6 +111,12 @@ type Output struct {
 	// BQ pre-flight tier to surface byte estimates and budget status.
 	UserMessage string
 
+	// Hint, when non-empty, is appended to the deny reason as a concrete
+	// rewrite recipe so Claude can self-correct. Populated from
+	// config.DefaultRewriteHints() keyed by rule name. Only set for
+	// Deny verdicts; empty for Allow/Continue.
+	Hint string
+
 	// Shadow-mode snapshot of each tier's (hypothetical) verdict.
 	// Populated even when a tier doesn't fire, so shadow mode can be
 	// analysed post-hoc.
@@ -394,6 +400,7 @@ func (e *Engine) Decide(in Input) Output {
 				out.Tier = "instant_block"
 				out.Rule = r.Name()
 				out.Reason = reason
+				out.Hint = config.DefaultRewriteHints()[r.Name()]
 				out.Latency = time.Since(start)
 				e.record(in, out)
 				return out

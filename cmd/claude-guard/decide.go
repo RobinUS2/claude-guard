@@ -207,7 +207,7 @@ func cmdDecide(_ []string) int {
 			resp = hook.Allow(reason)
 		}
 	case engine.Deny:
-		resp = hook.Deny(fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule))
+		resp = hook.Deny(fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule), out.Hint)
 	default:
 		if out.UserMessage != "" {
 			resp = hook.ContinueWithMessage(out.UserMessage)
