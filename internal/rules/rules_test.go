@@ -191,6 +191,38 @@ func TestAnchoredCommand_RequireFlags(t *testing.T) {
 	}
 }
 
+func TestAnchoredCommand_RequireFlagsAny(t *testing.T) {
+	ghPrApprove := &AnchoredCommand{
+		RuleName:          "gh-pr-approve",
+		Programs:          []string{"gh"},
+		RequireSubcmdAny:  []string{"pr"},
+		RequireSubcmd2Any: []string{"review"},
+		RequireFlagsAny:   [][]string{{"--approve", "-a"}},
+	}
+	cases := []struct {
+		cmd  string
+		want Verdict
+	}{
+		{"gh pr review --approve 42", Match},
+		{"gh pr review 42 --approve", Match},
+		{"gh pr review 42 -a", Match},
+		{"gh pr review 42 --approve -b lgtm", Match},
+		{"gh pr review 42 --request-changes", NoMatch},
+		{"gh pr review 42", NoMatch},
+		{"gh pr view 42", NoMatch},
+		{"gh issue view 42 --approve", NoMatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := ghPrApprove.Eval(p)
+			if v != tc.want {
+				t.Errorf("Eval(%q) = %v, want %v", tc.cmd, v, tc.want)
+			}
+		})
+	}
+}
+
 // --- ProgramIs (sudo) ---
 
 func TestProgramIs_Sudo(t *testing.T) {

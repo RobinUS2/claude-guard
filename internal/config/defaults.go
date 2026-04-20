@@ -656,11 +656,13 @@ func DefaultAllowRules() []rules.Rule {
 	// intentionally NOT constrained — gh accepts free-form IDs that
 	// would fail NestedSubcommandAllow's safe-identifier gate.
 	//
-	// Destructive verbs (merge, close, delete, edit, merge, review,
-	// rerun, cancel, create, …) are absent from RequireSubcmd2Any so
-	// they fall through to the LLM / user prompt rather than auto-
-	// allowing. Bare `gh pr` / `gh repo` / etc. matches too (no
-	// positional[1] present) — that's just the help screen.
+	// Destructive verbs (merge, close, delete, edit, rerun, cancel,
+	// create, …) are absent from RequireSubcmd2Any so they fall
+	// through to the LLM / user prompt rather than auto-allowing.
+	// `review` is also absent here — only the explicit `--approve`
+	// shape auto-allows via the dedicated `gh-pr-approve` rule below.
+	// Bare `gh pr` / `gh repo` / etc. matches too (no positional[1]
+	// present) — that's just the help screen.
 	ghNounVerbReadonly := &rules.AnchoredCommand{
 		RuleName: "gh-readonly-noun-verb",
 		Programs: []string{"gh"},
@@ -673,6 +675,21 @@ func DefaultAllowRules() []rules.Rule {
 			"view", "list", "status", "checks", "diff",
 			"help", "version",
 		},
+	}
+
+	// gh pr review --approve — approving a PR is a reversible,
+	// non-destructive signal (the reviewer can always re-review with
+	// --request-changes or dismiss their own approval). A repo can
+	// gate the merge on branch-protection rules independently of the
+	// approval event. Auto-allow only the explicit --approve / -a
+	// shape so `gh pr review` without a verdict flag (which opens an
+	// interactive editor) and `--request-changes` still prompt.
+	ghPrApprove := &rules.AnchoredCommand{
+		RuleName:          "gh-pr-approve",
+		Programs:          []string{"gh"},
+		RequireSubcmdAny:  []string{"pr"},
+		RequireSubcmd2Any: []string{"review"},
+		RequireFlagsAny:   [][]string{{"--approve", "-a"}},
 	}
 
 	// claude-guard self-invocation. All subcommands are local
@@ -723,6 +740,7 @@ func DefaultAllowRules() []rules.Rule {
 		nodePmReadonly,
 		ghReadonly,
 		ghNounVerbReadonly,
+		ghPrApprove,
 		claudeGuardReadonly,
 	}
 	safePipeTargets := []string{
@@ -752,6 +770,7 @@ func DefaultAllowRules() []rules.Rule {
 		nodePmReadonly,
 		ghReadonly,
 		ghNounVerbReadonly,
+		ghPrApprove,
 		claudeGuardReadonly,
 		catHeredocWrite,
 

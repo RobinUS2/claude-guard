@@ -150,7 +150,8 @@ ssh-keygen -y -f ~/.ssh/id_rsa
 # They fall through to the user approval path.
 gh pr merge 42
 gh pr close 42
-gh pr review 42 --approve
+gh pr review 42 --request-changes -b "nope"
+gh pr review 42
 gh pr edit 42 --title evil
 gh issue close 42
 gh run rerun 123
