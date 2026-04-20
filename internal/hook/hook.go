@@ -180,12 +180,19 @@ func Allow(reason string) Response {
 }
 
 // Deny returns a response that blocks the tool use. Reason is shown to Claude.
-func Deny(reason string) Response {
+// When hint is non-empty, it is appended to the reason on a new section
+// (`<reason>\n\nRewrite: <hint>`) so Claude can self-correct on retry without
+// user intervention. Empty hint preserves the pre-hint byte format.
+func Deny(reason, hint string) Response {
+	msg := reason
+	if hint != "" {
+		msg = reason + "\n\nRewrite: " + hint
+	}
 	return Response{
 		HookSpecificOutput: &hookSpecificOutput{
 			HookEventName:            "PreToolUse",
 			PermissionDecision:       "deny",
-			PermissionDecisionReason: reason,
+			PermissionDecisionReason: msg,
 		},
 	}
 }

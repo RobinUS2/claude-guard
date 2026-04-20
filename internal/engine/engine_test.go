@@ -1516,3 +1516,65 @@ func TestUnsafeReview_NoVerifier(t *testing.T) {
 		t.Error("AwaitVerifications hung when no verifier is configured")
 	}
 }
+
+// Tier-1 block rules that have a registered rewrite hint must surface it
+// on the engine Output. The hook layer turns this into the `Rewrite:` line
+// Claude sees.
+func TestEngine_RewriteHint_PopulatedForScriptInterpreterExec(t *testing.T) {
+	e, _ := newTestEngine(t, false)
+	out := e.Decide(Input{ToolName: "Bash", Command: `python3 -c "print(1)"`})
+	if out.Verdict != Deny {
+		t.Fatalf("Verdict = %v (tier=%s rule=%s), want Deny", out.Verdict, out.Tier, out.Rule)
+	}
+	if out.Rule != "script-interpreter-exec" {
+		t.Fatalf("Rule = %q, want script-interpreter-exec", out.Rule)
+	}
+	if out.Hint == "" {
+		t.Fatal("Hint empty; expected script-interpreter-exec to have a registered hint")
+	}
+	if !strings.Contains(out.Hint, "/tmp/claude-") {
+		t.Errorf("Hint = %q, want to mention /tmp/claude- path", out.Hint)
+	}
+}
+
+// Tier-1 block rules WITHOUT a registered hint must leave out.Hint empty
+// so the hook emits the pre-hint JSON format.
+func TestEngine_RewriteHint_EmptyForRulesWithoutHint(t *testing.T) {
+	e, _ := newTestEngine(t, false)
+	// rm-rf-system is a tier-1 block rule with no hint registered.
+	out := e.Decide(Input{ToolName: "Bash", Command: "rm -rf /etc"})
+	if out.Verdict != Deny {
+		t.Fatalf("Verdict = %v, want Deny", out.Verdict)
+	}
+	if out.Rule != "rm-rf-system" {
+		t.Fatalf("Rule = %q, want rm-rf-system (sanity check — update this test if the rule was renamed)", out.Rule)
+	}
+	if out.Hint != "" {
+		t.Errorf("Hint = %q, want empty for unregistered rule", out.Hint)
+	}
+}
+
+// Hint is a deny-only concern. Allow and Continue paths must leave it empty
+// so we don't accidentally leak rewrite copy into successful responses.
+func TestEngine_RewriteHint_EmptyOnAllow(t *testing.T) {
+	e, _ := newTestEngine(t, false)
+	out := e.Decide(Input{ToolName: "Bash", Command: "git status"})
+	if out.Verdict != Allow {
+		t.Fatalf("Verdict = %v, want Allow", out.Verdict)
+	}
+	if out.Hint != "" {
+		t.Errorf("Hint = %q, want empty on Allow verdict", out.Hint)
+	}
+}
+
+func TestEngine_RewriteHint_EmptyOnContinue(t *testing.T) {
+	e, _ := newTestEngine(t, false)
+	// npm install falls through all tiers to Continue.
+	out := e.Decide(Input{ToolName: "Bash", Command: "npm install"})
+	if out.Verdict != Continue {
+		t.Fatalf("Verdict = %v, want Continue", out.Verdict)
+	}
+	if out.Hint != "" {
+		t.Errorf("Hint = %q, want empty on Continue verdict", out.Hint)
+	}
+}
