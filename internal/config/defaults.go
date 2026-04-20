@@ -636,6 +636,13 @@ func DefaultAllowRules() []rules.Rule {
 		RequireSubcmdAny: []string{"list", "ls", "view", "outdated", "audit", "config", "whoami", "why", "info", "version"},
 	}
 
+	// npm/yarn/pnpm dev commands (build, test, run, start, install, ci)
+	nodePmDev := &rules.AnchoredCommand{
+		RuleName:         "node-pm-dev",
+		Programs:         []string{"npm", "yarn", "pnpm"},
+		RequireSubcmdAny: []string{"run", "start", "test", "build", "install", "ci"},
+	}
+
 	// gh read-only (standalone-noun shapes).
 	//
 	// Accepts only nouns that have no destructive child commands at
@@ -743,6 +750,7 @@ func DefaultAllowRules() []rules.Rule {
 		firebaseReadonly,
 		goReadonly,
 		nodePmReadonly,
+		nodePmDev,
 		ghReadonly,
 		ghNounVerbReadonly,
 		ghPrApprove,
@@ -773,6 +781,7 @@ func DefaultAllowRules() []rules.Rule {
 		firebaseReadonly,
 		goReadonly,
 		nodePmReadonly,
+		nodePmDev,
 		ghReadonly,
 		ghNounVerbReadonly,
 		ghPrApprove,

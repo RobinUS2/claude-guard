@@ -100,6 +100,7 @@ type DecisionRecord struct {
 	Verdict      string
 	Rule         string
 	Reason       string
+	SkipReason   string `json:"skip_reason,omitempty"`
 	LatencyUS    int64
 
 	// Shadow fields: populated when shadow mode runs a tier it didn't enforce.

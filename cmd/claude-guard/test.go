@@ -83,6 +83,9 @@ func cmdTest(args []string) int {
 	if out.Reason != "" {
 		fmt.Printf("reason:  %s\n", out.Reason)
 	}
+	if out.SkipReason != "" {
+		fmt.Printf("skipped: %s\n", out.SkipReason)
+	}
 	fmt.Printf("latency: %s\n", out.Latency)
 	if out.Shadow.Tier1Rule != "" || out.Shadow.Tier2Rule != "" {
 		fmt.Println("shadow trace:")

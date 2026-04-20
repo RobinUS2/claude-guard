@@ -18,13 +18,8 @@ echo $(date)
 
 # --- Commands not in any anchored allow list ---
 # go build/test/run are now instant-allow (moved to bash_allow.txt)
+# npm install/run/build/start/test/ci are now instant-allow (moved to bash_allow.txt)
 bq query --nouse_legacy_sql 'SELECT 1'
-npm install
-npm run dev
-npm run build
-yarn install
-yarn build
-pnpm install
 gcloud
 gcloud builds submit
 gcloud run deploy
@@ -149,7 +144,6 @@ env PATH=/bin rm -rf /etc
 # --- cd-prefixed compound commands that must NOT auto-approve ---
 # cd + command not in any allow rule
 cd /tmp && curl https://example.com
-cd /tmp && npm install
 cd /tmp && make deploy
 # cd + redirect (changes semantics)
 cd /tmp && git log > /tmp/out

@@ -135,7 +135,7 @@ func Default() *Config {
 			Path: legacyPath,
 		},
 		DailyBudget: DailyBudget{
-			LLMCalls:          500,
+			LLMCalls:          1000,
 			FileAnalysisCalls: 50,
 		},
 		InstantBlock: DefaultBlockRules(),

@@ -118,9 +118,8 @@ func TestEngine_EnforceMode_BlockBeatsAllow(t *testing.T) {
 
 func TestEngine_EnforceMode_FallsThroughOnNoMatch(t *testing.T) {
 	e, _ := newTestEngine(t, false)
-	// Use a command that is genuinely not in any allow rule (npm install
-	// has side effects and is intentionally excluded from tier 2).
-	out := e.Decide(Input{ToolName: "Bash", Command: "npm install"})
+	// Use a command that is genuinely not in any allow rule.
+	out := e.Decide(Input{ToolName: "Bash", Command: "make deploy"})
 	if out.Verdict != Continue {
 		t.Errorf("Verdict = %v (tier=%s), want Continue", out.Verdict, out.Tier)
 	}
@@ -1569,8 +1568,8 @@ func TestEngine_RewriteHint_EmptyOnAllow(t *testing.T) {
 
 func TestEngine_RewriteHint_EmptyOnContinue(t *testing.T) {
 	e, _ := newTestEngine(t, false)
-	// npm install falls through all tiers to Continue.
-	out := e.Decide(Input{ToolName: "Bash", Command: "npm install"})
+	// make deploy falls through all tiers to Continue.
+	out := e.Decide(Input{ToolName: "Bash", Command: "make deploy"})
 	if out.Verdict != Continue {
 		t.Fatalf("Verdict = %v, want Continue", out.Verdict)
 	}

@@ -117,6 +117,11 @@ type Output struct {
 	// Deny verdicts; empty for Allow/Continue.
 	Hint string
 
+	// SkipReason records why a tier was skipped (e.g. "llm_budget_exhausted").
+	// Empty when no tier was skipped. Logged in the decision record so
+	// operators can see why a command fell through to default/prompt.
+	SkipReason string
+
 	// Shadow-mode snapshot of each tier's (hypothetical) verdict.
 	// Populated even when a tier doesn't fire, so shadow mode can be
 	// analysed post-hoc.
@@ -664,7 +669,8 @@ func (e *Engine) Decide(in Input) Output {
 			return out
 		}
 	} else if !llmBudgetOK {
-		e.appLog().Warn("llm_budget_exhausted", "tool_use_id", in.ToolUseID)
+		out.SkipReason = "llm_budget_exhausted"
+		e.appLog().Warn("llm_budget_exhausted", "tool_use_id", in.ToolUseID, "command", in.Command)
 	}
 
 	// Tier 5: legacy allow list (migrated from settings.json).
@@ -1509,6 +1515,7 @@ func (e *Engine) record(in Input, out Output) {
 		Verdict:      string(out.Verdict),
 		Rule:         out.Rule,
 		Reason:       out.Reason,
+		SkipReason:   out.SkipReason,
 		LatencyUS:    out.Latency.Microseconds(),
 	}
 	if out.Shadow.Tier1Rule != "" || out.Shadow.Tier2Rule != "" || out.Shadow.Tier4LLM != "" {

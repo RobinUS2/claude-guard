@@ -146,8 +146,8 @@ func TestDefaultConfigPath(t *testing.T) {
 
 func TestDefault_HasBudgetDefaults(t *testing.T) {
 	cfg := Default()
-	if cfg.DailyBudget.LLMCalls != 500 {
-		t.Errorf("DailyBudget.LLMCalls = %d, want 500", cfg.DailyBudget.LLMCalls)
+	if cfg.DailyBudget.LLMCalls != 1000 {
+		t.Errorf("DailyBudget.LLMCalls = %d, want 1000", cfg.DailyBudget.LLMCalls)
 	}
 	if cfg.DailyBudget.FileAnalysisCalls != 50 {
 		t.Errorf("DailyBudget.FileAnalysisCalls = %d, want 50", cfg.DailyBudget.FileAnalysisCalls)
