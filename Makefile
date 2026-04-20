@@ -17,7 +17,27 @@ build:
 install: build
 	@mkdir -p $(BIN_DIR)
 	install -m 755 $(OUT_DIR)/$(BIN) $(BIN_DIR)/$(BIN)
-	@echo "installed: $(BIN_DIR)/$(BIN)"
+	@echo "installed: $(BIN_DIR)/$(BIN) ($(VERSION))"
+	@# Verify that the binary Claude Code hooks will invoke is the one
+	@# we just built. The vault-gate and other wrappers resolve
+	@# `claude-guard` via PATH — a stale copy from `go install` at
+	@# ~/go/bin/claude-guard shadows ~/.claude/bin and silently runs
+	@# old rules. Warn when the PATH-resolved binary doesn't match.
+	@active_bin=$$(command -v $(BIN) 2>/dev/null || true); \
+	installed_bin=$(BIN_DIR)/$(BIN); \
+	if [ -z "$$active_bin" ]; then \
+		echo "warn: $(BIN) not on PATH — add $(BIN_DIR) to PATH or hooks may fail to resolve it"; \
+	elif [ "$$active_bin" != "$$installed_bin" ]; then \
+		active_ver=$$($$active_bin version 2>/dev/null || echo '?'); \
+		installed_ver=$$($$installed_bin version 2>/dev/null || echo '?'); \
+		if [ "$$active_ver" != "$$installed_ver" ]; then \
+			echo ""; \
+			echo "warn: stale $(BIN) shadowing the installed binary on PATH:"; \
+			echo "  active (PATH): $$active_bin ($$active_ver)"; \
+			echo "  installed:     $$installed_bin ($$installed_ver)"; \
+			echo "  fix: cp $$installed_bin $$active_bin  (or remove the stale copy)"; \
+		fi; \
+	fi
 
 install-local: build
 	@mkdir -p $(BIN_DIR)
