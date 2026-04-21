@@ -335,6 +335,30 @@ func (r *noAskHumanRule) Eval(_ Transcript, _ ShellContext) (bool, string) {
 	return true, "You're in autonomous mode — decide and act. Don't ask for permission."
 }
 
+// contextMonitorRule fires when the transcript is getting large,
+// reminding Claude to summarize progress before context compaction
+// makes it lose state. Uses TurnCount as a lightweight proxy.
+type contextMonitorRule struct{}
+
+func (r *contextMonitorRule) Name() string          { return "context-monitor" }
+func (r *contextMonitorRule) HighConfidence() bool  { return false }
+func (r *contextMonitorRule) MaxContinues() int     { return 1 } // fire once only
+func (r *contextMonitorRule) TextPreFilter() string { return "" }
+
+// contextWarningThreshold is the turn count above which we warn.
+// ~200 turns typically means 60-80% context usage for a long session.
+const contextWarningThreshold = 200
+
+func (r *contextMonitorRule) Eval(t Transcript, _ ShellContext) (bool, string) {
+	if t.TurnCount < contextWarningThreshold {
+		return false, ""
+	}
+	return true, fmt.Sprintf(
+		"Context is getting large (%d turns). Summarize progress, key decisions, and remaining work before continuing. This prevents context compaction from losing important state.",
+		t.TurnCount,
+	)
+}
+
 // DefaultRules returns the built-in rule set in evaluation order.
 // Transcript-only rules (no shell cost) run first, then shell-based.
 func DefaultRules() []StopRule {
@@ -345,6 +369,7 @@ func DefaultRules() []StopRule {
 		&failingTestsRule{},
 		&stopPhraseGuardRule{},
 		&noAskHumanRule{},
+		&contextMonitorRule{},
 		&installNotRunRule{},
 		&proposedTestNotRunRule{},
 		// Shell-based (~5ms each).

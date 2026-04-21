@@ -12,6 +12,8 @@ type Transcript struct {
 	BashCalls         []string
 	HasTodoWrite      bool
 	LastTodoItems     []TodoItem
+	TurnCount         int // total number of turns in the transcript
+	TranscriptBytes   int // approximate raw size of the transcript JSON
 }
 
 // TodoItem represents a single todo entry.

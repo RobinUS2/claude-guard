@@ -129,8 +129,8 @@ func TestRulePRCreatedNotVerified_NoFire(t *testing.T) {
 
 func TestDefaultRules_Length(t *testing.T) {
 	rules := DefaultRules()
-	if len(rules) != 11 {
-		t.Errorf("expected 11 default rules, got %d", len(rules))
+	if len(rules) != 12 {
+		t.Errorf("expected 12 default rules, got %d", len(rules))
 	}
 }
 

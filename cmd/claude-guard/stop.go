@@ -203,5 +203,10 @@ func parseTranscript(raw []json.RawMessage) stop.Transcript {
 		}
 	}
 	tr.LastAssistantText = strings.Join(lastAssistantParts, "\n")
+	tr.TurnCount = len(raw)
+	// Approximate transcript size — sum of raw JSON bytes.
+	for _, r := range raw {
+		tr.TranscriptBytes += len(r)
+	}
 	return tr
 }
