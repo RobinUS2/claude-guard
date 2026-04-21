@@ -1,7 +1,7 @@
 # Task: CurlToDomain tier 2 allow rule
 
 **Created:** 2026-04-21
-**Status:** Planning
+**Status:** Complete
 **Context:** curl PUT/POST/PATCH to studio.taufinity.io prompts every time because the LLM tier (Gemini) classifies all write-method curl commands as "unsafe: external API call with side effects." Since tier 4 is approve-only and the "unsafe" verdict is never cached as allow, the user is prompted on every invocation. Need a deterministic tier 2 rule to auto-allow curl to trusted domains for non-destructive operations.
 
 ## Design
@@ -70,15 +70,15 @@ flowchart TD
 ## Plan
 
 1. [x] Research: understand existing rule patterns, parser output, compound command handling
-2. [ ] Add `CurlToDomain` rule type in `internal/rules/curl_domain.go` (new file, follows pattern of other rules)
-3. [ ] Helpers in same file: `curlMethod(args)`, `curlURL(positional)`, `curlHasForbiddenFlags(args)`, `curlHasFileData(args)`
-4. [ ] Register rule in `internal/config/defaults.go` with trusted domains, integrate with safePipeTargets
-5. [ ] Add test cases to `internal/corpus/testdata/bash_allow.txt`
-6. [ ] Add test cases to `internal/corpus/testdata/bash_continue.txt`
-7. [ ] Add adversarial cases to `internal/corpus/testdata/bash_adversarial.txt`
-8. [ ] Run `make test` — all golden corpus + unit tests pass
-9. [ ] Run `make install`
-10. [ ] Verify with `claude-guard test`
+2. [x] Add `CurlToDomain` rule type in `internal/rules/curl_domain.go` (new file, follows pattern of other rules)
+3. [x] Helpers in same file: `curlMethod(args)`, `curlURL(positional)`, `curlHasForbiddenFlags(args)`, `curlHasFileData(args)`
+4. [x] Register rule in `internal/config/defaults.go` with trusted domains, integrate with safePipeTargets
+5. [x] Add test cases to `internal/corpus/testdata/bash_allow.txt`
+6. [x] Add test cases to `internal/corpus/testdata/bash_continue.txt`
+7. [x] Add adversarial cases to `internal/corpus/testdata/bash_adversarial.txt`
+8. [x] Run `make test` — all golden corpus + unit tests pass
+9. [x] Run `make install`
+10. [x] Verify with `claude-guard test`
 
 ## Failure Routing
 
