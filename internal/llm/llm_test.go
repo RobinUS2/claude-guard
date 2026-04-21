@@ -67,6 +67,21 @@ func TestAutoSelect_PreferenceOrderGeminiFirst(t *testing.T) {
 }
 
 func TestAutoSelect_AnthropicPreferredButOnlyGeminiAvailable(t *testing.T) {
+	// Stub token-vault so LookupTokenVaultAnthropic can't find a real
+	// key from the host system, and reset the in-process cache.
+	old := tokenVaultBinary
+	tokenVaultBinary = "/nonexistent-token-vault-stub"
+	inProcessCache.Lock()
+	savedValue, savedChecked := inProcessCache.value, inProcessCache.checked
+	inProcessCache.value, inProcessCache.checked = "", false
+	inProcessCache.Unlock()
+	t.Cleanup(func() {
+		tokenVaultBinary = old
+		inProcessCache.Lock()
+		inProcessCache.value, inProcessCache.checked = savedValue, savedChecked
+		inProcessCache.Unlock()
+	})
+
 	c := AutoSelect("anthropic", fakeEnv(map[string]string{
 		"GEMINI_API_KEY": "gemini-yyy",
 	}))
@@ -76,6 +91,19 @@ func TestAutoSelect_AnthropicPreferredButOnlyGeminiAvailable(t *testing.T) {
 }
 
 func TestAutoSelect_NoKeysReturnsNil(t *testing.T) {
+	old := tokenVaultBinary
+	tokenVaultBinary = "/nonexistent-token-vault-stub"
+	inProcessCache.Lock()
+	savedValue, savedChecked := inProcessCache.value, inProcessCache.checked
+	inProcessCache.value, inProcessCache.checked = "", false
+	inProcessCache.Unlock()
+	t.Cleanup(func() {
+		tokenVaultBinary = old
+		inProcessCache.Lock()
+		inProcessCache.value, inProcessCache.checked = savedValue, savedChecked
+		inProcessCache.Unlock()
+	})
+
 	c := AutoSelect("", fakeEnv(nil))
 	if c != nil {
 		t.Errorf("expected nil when no keys; got %v", c)
