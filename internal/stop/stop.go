@@ -27,6 +27,10 @@ type StopRule interface {
 	// HighConfidence rules may fire even when stop_hook_active is true.
 	// Only rules with shell-verified evidence should return true.
 	HighConfidence() bool
+	// MaxContinues returns the per-rule continue cap. 0 means use the
+	// global session cap (default 3). Rules like feature-branch-left
+	// should fire at most once; uncommitted-changes can fire all 3 times.
+	MaxContinues() int
 	// TextPreFilter is a regex applied to LastAssistantText before Eval.
 	// Return "" to skip text pre-filtering (use for transcript-only checks).
 	// Shell checks never run unless this matches — key performance gate.
@@ -78,6 +82,12 @@ func EvaluateResult(sessionID, sessionDir string, stopHookActive bool, t Transcr
 		// Cool-down: if rule already fired this session with the same shell
 		// state, skip it.
 		if sess.hasFired(rule.Name()) {
+			continue
+		}
+
+		// Per-rule continue cap: if the rule has a MaxContinues() > 0 and
+		// has already fired that many times, skip it.
+		if mc := rule.MaxContinues(); mc > 0 && sess.ruleFireCount(rule.Name()) >= mc {
 			continue
 		}
 

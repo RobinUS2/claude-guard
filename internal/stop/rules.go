@@ -15,6 +15,7 @@ type uncommittedChangesRule struct{}
 
 func (r *uncommittedChangesRule) Name() string          { return "uncommitted-changes" }
 func (r *uncommittedChangesRule) HighConfidence() bool  { return true }
+func (r *uncommittedChangesRule) MaxContinues() int     { return 0 } // use global cap
 func (r *uncommittedChangesRule) TextPreFilter() string { return "" }
 
 func (r *uncommittedChangesRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
@@ -34,6 +35,7 @@ type proposedTestNotRunRule struct{}
 
 func (r *proposedTestNotRunRule) Name() string         { return "proposed-test-not-run" }
 func (r *proposedTestNotRunRule) HighConfidence() bool { return false }
+func (r *proposedTestNotRunRule) MaxContinues() int    { return 1 }
 func (r *proposedTestNotRunRule) TextPreFilter() string {
 	return `\b(go test|npm test|make test|pytest|cargo test)\b`
 }
@@ -56,6 +58,7 @@ type installNotRunRule struct{}
 
 func (r *installNotRunRule) Name() string         { return "install-not-run" }
 func (r *installNotRunRule) HighConfidence() bool { return false }
+func (r *installNotRunRule) MaxContinues() int    { return 1 }
 func (r *installNotRunRule) TextPreFilter() string {
 	return `\b(make install|install)\b`
 }
@@ -78,6 +81,7 @@ type openTodoItemsRule struct{}
 
 func (r *openTodoItemsRule) Name() string          { return "open-todo-items" }
 func (r *openTodoItemsRule) HighConfidence() bool  { return true }
+func (r *openTodoItemsRule) MaxContinues() int     { return 0 } // use global cap
 func (r *openTodoItemsRule) TextPreFilter() string { return "" }
 
 func (r *openTodoItemsRule) Eval(t Transcript, _ ShellContext) (bool, string) {
@@ -105,6 +109,7 @@ type prCreatedNotVerifiedRule struct{}
 
 func (r *prCreatedNotVerifiedRule) Name() string          { return "pr-created-not-verified" }
 func (r *prCreatedNotVerifiedRule) HighConfidence() bool  { return false }
+func (r *prCreatedNotVerifiedRule) MaxContinues() int     { return 1 }
 func (r *prCreatedNotVerifiedRule) TextPreFilter() string { return "" }
 
 func (r *prCreatedNotVerifiedRule) Eval(t Transcript, _ ShellContext) (bool, string) {
@@ -133,6 +138,7 @@ type committedNotPushedRule struct{}
 
 func (r *committedNotPushedRule) Name() string          { return "committed-not-pushed" }
 func (r *committedNotPushedRule) HighConfidence() bool  { return true }
+func (r *committedNotPushedRule) MaxContinues() int     { return 0 } // use global cap
 func (r *committedNotPushedRule) TextPreFilter() string { return "" }
 
 func (r *committedNotPushedRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
@@ -153,6 +159,7 @@ type failingTestsRule struct{}
 
 func (r *failingTestsRule) Name() string         { return "failing-tests" }
 func (r *failingTestsRule) HighConfidence() bool { return false }
+func (r *failingTestsRule) MaxContinues() int    { return 0 } // use global cap
 func (r *failingTestsRule) TextPreFilter() string {
 	return `(?i)\b(FAIL|FAILED|ERROR|panic|test.*fail)`
 }
@@ -184,6 +191,7 @@ type featureBranchLeftRule struct{}
 
 func (r *featureBranchLeftRule) Name() string          { return "feature-branch-left" }
 func (r *featureBranchLeftRule) HighConfidence() bool  { return false }
+func (r *featureBranchLeftRule) MaxContinues() int     { return 1 } // fire once only
 func (r *featureBranchLeftRule) TextPreFilter() string { return "" }
 
 func (r *featureBranchLeftRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
@@ -207,6 +215,7 @@ type worktreeLeftOpenRule struct{}
 
 func (r *worktreeLeftOpenRule) Name() string          { return "worktree-left-open" }
 func (r *worktreeLeftOpenRule) HighConfidence() bool  { return false }
+func (r *worktreeLeftOpenRule) MaxContinues() int     { return 1 } // fire once only
 func (r *worktreeLeftOpenRule) TextPreFilter() string { return "" }
 
 func (r *worktreeLeftOpenRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
@@ -237,6 +246,7 @@ type stopPhraseGuardRule struct{}
 
 func (r *stopPhraseGuardRule) Name() string          { return "stop-phrase-guard" }
 func (r *stopPhraseGuardRule) HighConfidence() bool  { return false }
+func (r *stopPhraseGuardRule) MaxContinues() int     { return 2 }
 func (r *stopPhraseGuardRule) TextPreFilter() string { return "" } // check all text
 
 // stopPhraseCategories maps category labels to their pattern strings.
@@ -314,6 +324,7 @@ type noAskHumanRule struct{}
 
 func (r *noAskHumanRule) Name() string          { return "no-ask-human" }
 func (r *noAskHumanRule) HighConfidence() bool  { return false }
+func (r *noAskHumanRule) MaxContinues() int     { return 2 }
 func (r *noAskHumanRule) TextPreFilter() string { return `(?i)\b(should I|do you want|would you like|shall I)\b` }
 
 func (r *noAskHumanRule) Eval(_ Transcript, _ ShellContext) (bool, string) {
