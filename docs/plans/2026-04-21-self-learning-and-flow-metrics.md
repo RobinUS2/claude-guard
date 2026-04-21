@@ -1,7 +1,7 @@
 # Task: Self-Learning Guard + Flow Metrics + SQLite Storage + Web Dashboard
 
 **Created:** 2026-04-21
-**Status:** Planning
+**Status:** Complete (Phase 0-4 all implemented)
 **Context:** The guard forwards verifier disagreements to the user (Continue), but never learns from user approvals. The same command gets prompted every time. Additionally, there's no visibility into how much the guard interrupts the developer flow. Finally, the file-per-key cache (2500+ files across 256 shards) should migrate to SQLite for better performance, atomicity, and to enable persistent metrics history.
 
 ## Problem

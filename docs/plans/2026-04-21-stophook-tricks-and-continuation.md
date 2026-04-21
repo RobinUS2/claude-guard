@@ -1,7 +1,7 @@
 # Task: Stop Hook Tricks, Continuation Patterns & Permission Gap Fix
 
 **Created:** 2026-04-21
-**Status:** Planning
+**Status:** In Progress (Phase 1-3 mostly done, Phase 4-5 pending)
 **Context:** Deep research into community stop hook patterns, autonomous operation tricks, and investigation of why claude-guard prompts commands that should auto-continue. Combines findings from community research with identified gaps in the current guard architecture.
 
 ## Problem Summary
@@ -65,7 +65,7 @@ Complex but safe multi-line commands (taufinity API polling loops, backup cp/mkd
 
 The self-learning code is already committed (`a438fd0`). Install and verify.
 
-1. [ ] Install latest claude-guard binary
+1. [x] Install latest claude-guard binary
    - `cd ~/Documents/code/claude-guard && make install`
    - **Verification:** `claude-guard --version` shows `a438fd0` or later
 
@@ -87,7 +87,7 @@ The self-learning code is already committed (`a438fd0`). Install and verify.
 
 Based on community patterns that proved effective.
 
-4. [ ] Add `stopPhraseGuardRule` — catches premature stopping phrases
+4. [x] Add `stopPhraseGuardRule` — catches premature stopping phrases
    Categories to match (from anthropics/claude-code#42796, adapted):
    - Ownership dodging: "not caused by my changes", "existing issue", "pre-existing"
    - Permission-seeking: "should I continue?", "want me to keep going?", "would you like me to"
@@ -97,7 +97,7 @@ Based on community patterns that proved effective.
    High confidence: false (text-only)
    - **Verification:** `claude-guard test` with synthetic transcript containing these phrases
 
-5. [ ] Add `noAskHumanRule` — catches "Should I...?" in autonomous sessions
+5. [x] Add `noAskHumanRule` — catches "Should I...?" in autonomous sessions
    Only fires when `CLAUDE_GUARD_AUTONOMOUS=1` env var is set (or similar flag).
    Matches: "Should I", "Do you want me to", "Would you like me to", "Shall I"
    Reason: "Decide autonomously — you have the context. Act on the task."
@@ -127,7 +127,7 @@ Fix false positive "unsafe" classifications for common patterns.
    c. Improve LLM prompt with better context about safe API call patterns
    - **Verification:** `claude-guard test 'cp ~/.claude/CLAUDE.md ~/some/backup'` → instant_allow
 
-8. [ ] Add domain allowlist to LLM classifier context
+8. [x] Add domain allowlist to LLM classifier context
    When the command contains curl/wget to a domain in the project's `.claude-guard.yml`:
    ```yaml
    trusted_domains:
@@ -188,7 +188,7 @@ Fix false positive "unsafe" classifications for common patterns.
     `--dry-run` shows what would change.
     - **Verification:** `claude-guard settings migrate --dry-run`
 
-15. [ ] Schedule periodic credential scan of settings.json
+15. [x] Schedule periodic credential scan of settings.json (added to doctor)
     The current settings.json has 12+ curl commands with Atlassian API tokens in cleartext.
     Add check in `claude-guard doctor`:
     ```

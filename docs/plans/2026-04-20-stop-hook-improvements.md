@@ -1,7 +1,7 @@
 # Task: Stop Hook Improvements
 
 **Created:** 2026-04-20
-**Status:** In Progress
+**Status:** Complete
 **Context:** The stop hook was being called 402 times/day but never firing on real sessions. Root cause analysis revealed two issues: (1) the `uncommittedChangesRule` TextPreFilter required trigger words like "done"/"shipped" in the last assistant text, but Claude's last turn often ends with a tool_use block (no text), and (2) no diagnostic logging to debug why rules missed.
 
 ## Root Cause
