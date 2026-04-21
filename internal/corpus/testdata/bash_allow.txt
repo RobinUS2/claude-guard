@@ -316,3 +316,11 @@ curl -s -X PUT -H "Authorization: Bearer token123" -H "Content-Type: application
 curl -s "https://studio.taufinity.io:443/api/sites/2/settings"
 # URL with credentials in URL (host parsing must strip userinfo)
 curl -s "https://user:pass@studio.taufinity.io/api/sites/2"
+# Compound: curl with pipe to jq (common pattern)
+curl -s "https://studio.taufinity.io/api/sites/2/settings" | jq .
+# Compound: curl PUT with pipe to jq
+curl -s -X PUT -H "Content-Type: application/json" "https://studio.taufinity.io/api/sites/2/settings/ai" -d '{"temperature": 0.7}' | jq '{success}'
+# Compound: curl with 2>&1 redirect
+curl -s "https://studio.taufinity.io/api/sites/2" 2>&1
+# Compound: curl piped to jq then head
+curl -s "https://studio.taufinity.io/api/dashboards" | jq '.[] | .name' | head -5

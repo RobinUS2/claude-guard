@@ -198,8 +198,8 @@ func curlExtractMethod(args []string) string {
 			return strings.ToUpper(args[i+1])
 		}
 		// Handle --request=METHOD and -XMETHOD forms.
-		if strings.HasPrefix(arg, "--request=") {
-			return strings.ToUpper(strings.TrimPrefix(arg, "--request="))
+		if method, ok := strings.CutPrefix(arg, "--request="); ok {
+			return strings.ToUpper(method)
 		}
 		if strings.HasPrefix(arg, "-X") && len(arg) > 2 {
 			return strings.ToUpper(arg[2:])
@@ -278,14 +278,30 @@ func curlIsValueFlag(arg string) bool {
 }
 
 // curlHasFlag checks if a specific flag is present in the args list.
+// Handles combined short flags (e.g., "-so" contains "-o") and --flag=value.
+// Uses the same matching logic as anchoredFlagForbidden for consistency.
 func curlHasFlag(args []string, flag string) bool {
 	for _, arg := range args {
 		if arg == flag {
 			return true
 		}
-		// Handle --flag=value form.
-		if strings.HasPrefix(arg, flag+"=") {
-			return true
+		// Long flag: --flag=value or --flag-variant
+		if strings.HasPrefix(flag, "--") {
+			if strings.HasPrefix(arg, flag+"=") {
+				return true
+			}
+			continue
+		}
+		// Short flag (e.g., "-o"): check combined short flags like "-so".
+		if strings.HasPrefix(flag, "-") && len(flag) == 2 {
+			want := rune(flag[1])
+			if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 2 {
+				for _, ch := range arg[1:] {
+					if ch == want {
+						return true
+					}
+				}
+			}
 		}
 	}
 	return false

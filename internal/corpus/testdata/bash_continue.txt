@@ -226,3 +226,12 @@ curl -s -XDELETE "https://studio.taufinity.io/api/sites/2"
 # Destructive path in POST
 curl -s -X POST "https://studio.taufinity.io/api/data/purge"
 curl -s -X POST "https://studio.taufinity.io/api/database/drop"
+# curl combined short flag bypass: -so has -o embedded
+curl -so /dev/null "https://studio.taufinity.io/api/health"
+# curl to subdomain confusion: evil.studio.taufinity.io is a subdomain of studio.taufinity.io
+# (but this is actually valid — if studio.taufinity.io is trusted, its subdomains are too)
+# curl to domain that ends with trusted domain name (must NOT match)
+curl -s "https://not-studio.taufinity.io/api/data"
+# http (non-TLS) to trusted domain — still allowed, TLS enforcement is not this rule's job
+# curl with --output=/tmp/file form
+curl -s "https://studio.taufinity.io/api/data" --output=/tmp/file.json
