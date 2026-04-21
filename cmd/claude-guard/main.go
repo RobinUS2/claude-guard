@@ -75,6 +75,8 @@ func run(args []string) int {
 		return cmdBackup(args[1:])
 	case "cache":
 		return cmdCache(args[1:])
+	case "learn":
+		return cmdLearn(args[1:])
 	case "trust":
 		return cmdTrust(args[1:])
 	case "init-project-config":

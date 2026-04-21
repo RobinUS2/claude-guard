@@ -570,6 +570,7 @@ func (e *Engine) Decide(in Input) Output {
 					out.SkipReason = "verifier_disagree_forwarded_to_user"
 					out.Latency = time.Since(start)
 					e.record(in, out)
+					writePendingApproval(in.ToolUseID, in.Command, "", in.CWD, in.SessionID, out.Reason)
 					return out
 				}
 			}
@@ -621,6 +622,7 @@ func (e *Engine) Decide(in Input) Output {
 					out.SkipReason = "verifier_disagree_forwarded_to_user"
 					out.Latency = time.Since(start)
 					e.record(in, out)
+					writePendingApproval(in.ToolUseID, in.Command, entry.CanonicalForm, in.CWD, in.SessionID, out.Reason)
 					return out
 				}
 				// Shadow mode: log and fall through.
@@ -697,6 +699,7 @@ func (e *Engine) Decide(in Input) Output {
 	// Tier 6: default (no verdict, fall through to user prompt).
 	out.Latency = time.Since(start)
 	e.record(in, out)
+	writePendingApproval(in.ToolUseID, in.Command, "", in.CWD, in.SessionID, "no rule matched")
 	return out
 }
 
