@@ -15,6 +15,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"github.com/RobinUS2/claude-guard/internal/projectconfig"
+	"github.com/RobinUS2/claude-guard/internal/store"
 	"github.com/RobinUS2/claude-guard/internal/version"
 )
 
@@ -149,6 +150,27 @@ func cmdDoctor(_ []string) int {
 		check("budget", true, budgetDetail)
 	}
 
+	// 6b3. SQLite store status
+	dbPath := defaultStorePath()
+	if info, err := os.Stat(dbPath); err == nil {
+		dbSize := float64(info.Size()) / 1024
+		db, dbErr := store.Open(dbPath)
+		if dbErr != nil {
+			warn("sqlite", fmt.Sprintf("%s (open error: %v)", dbPath, dbErr))
+		} else {
+			defer db.Close()
+			vs, _ := db.VerdictStats()
+			pendingCount, _ := db.CountPending()
+			learnedCount, _ := db.CountLearned()
+			historyCount, _ := db.CountMetrics()
+			detail := fmt.Sprintf("%.1f KiB, verdicts=%d, pending=%d, learned=%d, snapshots=%d",
+				dbSize, vs.Entries, pendingCount, learnedCount, historyCount)
+			check("sqlite", true, detail)
+		}
+	} else {
+		check("sqlite", true, "not yet created (will be created on first learn)")
+	}
+
 	// 6c. Tier 5 legacy allow list
 	legacyPath := filepath.Join(home, ".config", "claude-guard", "legacy-patterns.yaml")
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
@@ -196,6 +218,12 @@ func cmdDoctor(_ []string) int {
 		check("hook:stop", true, stopDetail)
 	} else {
 		warn("hook:stop", stopDetail)
+	}
+	learnWired, learnDetail := checkLearnHookWired(settingsPath)
+	if learnWired {
+		check("hook:learn", true, learnDetail)
+	} else {
+		warn("hook:learn", learnDetail+" (self-learning disabled)")
 	}
 
 	// 7. Binary self-location
@@ -262,6 +290,30 @@ func checkStopHookWired(settingsPath string) (bool, string) {
 		}
 	}
 	return false, fmt.Sprintf("no Stop hook pointing to 'claude-guard stop' in %s", settingsPath)
+}
+
+func checkLearnHookWired(settingsPath string) (bool, string) {
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return false, fmt.Sprintf("cannot read %s: %v", settingsPath, err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return false, fmt.Sprintf("%s not valid JSON: %v", settingsPath, err)
+	}
+	hooks, _ := parsed["hooks"].(map[string]any)
+	postHooks, _ := hooks["PostToolUse"].([]any)
+	for _, entry := range postHooks {
+		m, _ := entry.(map[string]any)
+		inner, _ := m["hooks"].([]any)
+		for _, h := range inner {
+			hm, _ := h.(map[string]any)
+			if cmd, _ := hm["command"].(string); strings.Contains(cmd, "claude-guard learn") {
+				return true, cmd
+			}
+		}
+	}
+	return false, fmt.Sprintf("no PostToolUse hook pointing to 'claude-guard learn' in %s", settingsPath)
 }
 
 // checkHookWired reads settings.json and reports whether a PreToolUse

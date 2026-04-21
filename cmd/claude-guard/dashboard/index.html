@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>claude-guard dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <header>
+        <h1>claude-guard</h1>
+        <nav>
+            <button class="nav-btn active" data-page="overview">Overview</button>
+            <button class="nav-btn" data-page="timeline">Timeline</button>
+            <button class="nav-btn" data-page="cache">Cache</button>
+            <button class="nav-btn" data-page="learned">Learned</button>
+            <button class="nav-btn" data-page="stop-hooks">Stop Hooks</button>
+        </nav>
+        <span class="refresh-indicator" id="refreshIndicator" title="Auto-refreshes every 5s"></span>
+    </header>
+
+    <main>
+        <section id="page-overview" class="page active">
+            <div class="stats-grid" id="statsCards"></div>
+            <div class="charts-row">
+                <div class="chart-card">
+                    <h3>Verdict Distribution</h3>
+                    <canvas id="verdictChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>Tier Distribution</h3>
+                    <canvas id="tierChart"></canvas>
+                </div>
+            </div>
+            <div class="section">
+                <h3>Recent Decisions</h3>
+                <table id="recentDecisions">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Command</th>
+                            <th>Verdict</th>
+                            <th>Tier</th>
+                            <th>Latency</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="page-timeline" class="page">
+            <div class="controls">
+                <label>Since:
+                    <select id="timelineSince">
+                        <option value="1h">1 hour</option>
+                        <option value="6h">6 hours</option>
+                        <option value="24h" selected>24 hours</option>
+                        <option value="7d">7 days</option>
+                    </select>
+                </label>
+            </div>
+            <div class="chart-card wide">
+                <h3>Decisions Over Time</h3>
+                <canvas id="timelineChart"></canvas>
+            </div>
+        </section>
+
+        <section id="page-cache" class="page">
+            <div class="controls">
+                <input type="text" id="cacheSearch" placeholder="Search commands..." class="search-input">
+                <select id="cacheVerdict">
+                    <option value="">All verdicts</option>
+                    <option value="allow">Allow</option>
+                    <option value="deny">Deny</option>
+                </select>
+            </div>
+            <table id="cacheTable">
+                <thead>
+                    <tr>
+                        <th>Command</th>
+                        <th>Verdict</th>
+                        <th>Tier</th>
+                        <th>Provider</th>
+                        <th>Stored</th>
+                        <th>Verified</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </section>
+
+        <section id="page-learned" class="page">
+            <div class="section">
+                <h3>Learned Patterns</h3>
+                <p class="subtitle">Commands auto-approved from user feedback</p>
+            </div>
+            <table id="learnedTable">
+                <thead>
+                    <tr>
+                        <th>Command</th>
+                        <th>Canonical Form</th>
+                        <th>Program</th>
+                        <th>Approvals</th>
+                        <th>Learned At</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </section>
+
+        <section id="page-stop-hooks" class="page">
+            <div class="stats-grid" id="stopHookStats"></div>
+            <table id="stopHookTable">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Rule</th>
+                        <th>Injected</th>
+                        <th>Suppressed</th>
+                        <th>Continue Count</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,347 @@
+/* claude-guard dashboard — dark theme matching terminal aesthetics */
+
+:root {
+    --bg: #1a1a2e;
+    --bg-card: #16213e;
+    --bg-card-alt: #1a2744;
+    --text: #e0e0e0;
+    --text-muted: #8892a4;
+    --accent: #0f3460;
+    --accent-light: #1a5276;
+    --border: #2c3e50;
+    --green: #27ae60;
+    --red: #c0392b;
+    --yellow: #f39c12;
+    --blue: #2980b9;
+    --purple: #8e44ad;
+    --row-odd: #162240;
+    --row-even: #1a2a4a;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+header {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+}
+
+nav {
+    display: flex;
+    gap: 4px;
+}
+
+.nav-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    padding: 6px 14px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    transition: all 0.15s;
+}
+
+.nav-btn:hover {
+    color: var(--text);
+    background: var(--accent);
+}
+
+.nav-btn.active {
+    color: var(--text);
+    background: var(--accent);
+    border-color: var(--accent-light);
+}
+
+.refresh-indicator {
+    margin-left: auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    display: inline-block;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+main {
+    padding: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.page {
+    display: none;
+}
+
+.page.active {
+    display: block;
+}
+
+/* Stats cards */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.stat-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+}
+
+.stat-card .label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.stat-card .value {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.stat-card .sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* Charts */
+.charts-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.chart-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+}
+
+.chart-card.wide {
+    grid-column: 1 / -1;
+}
+
+.chart-card h3 {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--text-muted);
+}
+
+.chart-card canvas {
+    max-height: 280px;
+}
+
+/* Tables */
+.section {
+    margin-bottom: 16px;
+}
+
+.section h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.subtitle {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-bottom: 12px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 12px;
+}
+
+thead th {
+    background: var(--accent);
+    color: var(--text);
+    padding: 10px 12px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+}
+
+tbody tr:nth-child(odd) {
+    background: var(--row-odd);
+}
+
+tbody tr:nth-child(even) {
+    background: var(--row-even);
+}
+
+tbody tr:hover {
+    background: var(--accent-light);
+}
+
+tbody td {
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    max-width: 400px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Verdict badges */
+.verdict {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.verdict-allow {
+    background: rgba(39, 174, 96, 0.2);
+    color: var(--green);
+}
+
+.verdict-deny {
+    background: rgba(192, 57, 43, 0.2);
+    color: var(--red);
+}
+
+.verdict-continue {
+    background: rgba(243, 156, 18, 0.2);
+    color: var(--yellow);
+}
+
+/* Boolean badges */
+.badge-true {
+    color: var(--green);
+}
+
+.badge-false {
+    color: var(--text-muted);
+}
+
+/* Controls */
+.controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 16px;
+}
+
+.search-input {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 8px 12px;
+    font-family: inherit;
+    font-size: 12px;
+    width: 300px;
+}
+
+.search-input:focus {
+    outline: none;
+    border-color: var(--accent-light);
+}
+
+select {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 8px 12px;
+    font-family: inherit;
+    font-size: 12px;
+}
+
+select:focus {
+    outline: none;
+    border-color: var(--accent-light);
+}
+
+label {
+    color: var(--text-muted);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Empty state */
+.empty-state {
+    text-align: center;
+    padding: 48px 24px;
+    color: var(--text-muted);
+}
+
+.empty-state p {
+    font-size: 14px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .charts-row {
+        grid-template-columns: 1fr;
+    }
+
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    header {
+        flex-wrap: wrap;
+        gap: 12px;
+    }
+
+    nav {
+        flex-wrap: wrap;
+    }
+}

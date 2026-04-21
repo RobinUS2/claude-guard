@@ -676,3 +676,33 @@ func nullStr(ns sql.NullString) string {
 	}
 	return ""
 }
+
+// CountPending returns the number of pending approval rows.
+func (s *Store) CountPending() (int, error) {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM pending_approvals").Scan(&n)
+	return n, err
+}
+
+// CountLearned returns the number of verdict entries with tier='learned'.
+func (s *Store) CountLearned() (int, error) {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM verdicts WHERE tier = 'learned'").Scan(&n)
+	return n, err
+}
+
+// CountMetrics returns the number of metrics snapshot rows.
+func (s *Store) CountMetrics() (int, error) {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM metrics_snapshots").Scan(&n)
+	return n, err
+}
+
+// LearnedStats returns the count of learned patterns and the total
+// cumulative match_count across all learned entries (auto-allows).
+func (s *Store) LearnedStats() (patterns int, autoAllows int, err error) {
+	err = s.db.QueryRow(
+		"SELECT COUNT(*), COALESCE(SUM(match_count), 0) FROM verdicts WHERE tier = 'learned'",
+	).Scan(&patterns, &autoAllows)
+	return
+}

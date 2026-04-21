@@ -14,6 +14,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
+	"github.com/RobinUS2/claude-guard/internal/store"
 )
 
 // cmdStats prints an aggregate summary of decisions.jsonl plus cache
@@ -26,11 +27,19 @@ func cmdStats(args []string) int {
 
 	var since time.Duration
 	var pathOverride string
+	var record, history bool
 	fs.DurationVar(&since, "since", 24*time.Hour, "only consider log entries from the last N (e.g. 24h, 7d)")
 	fs.StringVar(&pathOverride, "path", "", "override the decisions log path")
+	fs.BoolVar(&record, "record", false, "write a metrics snapshot to SQLite")
+	fs.BoolVar(&history, "history", false, "show metrics trend over time")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+
+	// --history: show trend table and exit early.
+	if history {
+		return showHistory()
 	}
 
 	cfg := config.Default()
@@ -188,6 +197,68 @@ func cmdStats(args []string) int {
 		}
 	}
 
+	// Flow metrics: uninterrupted stretches and interrupt breakdown.
+	stretches := computeStretches(agg)
+	learnedPatterns, autoAllows := countLearnedFromStore()
+	if len(stretches) > 0 || agg.interruptCount > 0 {
+		fmt.Println()
+		fmt.Printf("flow metrics (last %s):\n", since)
+		if len(stretches) > 0 {
+			fmt.Println("  uninterrupted stretches:")
+			fmt.Printf("    median:  %s\n", formatDuration(percentileDuration(stretches, 0.50)))
+			fmt.Printf("    p95:     %s\n", formatDuration(percentileDuration(stretches, 0.95)))
+			fmt.Printf("    longest: %s\n", formatDuration(percentileDuration(stretches, 1.00)))
+		}
+		userApproved := agg.interruptCount
+		unanswered := 0
+		if learnedPatterns > 0 && userApproved > learnedPatterns {
+			unanswered = userApproved - learnedPatterns
+			userApproved = learnedPatterns
+		}
+		fmt.Printf("  human interrupts: %d (user-approved: %d, unanswered: %d)\n",
+			agg.interruptCount, userApproved, unanswered)
+		fmt.Printf("  learned patterns: %d (auto-allows from learning: %d)\n",
+			learnedPatterns, autoAllows)
+	}
+
+	// --record: write a metrics snapshot to SQLite.
+	if record {
+		medianS := 0.0
+		p95S := 0.0
+		if len(stretches) > 0 {
+			medianS = percentileDuration(stretches, 0.50).Seconds()
+			p95S = percentileDuration(stretches, 0.95).Seconds()
+		}
+		snap := store.MetricsSnapshot{
+			PeriodHours:         int(since.Hours()),
+			TotalDecisions:      agg.total,
+			AllowCount:          agg.byVerdict["allow"],
+			ContinueCount:       agg.byVerdict["continue"],
+			DenyCount:           agg.byVerdict["deny"],
+			LearnedAllows:       autoAllows,
+			StopHookEvals:       agg.stopTotal,
+			StopHookFires:       agg.stopInjected,
+			Interrupts:          agg.interruptCount,
+			UserApproved:        agg.interruptCount, // best estimate
+			MedianUninterrupted: medianS,
+			P95Uninterrupted:    p95S,
+			LearnedPatterns:     learnedPatterns,
+		}
+		dbPath := defaultStorePath()
+		db, err := store.Open(dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stats: cannot open store: %v\n", err)
+		} else {
+			if err := db.RecordMetrics(snap); err != nil {
+				fmt.Fprintf(os.Stderr, "stats: record metrics: %v\n", err)
+			} else {
+				fmt.Println()
+				fmt.Println("(snapshot recorded to SQLite)")
+			}
+			db.Close()
+		}
+	}
+
 	return 0
 }
 
@@ -263,14 +334,25 @@ type aggregation struct {
 	stopInjected int
 	stopCapped   int
 	stopByRule   map[string]int
+
+	// flow metrics: interrupt tracking per session
+	interruptTimes map[string][]time.Time // session_id → list of Continue timestamps
+	interruptCount int                    // total Continue verdicts
+
+	// session boundaries: first and last event per session
+	sessionFirst map[string]time.Time
+	sessionLast  map[string]time.Time
 }
 
 func newAggregation() *aggregation {
 	return &aggregation{
-		byVerdict:     map[string]int{},
-		byTier:        map[string]int{},
-		byTier4Shadow: map[string]int{},
-		stopByRule:    map[string]int{},
+		byVerdict:      map[string]int{},
+		byTier:         map[string]int{},
+		byTier4Shadow:  map[string]int{},
+		stopByRule:     map[string]int{},
+		interruptTimes: map[string][]time.Time{},
+		sessionFirst:   map[string]time.Time{},
+		sessionLast:    map[string]time.Time{},
 	}
 }
 
@@ -298,6 +380,30 @@ func (a *aggregation) add(rec *clog.ReadRecord) {
 		}
 	}
 	a.latencies = append(a.latencies, float64(rec.LatencyUS)/1000.0)
+
+	// Track flow metrics: interrupt times and session boundaries.
+	ts, err := time.Parse(time.RFC3339Nano, rec.Time)
+	if err != nil {
+		return
+	}
+	sid := rec.SessionID
+	if sid == "" {
+		return
+	}
+
+	// Update session boundaries.
+	if first, ok := a.sessionFirst[sid]; !ok || ts.Before(first) {
+		a.sessionFirst[sid] = ts
+	}
+	if last, ok := a.sessionLast[sid]; !ok || ts.After(last) {
+		a.sessionLast[sid] = ts
+	}
+
+	// Track Continue verdicts as human interrupts.
+	if strings.EqualFold(rec.Verdict, "continue") {
+		a.interruptCount++
+		a.interruptTimes[sid] = append(a.interruptTimes[sid], ts)
+	}
 }
 
 // printCounts prints a sorted table of (name, count, pct%).
@@ -337,4 +443,155 @@ func percentileMs(values []float64, p float64) float64 {
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
+}
+
+// computeStretches calculates uninterrupted time stretches from the
+// aggregation's per-session interrupt times. Within each session it
+// measures the gap between consecutive Continue verdicts, plus the gap
+// from session start to the first Continue and from the last Continue
+// to session end.
+func computeStretches(agg *aggregation) []time.Duration {
+	var stretches []time.Duration
+	for sid, times := range agg.interruptTimes {
+		if len(times) == 0 {
+			continue
+		}
+		sorted := make([]time.Time, len(times))
+		copy(sorted, times)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Before(sorted[j]) })
+
+		// Gap from session start to first interrupt.
+		if start, ok := agg.sessionFirst[sid]; ok && sorted[0].After(start) {
+			stretches = append(stretches, sorted[0].Sub(start))
+		}
+
+		// Gaps between consecutive interrupts.
+		for i := 1; i < len(sorted); i++ {
+			d := sorted[i].Sub(sorted[i-1])
+			if d > 0 {
+				stretches = append(stretches, d)
+			}
+		}
+
+		// Gap from last interrupt to session end.
+		if end, ok := agg.sessionLast[sid]; ok && end.After(sorted[len(sorted)-1]) {
+			stretches = append(stretches, end.Sub(sorted[len(sorted)-1]))
+		}
+	}
+
+	// Also add full-session stretches for sessions with zero interrupts.
+	for sid, start := range agg.sessionFirst {
+		if _, hasInterrupts := agg.interruptTimes[sid]; hasInterrupts {
+			continue
+		}
+		if end, ok := agg.sessionLast[sid]; ok && end.After(start) {
+			stretches = append(stretches, end.Sub(start))
+		}
+	}
+
+	return stretches
+}
+
+// percentileDuration returns the p-th percentile from a slice of
+// durations. Returns 0 for empty input.
+func percentileDuration(values []time.Duration, p float64) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := make([]time.Duration, len(values))
+	copy(sorted, values)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	idx := int(float64(len(sorted)-1) * p)
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+// formatDuration produces human-readable durations like "12m 30s",
+// "2h 15m", "45s". Returns "0s" for zero duration.
+func formatDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	d = d.Round(time.Second)
+
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%dh %02dm", h, m)
+	case h > 0:
+		return fmt.Sprintf("%dh 00m", h)
+	case m > 0 && s > 0:
+		return fmt.Sprintf("%dm %02ds", m, s)
+	case m > 0:
+		return fmt.Sprintf("%dm 00s", m)
+	default:
+		return fmt.Sprintf("%ds", s)
+	}
+}
+
+// countLearnedFromStore queries the SQLite store for learned patterns
+// and their cumulative auto-allow match counts. Returns (patterns, autoAllows).
+func countLearnedFromStore() (int, int) {
+	dbPath := defaultStorePath()
+	db, err := store.Open(dbPath)
+	if err != nil {
+		return 0, 0
+	}
+	defer db.Close()
+
+	patterns, autoAllows, err := db.LearnedStats()
+	if err != nil {
+		return 0, 0
+	}
+	return patterns, autoAllows
+}
+
+// showHistory prints a trend table from SQLite metrics_snapshots.
+func showHistory() int {
+	dbPath := defaultStorePath()
+	db, err := store.Open(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "stats: cannot open store: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	snapshots, err := db.GetMetricsHistory(30)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "stats: query history: %v\n", err)
+		return 1
+	}
+
+	if len(snapshots) == 0 {
+		fmt.Println("trend (last 30 days): no snapshots recorded")
+		fmt.Println("  hint: run 'claude-guard stats --record' to capture a snapshot")
+		return 0
+	}
+
+	fmt.Println("trend (last 30 days):")
+	fmt.Printf("  %-12s %10s %7s %11s %8s %11s\n",
+		"date", "decisions", "allow%", "interrupts", "learned", "stop-fires")
+	for _, s := range snapshots {
+		allowPct := 0.0
+		if s.TotalDecisions > 0 {
+			allowPct = float64(s.AllowCount) / float64(s.TotalDecisions) * 100
+		}
+		fmt.Printf("  %-12s %10d %6.1f%% %11d %8d %11d\n",
+			s.RecordedAt.Format("2006-01-02"),
+			s.TotalDecisions,
+			allowPct,
+			s.Interrupts,
+			s.LearnedPatterns,
+			s.StopHookFires,
+		)
+	}
+	return 0
 }
