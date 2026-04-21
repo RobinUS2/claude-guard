@@ -1,7 +1,7 @@
 # Task: Stop Hook Tricks, Continuation Patterns & Permission Gap Fix
 
 **Created:** 2026-04-21
-**Status:** In Progress (Phase 1-3 mostly done, Phase 4-5 pending)
+**Status:** In Progress (Phase 1-3 done, Phase 4 partially done, Phase 5 partially done)
 **Context:** Deep research into community stop hook patterns, autonomous operation tricks, and investigation of why claude-guard prompts commands that should auto-continue. Combines findings from community research with identified gaps in the current guard architecture.
 
 ## Problem Summary
@@ -76,7 +76,7 @@ The self-learning code is already committed (`a438fd0`). Install and verify.
    - Check that next invocation of same command auto-allows via learned cache
    - **Verification:** `claude-guard test "<same command>"` shows `tier: learned`
 
-3. [ ] Audit and clean settings.json permission bloat
+3. [x] Audit and clean settings.json permission bloat (410 → 185, removed 15 cred + 210 redundant)
    - Count current entries: `jq '.permissions.allow | length' ~/.claude/settings.json`
    - Identify entries that claude-guard already handles (instant_allow or learned)
    - Remove redundant entries (safe Bash commands already in tier 2)
@@ -160,7 +160,7 @@ Fix false positive "unsafe" classifications for common patterns.
     Alternative: count transcript entries (rough proxy).
     - **Verification:** `go test ./internal/stop/ -run Context -v`
 
-12. [ ] Make continue cap configurable per-rule
+12. [x] Make continue cap configurable per-rule (MaxContinues() on StopRule interface)
     Some rules (uncommitted-changes, open-todo-items) are important enough to fire all 3 times. Others (feature-branch-left) should only fire once.
     Add `MaxContinues` to `StopRule` interface:
     ```go
