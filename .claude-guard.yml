@@ -1,5 +1,9 @@
 version: 1
 project_name: claude-guard
+scope: "CLI security guard for Claude Code. Evaluates Bash commands via AST rules, LLM classifier, and self-learning cache."
+trusted_domains:
+  - studio.taufinity.io
+  - localhost
 allow:
   - name: make-guard-targets
     programs: [make]

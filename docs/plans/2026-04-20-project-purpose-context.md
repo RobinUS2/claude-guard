@@ -1,7 +1,7 @@
 # Task: Project Purpose Context for LLM Classifier
 
 **Created:** 2026-04-20
-**Status:** Planning
+**Status:** Partially Complete (scope + trusted_domains in .claude-guard.yml done, README auto-distillation deferred)
 **Context:** The LLM classifier marks `curl -X PATCH` calls as "unsafe" even when the project's entire purpose is making API calls (e.g., dashboard sync tools, API clients). The classifier lacks project-level context about what "normal work" looks like in a given repo.
 
 ## Problem

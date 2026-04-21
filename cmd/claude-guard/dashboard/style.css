@@ -234,6 +234,38 @@ tbody td {
     white-space: nowrap;
 }
 
+/* Expandable detail rows */
+tr[data-detail] {
+    cursor: pointer;
+}
+
+tr[data-detail]:hover td {
+    background: var(--accent-light);
+}
+
+tr.expanded td {
+    border-bottom-color: var(--accent-light);
+}
+
+.detail-row td {
+    padding: 0 !important;
+    border-top: none !important;
+    background: var(--bg) !important;
+}
+
+.detail-content {
+    margin: 0;
+    padding: 12px 16px;
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-all;
+    border-left: 3px solid var(--accent-light);
+    background: rgba(15, 52, 96, 0.15);
+}
+
 /* Verdict badges */
 .verdict {
     display: inline-block;

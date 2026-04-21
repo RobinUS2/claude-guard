@@ -793,9 +793,14 @@ func DefaultAllowRules() []rules.Rule {
 		// Forbidden flags (-o, --upload-file, --resolve) cause NoMatch.
 		// Data @file references cause NoMatch (exfiltration risk).
 		// Tolerates compound commands (TOKEN=$(cmd) && curl ... | jq).
+		//
+		// localhost is included because local development servers are
+		// the operator's own processes — no exfiltration or remote-code
+		// risk. Project configs can add additional domains via the
+		// `trusted_domains` YAML key (injected into LLM context).
 		&rules.CurlToDomain{
 			RuleName:        "curl-to-trusted-domain",
-			TrustedDomains:  []string{"studio.taufinity.io"},
+			TrustedDomains:  []string{"studio.taufinity.io", "localhost"},
 			SafePipeTargets: safePipeTargets,
 		},
 

@@ -235,3 +235,20 @@ curl -s "https://not-studio.taufinity.io/api/data"
 # http (non-TLS) to trusted domain — still allowed, TLS enforcement is not this rule's job
 # curl with --output=/tmp/file form
 curl -s "https://studio.taufinity.io/api/data" --output=/tmp/file.json
+
+# --- curl to localhost: should NOT match (fall through) ---
+# DELETE to localhost — destructive, needs confirmation
+curl -s -X DELETE "http://localhost:8090/api/sites/2"
+# localhost with -o flag (file write)
+curl -s "http://localhost:8090/api/data" -o /tmp/output.json
+# localhost with @file data reference (exfiltration risk)
+# Note: localhost exfil is less likely but the rule is consistent
+curl -s -X POST "http://localhost:8090/api/data" -d @/etc/passwd
+# localhost with --upload-file
+curl -s -T /etc/passwd "http://localhost:8090/api/upload"
+# Destructive path keyword on localhost
+curl -s -X POST "http://localhost:8090/api/database/drop"
+
+# --- cp/mkdir: write operations fall through to LLM ---
+cp ~/.claude/CLAUDE.md /tmp/backup.md
+mkdir -p /tmp/test

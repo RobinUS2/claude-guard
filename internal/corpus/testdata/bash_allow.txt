@@ -324,3 +324,23 @@ curl -s -X PUT -H "Content-Type: application/json" "https://studio.taufinity.io/
 curl -s "https://studio.taufinity.io/api/sites/2" 2>&1
 # Compound: curl piped to jq then head
 curl -s "https://studio.taufinity.io/api/dashboards" | jq '.[] | .name' | head -5
+# Compound: TOKEN=$(cmd) && curl — token fetched locally, curl to trusted domain
+TOKEN=$(cat /tmp/token.txt) && curl -s -H "Authorization: Bearer $TOKEN" "https://studio.taufinity.io/api/sites/2/settings"
+# Compound: TOKEN=$(cmd) && curl PUT with pipe to jq
+TOKEN=$(cat /tmp/token.txt) && curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" "https://studio.taufinity.io/api/sites/2/settings/ai" -d '{"temperature": 0.7}' | jq .
+# Compound: assignment && curl POST
+API_KEY=$(printenv TAUFINITY_API_KEY) && curl -s -X POST -H "Authorization: Bearer $API_KEY" "https://studio.taufinity.io/api/widgets/17/test" -d '{"message": "hello"}'
+
+# --- curl to localhost (local dev servers are operator-owned) ---
+# Simple GET to localhost
+curl -s "http://localhost:8090/api/health"
+# GET with port
+curl -s "http://localhost:3000/api/status"
+# POST to localhost (mutation — local dev is safe)
+curl -s -X POST -H "Content-Type: application/json" "http://localhost:8090/api/widgets" -d '{"name": "test"}'
+# PUT to localhost
+curl -s -X PUT -H "Content-Type: application/json" "http://localhost:8090/api/sites/1/settings" -d '{"key": "value"}'
+# localhost with pipe to jq
+curl -s "http://localhost:8090/api/sites" | jq '.[] | .name'
+# localhost https (self-signed cert scenarios)
+curl -s "https://localhost:8443/api/health"

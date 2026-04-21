@@ -31,6 +31,29 @@ function badge(v) { return '<span class="verdict verdict-'+v+'">'+v+'</span>'; }
 function trunc(s, n) { return !s ? '' : s.length > n ? s.slice(0,n)+'...' : s; }
 function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+// Click-to-expand: clicking a row toggles a detail panel below it.
+function bindRowExpand(tableEl) {
+    tableEl.querySelectorAll('tbody tr[data-detail]').forEach(row => {
+        row.style.cursor = 'pointer';
+        row.addEventListener('click', () => {
+            const next = row.nextElementSibling;
+            if (next?.classList.contains('detail-row')) {
+                next.remove();
+                row.classList.remove('expanded');
+            } else {
+                // Close any other open detail in this table
+                tableEl.querySelectorAll('.detail-row').forEach(r => r.remove());
+                tableEl.querySelectorAll('.expanded').forEach(r => r.classList.remove('expanded'));
+                const detail = document.createElement('tr');
+                detail.className = 'detail-row';
+                detail.innerHTML = '<td colspan="99"><pre class="detail-content">'+esc(row.dataset.detail)+'</pre></td>';
+                row.after(detail);
+                row.classList.add('expanded');
+            }
+        });
+    });
+}
+
 async function loadOverview() {
     const d = await fetchJSON('/api/stats?since=24h');
     if (!d) return;
@@ -63,7 +86,8 @@ async function loadTimeline() {
     const d = await fetchJSON('/api/decisions?since=1h&limit=100');
     const el = document.getElementById('timelineTable');
     if (!d?.length) { el.innerHTML = '<div class="empty-state"><p>No recent decisions</p></div>'; return; }
-    el.innerHTML = `<table><thead><tr><th>Time</th><th>Verdict</th><th>Tier</th><th>Command</th><th>Reason</th></tr></thead><tbody>${d.map(r=>`<tr><td>${fmtTime(r.time)}</td><td>${badge(r.verdict)}</td><td>${esc(r.tier)}</td><td title="${esc(r.command)}">${esc(trunc(r.command,60))}</td><td>${esc(trunc(r.reason,50))}</td></tr>`).join('')}</tbody></table>`;
+    el.innerHTML = `<table><thead><tr><th>Time</th><th>Verdict</th><th>Tier</th><th>Command</th><th>Reason</th></tr></thead><tbody>${d.map(r=>`<tr data-detail="${esc(r.command + (r.reason ? '\n\nReason: '+r.reason : '') + (r.cwd ? '\nCWD: '+r.cwd : '') + '\nTier: '+r.tier + '\nLatency: '+fmtDur(r.latency_us/1000))}"><td>${fmtTime(r.time)}</td><td>${badge(r.verdict)}</td><td>${esc(r.tier)}</td><td>${esc(trunc(r.command,60))}</td><td>${esc(trunc(r.reason,50))}</td></tr>`).join('')}</tbody></table>`;
+    bindRowExpand(el);
 }
 
 async function loadCache() {
@@ -75,14 +99,16 @@ async function loadCache() {
     const d = await fetchJSON(url);
     const el = document.getElementById('cacheTable');
     if (!d?.length) { el.innerHTML = '<div class="empty-state"><p>No cache entries</p></div>'; return; }
-    el.innerHTML = `<table><thead><tr><th>Command</th><th>Verdict</th><th>Tier</th><th>Provider</th><th>Verified</th><th>Disagree</th></tr></thead><tbody>${d.map(r=>`<tr><td title="${esc(r.command)}">${esc(trunc(r.command,70))}</td><td>${badge(r.effective_verdict||r.verdict)}</td><td>${esc(r.tier)}</td><td>${esc(r.provider||'-')}</td><td class="badge-${r.verified}">${r.verified?'yes':'no'}</td><td class="badge-${r.disagreement}">${r.disagreement?'YES':'no'}</td></tr>`).join('')}</tbody></table>`;
+    el.innerHTML = `<table><thead><tr><th>Command</th><th>Verdict</th><th>Tier</th><th>Provider</th><th>Verified</th><th>Disagree</th></tr></thead><tbody>${d.map(r=>`<tr data-detail="${esc(r.command + (r.reason ? '\n\nReason: '+r.reason : '') + (r.cwd ? '\nCWD: '+r.cwd : '') + (r.canonical_form ? '\nCanonical: '+r.canonical_form : '') + (r.match_count ? '\nMatch count: '+r.match_count : ''))}"><td>${esc(trunc(r.command,70))}</td><td>${badge(r.effective_verdict||r.verdict)}</td><td>${esc(r.tier)}</td><td>${esc(r.provider||'-')}</td><td class="badge-${r.verified}">${r.verified?'yes':'no'}</td><td class="badge-${r.disagreement}">${r.disagreement?'YES':'no'}</td></tr>`).join('')}</tbody></table>`;
+    bindRowExpand(el);
 }
 
 async function loadLearned() {
     const d = await fetchJSON('/api/learned');
     const el = document.getElementById('learnedTable');
     if (!d?.length) { el.innerHTML = '<div class="empty-state"><p>No learned patterns yet</p></div>'; return; }
-    el.innerHTML = `<table><thead><tr><th>Pattern</th><th>Program</th><th>Approvals</th><th>Scope</th></tr></thead><tbody>${d.map(r=>`<tr><td title="${esc(r.command)}">${esc(trunc(r.canonical_form||r.command,70))}</td><td>${esc(r.program||'-')}</td><td>${r.approval_count}</td><td>${r.cwd?'project':'global'}</td></tr>`).join('')}</tbody></table>`;
+    el.innerHTML = `<table><thead><tr><th>Pattern</th><th>Program</th><th>Approvals</th><th>Scope</th></tr></thead><tbody>${d.map(r=>`<tr data-detail="${esc((r.canonical_form||r.command) + (r.cwd ? '\n\nCWD: '+r.cwd : '\n\nScope: global'))}"><td>${esc(trunc(r.canonical_form||r.command,70))}</td><td>${esc(r.program||'-')}</td><td>${r.approval_count}</td><td>${r.cwd?'project':'global'}</td></tr>`).join('')}</tbody></table>`;
+    bindRowExpand(el);
 }
 
 async function loadStopHooks() {
