@@ -33,38 +33,10 @@
                     <canvas id="tierChart"></canvas>
                 </div>
             </div>
-            <div class="section">
-                <h3>Recent Decisions</h3>
-                <table id="recentDecisions">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Command</th>
-                            <th>Verdict</th>
-                            <th>Tier</th>
-                            <th>Latency</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
         </section>
 
         <section id="page-timeline" class="page">
-            <div class="controls">
-                <label>Since:
-                    <select id="timelineSince">
-                        <option value="1h">1 hour</option>
-                        <option value="6h">6 hours</option>
-                        <option value="24h" selected>24 hours</option>
-                        <option value="7d">7 days</option>
-                    </select>
-                </label>
-            </div>
-            <div class="chart-card wide">
-                <h3>Decisions Over Time</h3>
-                <canvas id="timelineChart"></canvas>
-            </div>
+            <div id="timelineTable"></div>
         </section>
 
         <section id="page-cache" class="page">
@@ -76,19 +48,7 @@
                     <option value="deny">Deny</option>
                 </select>
             </div>
-            <table id="cacheTable">
-                <thead>
-                    <tr>
-                        <th>Command</th>
-                        <th>Verdict</th>
-                        <th>Tier</th>
-                        <th>Provider</th>
-                        <th>Stored</th>
-                        <th>Verified</th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
+            <div id="cacheTable"></div>
         </section>
 
         <section id="page-learned" class="page">
@@ -96,34 +56,11 @@
                 <h3>Learned Patterns</h3>
                 <p class="subtitle">Commands auto-approved from user feedback</p>
             </div>
-            <table id="learnedTable">
-                <thead>
-                    <tr>
-                        <th>Command</th>
-                        <th>Canonical Form</th>
-                        <th>Program</th>
-                        <th>Approvals</th>
-                        <th>Learned At</th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
+            <div id="learnedTable"></div>
         </section>
 
         <section id="page-stop-hooks" class="page">
-            <div class="stats-grid" id="stopHookStats"></div>
-            <table id="stopHookTable">
-                <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Rule</th>
-                        <th>Injected</th>
-                        <th>Suppressed</th>
-                        <th>Continue Count</th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
+            <div id="stopHooksTable"></div>
         </section>
     </main>
 

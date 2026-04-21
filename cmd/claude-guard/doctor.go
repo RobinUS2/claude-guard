@@ -226,7 +226,22 @@ func cmdDoctor(_ []string) int {
 		warn("hook:learn", learnDetail+" (self-learning disabled)")
 	}
 
-	// 7. Binary self-location
+	// 7a. Settings.json credential scan
+	credCount := scanSettingsCredentials(settingsPath)
+	if credCount > 0 {
+		warn("settings:credentials",
+			fmt.Sprintf("%d entries in settings.json contain potential credentials (API tokens, passwords)", credCount))
+	} else {
+		check("settings:credentials", true, "no credentials detected in permissions.allow")
+	}
+
+	// 7b. Settings.json entry count
+	if entryCount := countSettingsEntries(settingsPath); entryCount > 100 {
+		warn("settings:bloat",
+			fmt.Sprintf("%d entries in permissions.allow — consider running 'claude-guard settings audit'", entryCount))
+	}
+
+	// 8. Binary self-location
 	self, err := os.Executable()
 	if err == nil {
 		expected := filepath.Join(home, ".claude", "bin", "claude-guard")
@@ -352,4 +367,62 @@ func checkHookWired(settingsPath string) (bool, string) {
 		}
 	}
 	return false, fmt.Sprintf("no Bash hook pointing to claude-guard in %s", settingsPath)
+}
+
+// scanSettingsCredentials counts permission entries that appear to contain
+// credentials (API tokens, passwords, bearer tokens). Best-effort pattern
+// matching — not a security scanner.
+func scanSettingsCredentials(settingsPath string) int {
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return 0
+	}
+	var parsed struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return 0
+	}
+	credPatterns := []string{
+		"ATATT3x", // Atlassian API token prefix
+		"Bearer ",
+		"token=",
+		"password=",
+		"secret=",
+		"api_key=",
+		"apikey=",
+		"Authorization:",
+		"ghp_", // GitHub personal access token
+		"gho_", // GitHub OAuth token
+		"sk-",  // OpenAI/Stripe key prefix
+	}
+	count := 0
+	for _, entry := range parsed.Permissions.Allow {
+		for _, pat := range credPatterns {
+			if strings.Contains(entry, pat) {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+// countSettingsEntries returns the number of entries in permissions.allow.
+func countSettingsEntries(settingsPath string) int {
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return 0
+	}
+	var parsed struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return 0
+	}
+	return len(parsed.Permissions.Allow)
 }

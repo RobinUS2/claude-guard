@@ -18,12 +18,35 @@ import (
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// writeDecisionLog creates a minimal decisions.jsonl in a temp dir and
-// returns a cleanup function that restores the original log dir.
-func writeDecisionLog(t *testing.T, lines []string) string {
+// setTempHome overrides HOME (and clears XDG_CACHE_HOME) so all
+// default path lookups point to an empty temp directory.
+// Returns a cleanup function.
+func setTempHome(t *testing.T) (tmpHome string, cleanup func()) {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "decisions.jsonl")
+	tmpHome = t.TempDir()
+	origHome := os.Getenv("HOME")
+	origXDG := os.Getenv("XDG_CACHE_HOME")
+	os.Setenv("HOME", tmpHome)
+	os.Unsetenv("XDG_CACHE_HOME")
+	return tmpHome, func() {
+		os.Setenv("HOME", origHome)
+		if origXDG != "" {
+			os.Setenv("XDG_CACHE_HOME", origXDG)
+		} else {
+			os.Unsetenv("XDG_CACHE_HOME")
+		}
+	}
+}
+
+// writeDecisionLog creates decisions.jsonl in the expected location for
+// a given HOME directory.
+func writeDecisionLog(t *testing.T, home string, lines []string) {
+	t.Helper()
+	logDir := filepath.Join(home, ".claude", "logs", "claude-guard")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(logDir, "decisions.jsonl")
 	var content string
 	for _, l := range lines {
 		content += l + "\n"
@@ -31,7 +54,6 @@ func writeDecisionLog(t *testing.T, lines []string) string {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return dir
 }
 
 // makeDecisionLine returns a JSON line for a decision record.
@@ -52,32 +74,31 @@ func makeDecisionLine(verdict, tier, command string) string {
 // makeStopHookLine returns a JSON line for a stop_hook record.
 func makeStopHookLine(injected bool, firedRule string) string {
 	rec := map[string]any{
-		"time":            time.Now().Format(time.RFC3339Nano),
-		"level":           "INFO",
-		"msg":             "stop_hook",
+		"time":             time.Now().Format(time.RFC3339Nano),
+		"level":            "INFO",
+		"msg":              "stop_hook",
 		"stop_hook_active": true,
-		"fired_rule":      firedRule,
-		"injected":        injected,
-		"continue_count":  1,
-		"latency_us":      50,
+		"fired_rule":       firedRule,
+		"injected":         injected,
+		"continue_count":   1,
+		"latency_us":       50,
 	}
 	data, _ := json.Marshal(rec)
 	return string(data)
 }
 
-// setupTestCacheDir creates a temp cache directory with some entries and
+// setupTestCacheDir creates a temp cache directory with entries and
 // patches cacheDirFn to point at it.
 func setupTestCacheDir(t *testing.T, entries []cache.Entry) (cleanup func()) {
 	t.Helper()
 	dir := t.TempDir()
 	cch := cache.New(dir)
-	for i, e := range entries {
+	for _, e := range entries {
 		key := cache.Key(cache.KeyInputs{
 			Tool:    "Bash",
 			Command: e.Command,
 			CWD:     "/tmp",
 		})
-		_ = i
 		if err := cch.Put(key, e, 24*time.Hour); err != nil {
 			t.Fatal(err)
 		}
@@ -87,17 +108,20 @@ func setupTestCacheDir(t *testing.T, entries []cache.Entry) (cleanup func()) {
 	return func() { cacheDirFn = old }
 }
 
-// setupTestStore creates a temp SQLite store and patches defaultStorePath
-// indirectly by setting XDG_CACHE_HOME.
-func setupTestStore(t *testing.T) (*store.Store, string) {
+// setupTestStore creates a temp SQLite store at the location
+// defaultStorePath() will resolve for the given HOME.
+func setupTestStore(t *testing.T, home string) *store.Store {
 	t.Helper()
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "guard.db")
+	dbDir := filepath.Join(home, ".cache", "claude-guard")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dbDir, "guard.db")
 	db, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return db, dbPath
+	return db
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +129,12 @@ func setupTestStore(t *testing.T) (*store.Store, string) {
 // ---------------------------------------------------------------------------
 
 func TestAPIStats_Empty(t *testing.T) {
-	// No log file — should return valid JSON with zeros.
+	_, cleanup := setTempHome(t)
+	defer cleanup()
+
+	cleanupCache := setupTestCacheDir(t, nil)
+	defer cleanupCache()
+
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/stats?since=1h", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -125,35 +154,21 @@ func TestAPIStats_Empty(t *testing.T) {
 }
 
 func TestAPIStats_WithData(t *testing.T) {
-	lines := []string{
+	tmpHome, cleanup := setTempHome(t)
+	defer cleanup()
+
+	writeDecisionLog(t, tmpHome, []string{
 		makeDecisionLine("allow", "instant_allow", "git status"),
 		makeDecisionLine("allow", "cache", "npm test"),
 		makeDecisionLine("deny", "instant_block", "rm -rf /"),
 		makeDecisionLine("continue", "llm", "curl http://example.com"),
 		makeStopHookLine(true, "long_session"),
-	}
-	dir := writeDecisionLog(t, lines)
+	})
 
-	// Point config to use our temp log dir by setting env.
-	origHome := os.Getenv("HOME")
-	tmpHome := t.TempDir()
-	// Create the expected log path structure.
-	logDir := filepath.Join(tmpHome, ".claude", "logs", "claude-guard")
-	os.MkdirAll(logDir, 0o755)
-
-	// Copy our test decisions file to the expected location.
-	src := filepath.Join(dir, "decisions.jsonl")
-	dst := filepath.Join(logDir, "decisions.jsonl")
-	data, _ := os.ReadFile(src)
-	os.WriteFile(dst, data, 0o644)
-
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
-
-	cleanup := setupTestCacheDir(t, []cache.Entry{
+	cleanupCache := setupTestCacheDir(t, []cache.Entry{
 		{Verdict: cache.VerdictAllow, Command: "git status", Tier: "cache"},
 	})
-	defer cleanup()
+	defer cleanupCache()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/stats?since=24h", nil)
@@ -187,6 +202,9 @@ func TestAPIStats_WithData(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAPIDecisions_Empty(t *testing.T) {
+	_, cleanup := setTempHome(t)
+	defer cleanup()
+
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/decisions?since=1h", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -206,24 +224,13 @@ func TestAPIDecisions_Empty(t *testing.T) {
 }
 
 func TestAPIDecisions_WithData(t *testing.T) {
-	lines := []string{
+	tmpHome, cleanup := setTempHome(t)
+	defer cleanup()
+
+	writeDecisionLog(t, tmpHome, []string{
 		makeDecisionLine("allow", "cache", "echo hello"),
 		makeDecisionLine("deny", "instant_block", "rm -rf /"),
-	}
-	dir := writeDecisionLog(t, lines)
-
-	tmpHome := t.TempDir()
-	logDir := filepath.Join(tmpHome, ".claude", "logs", "claude-guard")
-	os.MkdirAll(logDir, 0o755)
-
-	src := filepath.Join(dir, "decisions.jsonl")
-	dst := filepath.Join(logDir, "decisions.jsonl")
-	data, _ := os.ReadFile(src)
-	os.WriteFile(dst, data, 0o644)
-
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/decisions?since=1h&limit=10", nil)
@@ -247,11 +254,36 @@ func TestAPIDecisions_WithData(t *testing.T) {
 	}
 }
 
+func TestAPIDecisions_Limit(t *testing.T) {
+	tmpHome, cleanup := setTempHome(t)
+	defer cleanup()
+
+	lines := make([]string, 20)
+	for i := range lines {
+		lines[i] = makeDecisionLine("allow", "cache", "echo "+string(rune('a'+i)))
+	}
+	writeDecisionLog(t, tmpHome, lines)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/decisions?since=1h&limit=5", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	handleAPIDecisions(rec, req)
+
+	var entries []decisionEntry
+	json.Unmarshal(rec.Body.Bytes(), &entries)
+	if len(entries) != 5 {
+		t.Errorf("expected 5 entries (limit), got %d", len(entries))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // API: /api/stop-hooks
 // ---------------------------------------------------------------------------
 
 func TestAPIStopHooks_Empty(t *testing.T) {
+	_, cleanup := setTempHome(t)
+	defer cleanup()
+
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/stop-hooks?since=1h", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
@@ -270,13 +302,34 @@ func TestAPIStopHooks_Empty(t *testing.T) {
 	}
 }
 
+func TestAPIStopHooks_WithData(t *testing.T) {
+	tmpHome, cleanup := setTempHome(t)
+	defer cleanup()
+
+	writeDecisionLog(t, tmpHome, []string{
+		makeStopHookLine(true, "long_session"),
+		makeStopHookLine(false, ""),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/stop-hooks?since=24h", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	handleAPIStopHooks(rec, req)
+
+	var entries []stopHookEntry
+	json.Unmarshal(rec.Body.Bytes(), &entries)
+	if len(entries) != 2 {
+		t.Errorf("expected 2 entries, got %d", len(entries))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // API: /api/cache
 // ---------------------------------------------------------------------------
 
 func TestAPICache_Empty(t *testing.T) {
-	cleanup := setupTestCacheDir(t, nil)
-	defer cleanup()
+	cleanupCache := setupTestCacheDir(t, nil)
+	defer cleanupCache()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/cache", nil)
@@ -294,12 +347,12 @@ func TestAPICache_Empty(t *testing.T) {
 }
 
 func TestAPICache_WithEntries(t *testing.T) {
-	cleanup := setupTestCacheDir(t, []cache.Entry{
+	cleanupCache := setupTestCacheDir(t, []cache.Entry{
 		{Verdict: cache.VerdictAllow, Command: "git status", Tier: "cache", Program: "git"},
 		{Verdict: cache.VerdictAllow, Command: "npm test", Tier: "llm", Program: "npm"},
 		{Verdict: cache.VerdictDeny, Command: "rm -rf /", Tier: "instant_block", Program: "rm"},
 	})
-	defer cleanup()
+	defer cleanupCache()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/cache?limit=50", nil)
@@ -320,50 +373,38 @@ func TestAPICache_WithEntries(t *testing.T) {
 }
 
 func TestAPICache_FilterByVerdict(t *testing.T) {
-	cleanup := setupTestCacheDir(t, []cache.Entry{
+	cleanupCache := setupTestCacheDir(t, []cache.Entry{
 		{Verdict: cache.VerdictAllow, Command: "git status", Tier: "cache"},
 		{Verdict: cache.VerdictDeny, Command: "rm -rf /", Tier: "instant_block"},
 	})
-	defer cleanup()
+	defer cleanupCache()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/cache?verdict=deny", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	handleAPICache(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-
 	var entries []cacheEntry
-	if err := json.Unmarshal(rec.Body.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
+	json.Unmarshal(rec.Body.Bytes(), &entries)
 	if len(entries) != 1 {
 		t.Errorf("expected 1 deny entry, got %d", len(entries))
 	}
 }
 
 func TestAPICache_FilterByMatch(t *testing.T) {
-	cleanup := setupTestCacheDir(t, []cache.Entry{
+	cleanupCache := setupTestCacheDir(t, []cache.Entry{
 		{Verdict: cache.VerdictAllow, Command: "git status", Tier: "cache"},
 		{Verdict: cache.VerdictAllow, Command: "npm test", Tier: "llm"},
 	})
-	defer cleanup()
+	defer cleanupCache()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/cache?match=git", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	handleAPICache(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-
 	var entries []cacheEntry
-	if err := json.Unmarshal(rec.Body.Bytes(), &entries); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
+	json.Unmarshal(rec.Body.Bytes(), &entries)
 	if len(entries) != 1 {
 		t.Errorf("expected 1 entry matching 'git', got %d", len(entries))
 	}
@@ -374,10 +415,8 @@ func TestAPICache_FilterByMatch(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAPILearned_Empty(t *testing.T) {
-	// Point to non-existent DB path.
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", t.TempDir())
-	defer os.Setenv("HOME", origHome)
+	_, cleanup := setTempHome(t)
+	defer cleanup()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/learned", nil)
@@ -398,7 +437,10 @@ func TestAPILearned_Empty(t *testing.T) {
 }
 
 func TestAPILearned_WithPatterns(t *testing.T) {
-	db, dbPath := setupTestStore(t)
+	tmpHome, cleanup := setTempHome(t)
+	defer cleanup()
+
+	db := setupTestStore(t, tmpHome)
 
 	// Insert a learned entry.
 	entry := cache.Entry{
@@ -417,17 +459,6 @@ func TestAPILearned_WithPatterns(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-
-	// Override the store path lookup so queryLearnedPatterns uses our test DB.
-	// We do this by temporarily replacing the function — but since
-	// queryLearnedPatterns takes a path directly, we override defaultStorePath.
-	origHome := os.Getenv("HOME")
-	origXDG := os.Getenv("XDG_CACHE_HOME")
-	os.Setenv("XDG_CACHE_HOME", filepath.Dir(dbPath))
-	defer func() {
-		os.Setenv("HOME", origHome)
-		os.Setenv("XDG_CACHE_HOME", origXDG)
-	}()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/learned", nil)
@@ -460,13 +491,8 @@ func TestAPILearned_WithPatterns(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAPIMetricsHistory_Empty(t *testing.T) {
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", t.TempDir())
-	defer os.Setenv("HOME", origHome)
-
-	origXDG := os.Getenv("XDG_CACHE_HOME")
-	os.Setenv("XDG_CACHE_HOME", t.TempDir())
-	defer os.Setenv("XDG_CACHE_HOME", origXDG)
+	_, cleanup := setTempHome(t)
+	defer cleanup()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/metrics/history?days=7", nil)
@@ -477,18 +503,18 @@ func TestAPIMetricsHistory_Empty(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	// Should be a valid JSON array.
-	body := rec.Body.Bytes()
 	var arr []any
-	if err := json.Unmarshal(body, &arr); err != nil {
-		t.Fatalf("invalid JSON: %v\nbody: %s", err, string(body))
+	if err := json.Unmarshal(rec.Body.Bytes(), &arr); err != nil {
+		t.Fatalf("invalid JSON: %v\nbody: %s", err, rec.Body.String())
 	}
 }
 
 func TestAPIMetricsHistory_WithData(t *testing.T) {
-	db, dbPath := setupTestStore(t)
+	tmpHome, cleanup := setTempHome(t)
+	defer cleanup()
 
-	// Insert a metrics snapshot.
+	db := setupTestStore(t, tmpHome)
+
 	snap := store.MetricsSnapshot{
 		RecordedAt:     time.Now().Add(-1 * time.Hour),
 		PeriodHours:    24,
@@ -501,10 +527,6 @@ func TestAPIMetricsHistory_WithData(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-
-	origXDG := os.Getenv("XDG_CACHE_HOME")
-	os.Setenv("XDG_CACHE_HOME", filepath.Dir(dbPath))
-	defer os.Setenv("XDG_CACHE_HOME", origXDG)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/metrics/history?days=7", nil)

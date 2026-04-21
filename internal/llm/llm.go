@@ -129,6 +129,10 @@ type ClassifyInput struct {
 	// a human-level reader easily can. Empty when legacy is disabled or
 	// holds no entries.
 	TrustedPrograms []string
+	// TrustedDomains is a list of domains the project considers safe for
+	// HTTP requests (from .claude-guard.yml trusted_domains). When set,
+	// the classifier is told these domains are project-owned and safe.
+	TrustedDomains []string
 }
 
 // Classifier is the provider-agnostic interface. AnthropicClassifier and
@@ -280,6 +284,12 @@ func buildUserMessage(in ClassifyInput) string {
 		fmt.Fprintf(&b, "\nREFERENCED FILE (%s, %d bytes):\n", in.FilePath, len(in.FileContent))
 		b.WriteString(in.FileContent)
 		b.WriteString("\n")
+	}
+	if len(in.TrustedDomains) > 0 {
+		b.WriteString("\nTRUSTED DOMAINS (from project .claude-guard.yml — these are the project's own APIs):\n  ")
+		b.WriteString(strings.Join(in.TrustedDomains, ", "))
+		b.WriteString("\n")
+		b.WriteString("HTTP requests (curl, wget, fetch) to these domains are SAFE — they are the project's own APIs, not exfiltration targets. PUT, POST, PATCH, DELETE to these domains are normal project operations, not external writes.\n")
 	}
 	if len(in.TrustedPrograms) > 0 {
 		b.WriteString("\nOPERATOR-TRUSTED PROGRAMS (pre-approved via the operator's legacy allow list):\n  ")

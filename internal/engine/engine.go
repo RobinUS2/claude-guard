@@ -784,6 +784,14 @@ func (e *Engine) runLLMTier(
 	// these. Capped to avoid prompt bloat; 60 is well above the size of
 	// any real settings.json allow list we've observed.
 	trusted := e.legacy.TrustedPrograms(60)
+	// Trusted domains from project config — tells the LLM that curl/wget
+	// to these domains is safe (project's own APIs).
+	var trustedDomains []string
+	if cached, ok := e.projectConfigCache.Load(in.CWD); ok {
+		if pc, ok := cached.(*projectconfig.Config); ok && pc != nil {
+			trustedDomains = pc.TrustedDomains
+		}
+	}
 	input := llm.ClassifyInput{
 		Command:         in.Command,
 		Description:     in.Description,
@@ -792,6 +800,7 @@ func (e *Engine) runLLMTier(
 		FileContent:     in.FileContent,
 		FilePath:        in.RunnerFilePath,
 		TrustedPrograms: trusted,
+		TrustedDomains:  trustedDomains,
 	}
 
 	type outcome struct {

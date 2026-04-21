@@ -788,6 +788,17 @@ func DefaultAllowRules() []rules.Rule {
 		claudeGuardReadonly,
 		catHeredocWrite,
 
+		// curl to trusted domains — allows all methods except DELETE.
+		// Mutations (PUT/POST/PATCH) are normal operational work.
+		// Forbidden flags (-o, --upload-file, --resolve) cause NoMatch.
+		// Data @file references cause NoMatch (exfiltration risk).
+		// Tolerates compound commands (TOKEN=$(cmd) && curl ... | jq).
+		&rules.CurlToDomain{
+			RuleName:        "curl-to-trusted-domain",
+			TrustedDomains:  []string{"studio.taufinity.io"},
+			SafePipeTargets: safePipeTargets,
+		},
+
 		// curl with only -I / --head / -o /dev/null (HEAD and discard-body reads)
 		// is tricky to express with flag constraints, so it falls through to LLM.
 

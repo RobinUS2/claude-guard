@@ -23,18 +23,22 @@ function fmtTime(iso) {
 }
 
 function fmtDur(ms) {
-    if (ms < 1) return '<1ms';
+    if (!ms || ms < 0.01) return '<1ms';
     return ms < 1000 ? Math.round(ms)+'ms' : (ms/1000).toFixed(1)+'s';
 }
 
 function badge(v) { return '<span class="verdict verdict-'+v+'">'+v+'</span>'; }
-function trunc(s, n) { return !s ? '' : s.length > n ? s.slice(0,n)+'…' : s; }
-function esc(s) { return (s||'').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+function trunc(s, n) { return !s ? '' : s.length > n ? s.slice(0,n)+'...' : s; }
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 async function loadOverview() {
     const d = await fetchJSON('/api/stats?since=24h');
     if (!d) return;
     const pct = n => d.total > 0 ? (n/d.total*100).toFixed(1)+'%' : '0%';
+    const timeSavedMin = d.time_saved ? d.time_saved.minutes_saved : 0;
+    const interruptsAvoided = d.time_saved ? d.time_saved.interrupts_avoided : 0;
+    const stopEvals = d.stop_hooks ? d.stop_hooks.total : 0;
+    const stopInj = d.stop_hooks ? d.stop_hooks.injected : 0;
     document.getElementById('statsCards').innerHTML = `
         <div class="stat-card"><div class="label">Decisions</div><div class="value">${d.total}</div><div class="sub">last 24h</div></div>
         <div class="stat-card"><div class="label">Allow</div><div class="value">${d.by_verdict?.allow||0}</div><div class="sub">${pct(d.by_verdict?.allow||0)}</div></div>
@@ -42,8 +46,8 @@ async function loadOverview() {
         <div class="stat-card"><div class="label">Deny</div><div class="value">${d.by_verdict?.deny||0}</div><div class="sub">${pct(d.by_verdict?.deny||0)}</div></div>
         <div class="stat-card"><div class="label">Latency p50</div><div class="value">${fmtDur(d.latency_p50_ms)}</div><div class="sub">p95: ${fmtDur(d.latency_p95_ms)}</div></div>
         <div class="stat-card"><div class="label">Cache</div><div class="value">${d.cache?.entries||0}</div><div class="sub">${d.cache?.verified||0} verified</div></div>
-        <div class="stat-card"><div class="label">Stop Hook</div><div class="value">${d.stop_hooks?.fires||0}/${d.stop_hooks?.evals||0}</div><div class="sub">continues injected</div></div>
-        <div class="stat-card"><div class="label">Time Saved</div><div class="value">~${Math.round((d.time_saved_min||0)/60)}h</div><div class="sub">${d.interrupts_avoided||0} prompts avoided</div></div>`;
+        <div class="stat-card"><div class="label">Stop Hook</div><div class="value">${stopInj}/${stopEvals}</div><div class="sub">continues injected</div></div>
+        <div class="stat-card"><div class="label">Time Saved</div><div class="value">~${Math.round(timeSavedMin/60)}h</div><div class="sub">${interruptsAvoided} prompts avoided</div></div>`;
 
     const vd = d.by_verdict||{}, td = d.by_tier||{};
     const vc = document.getElementById('verdictChart')?.getContext('2d');
@@ -59,7 +63,7 @@ async function loadTimeline() {
     const d = await fetchJSON('/api/decisions?since=1h&limit=100');
     const el = document.getElementById('timelineTable');
     if (!d?.length) { el.innerHTML = '<div class="empty-state"><p>No recent decisions</p></div>'; return; }
-    el.innerHTML = `<table><thead><tr><th>Time</th><th>Verdict</th><th>Tier</th><th>Command</th><th>Reason</th></tr></thead><tbody>${d.map(r=>`<tr><td>${fmtTime(r.time)}</td><td>${badge(r.verdict)}</td><td>${r.tier}</td><td title="${esc(r.command)}">${trunc(r.command,60)}</td><td>${trunc(r.reason,50)}</td></tr>`).join('')}</tbody></table>`;
+    el.innerHTML = `<table><thead><tr><th>Time</th><th>Verdict</th><th>Tier</th><th>Command</th><th>Reason</th></tr></thead><tbody>${d.map(r=>`<tr><td>${fmtTime(r.time)}</td><td>${badge(r.verdict)}</td><td>${esc(r.tier)}</td><td title="${esc(r.command)}">${esc(trunc(r.command,60))}</td><td>${esc(trunc(r.reason,50))}</td></tr>`).join('')}</tbody></table>`;
 }
 
 async function loadCache() {
@@ -71,21 +75,21 @@ async function loadCache() {
     const d = await fetchJSON(url);
     const el = document.getElementById('cacheTable');
     if (!d?.length) { el.innerHTML = '<div class="empty-state"><p>No cache entries</p></div>'; return; }
-    el.innerHTML = `<table><thead><tr><th>Command</th><th>Verdict</th><th>Tier</th><th>Provider</th><th>Verified</th><th>Disagree</th></tr></thead><tbody>${d.map(r=>`<tr><td title="${esc(r.command)}">${trunc(r.command,70)}</td><td>${badge(r.effective_verdict||r.verdict)}</td><td>${r.tier}</td><td>${r.provider||'-'}</td><td class="badge-${r.verified}">${r.verified?'yes':'no'}</td><td class="badge-${r.disagreement}">${r.disagreement?'YES':'no'}</td></tr>`).join('')}</tbody></table>`;
+    el.innerHTML = `<table><thead><tr><th>Command</th><th>Verdict</th><th>Tier</th><th>Provider</th><th>Verified</th><th>Disagree</th></tr></thead><tbody>${d.map(r=>`<tr><td title="${esc(r.command)}">${esc(trunc(r.command,70))}</td><td>${badge(r.effective_verdict||r.verdict)}</td><td>${esc(r.tier)}</td><td>${esc(r.provider||'-')}</td><td class="badge-${r.verified}">${r.verified?'yes':'no'}</td><td class="badge-${r.disagreement}">${r.disagreement?'YES':'no'}</td></tr>`).join('')}</tbody></table>`;
 }
 
 async function loadLearned() {
     const d = await fetchJSON('/api/learned');
     const el = document.getElementById('learnedTable');
     if (!d?.length) { el.innerHTML = '<div class="empty-state"><p>No learned patterns yet</p></div>'; return; }
-    el.innerHTML = `<table><thead><tr><th>Pattern</th><th>Program</th><th>Approvals</th><th>Scope</th></tr></thead><tbody>${d.map(r=>`<tr><td>${trunc(r.canonical_form||r.command,70)}</td><td>${r.program||'-'}</td><td>${r.match_count}</td><td>${r.cwd?'project':'global'}</td></tr>`).join('')}</tbody></table>`;
+    el.innerHTML = `<table><thead><tr><th>Pattern</th><th>Program</th><th>Approvals</th><th>Scope</th></tr></thead><tbody>${d.map(r=>`<tr><td title="${esc(r.command)}">${esc(trunc(r.canonical_form||r.command,70))}</td><td>${esc(r.program||'-')}</td><td>${r.approval_count}</td><td>${r.cwd?'project':'global'}</td></tr>`).join('')}</tbody></table>`;
 }
 
 async function loadStopHooks() {
     const d = await fetchJSON('/api/stop-hooks?since=24h');
     const el = document.getElementById('stopHooksTable');
     if (!d?.length) { el.innerHTML = '<div class="empty-state"><p>No stop hook evaluations</p></div>'; return; }
-    el.innerHTML = `<table><thead><tr><th>Time</th><th>Session</th><th>Injected</th><th>Rule</th><th>Last Text</th></tr></thead><tbody>${d.map(r=>`<tr><td>${fmtTime(r.time)}</td><td>${(r.session_id||'').slice(0,8)}</td><td class="badge-${r.injected}">${r.injected?'YES':'no'}</td><td>${r.fired_rule||'-'}</td><td>${trunc(r.last_assistant_head,50)}</td></tr>`).join('')}</tbody></table>`;
+    el.innerHTML = `<table><thead><tr><th>Time</th><th>Session</th><th>Injected</th><th>Rule</th><th>Continues</th></tr></thead><tbody>${d.map(r=>`<tr><td>${fmtTime(r.time)}</td><td>${esc((r.session_id||'').slice(0,8))}</td><td class="badge-${r.injected}">${r.injected?'YES':'no'}</td><td>${esc(r.fired_rule||'-')}</td><td>${r.continue_count}</td></tr>`).join('')}</tbody></table>`;
 }
 
 async function refresh() {

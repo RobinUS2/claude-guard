@@ -298,3 +298,21 @@ for f in /tmp/a /tmp/b; do cat "$f"; done
 for i in 1; do git log --oneline -5; done
 
 # --- blocker 3: ssh-add regression — ssh family still reads keys ---
+
+# --- curl to trusted domain (CurlToDomain rule) ---
+# Simple GET
+curl -s "https://studio.taufinity.io/api/sites/2/settings/ai"
+# GET with headers
+curl -s -H "Authorization: Bearer mytoken" "https://studio.taufinity.io/api/dashboards/vp-resultaten/data"
+# PUT (mutation — normal operational work)
+curl -s -X PUT -H "Authorization: Bearer mytoken" -H "Content-Type: application/json" "https://studio.taufinity.io/api/sites/2/settings/ai" -d '{"system_prompt": "test"}'
+# POST
+curl -s -X POST -H "Authorization: Bearer token123" -H "Content-Type: application/json" "https://studio.taufinity.io/api/widgets/17/test" -d '{"message": "hello"}'
+# PATCH
+curl -s -X PATCH -H "Authorization: Bearer token123" "https://studio.taufinity.io/api/sites/2/settings" -d '{"key": "value"}'
+# With X-Organization-ID header
+curl -s -X PUT -H "Authorization: Bearer token123" -H "Content-Type: application/json" -H "X-Organization-ID: 17" "https://studio.taufinity.io/api/sites/2/settings/ai" -d '{"temperature": 0.65}'
+# URL with port
+curl -s "https://studio.taufinity.io:443/api/sites/2/settings"
+# URL with credentials in URL (host parsing must strip userinfo)
+curl -s "https://user:pass@studio.taufinity.io/api/sites/2"

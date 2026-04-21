@@ -2,6 +2,8 @@ package stop
 
 import (
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
 )
 
@@ -229,6 +231,99 @@ func (r *worktreeLeftOpenRule) Eval(_ Transcript, sh ShellContext) (bool, string
 	)
 }
 
+// stopPhraseGuardRule catches premature stopping phrases across multiple
+// categories. Based on anthropics/claude-code#42796.
+type stopPhraseGuardRule struct{}
+
+func (r *stopPhraseGuardRule) Name() string          { return "stop-phrase-guard" }
+func (r *stopPhraseGuardRule) HighConfidence() bool  { return false }
+func (r *stopPhraseGuardRule) TextPreFilter() string { return "" } // check all text
+
+// stopPhraseCategories maps category labels to their pattern strings.
+var stopPhraseCategories = []struct {
+	name     string
+	patterns []string
+}{
+	{"ownership dodging", []string{
+		`not caused by my changes`,
+		`existing issue`,
+		`pre-existing`,
+		`was already broken`,
+	}},
+	{"permission-seeking", []string{
+		`should I continue`,
+		`want me to keep going`,
+		`would you like me to`,
+		`shall I proceed`,
+		`do you want me to`,
+	}},
+	{"premature stopping", []string{
+		`good stopping point`,
+		`natural checkpoint`,
+		`leaving off here`,
+		`pick this up later`,
+		`continue in a new session`,
+		`getting long`,
+		`good place to pause`,
+	}},
+	{"known-limitation labeling", []string{
+		`known limitation`,
+		`future work`,
+		`out of scope for now`,
+		`beyond the scope`,
+		`left as an exercise`,
+	}},
+	{"session-length excuses", []string{
+		`continue in a new session`,
+		`context is getting long`,
+		`running out of context`,
+		`pick up later`,
+	}},
+}
+
+// stopPhraseCategoryRegexes holds compiled regexes per category, built once.
+var stopPhraseCategoryRegexes []struct {
+	name string
+	re   *regexp.Regexp
+}
+
+func init() {
+	for _, cat := range stopPhraseCategories {
+		combined := `(?i)(?:` + strings.Join(cat.patterns, `|`) + `)`
+		stopPhraseCategoryRegexes = append(stopPhraseCategoryRegexes, struct {
+			name string
+			re   *regexp.Regexp
+		}{cat.name, regexp.MustCompile(combined)})
+	}
+}
+
+func (r *stopPhraseGuardRule) Eval(t Transcript, _ ShellContext) (bool, string) {
+	for _, cat := range stopPhraseCategoryRegexes {
+		if cat.re.MatchString(t.LastAssistantText) {
+			return true, fmt.Sprintf(
+				"Premature stop detected: %s. Continue with the task — don't stop at checkpoints.",
+				cat.name,
+			)
+		}
+	}
+	return false, ""
+}
+
+// noAskHumanRule catches "Should I...?" patterns in autonomous sessions.
+type noAskHumanRule struct{}
+
+func (r *noAskHumanRule) Name() string          { return "no-ask-human" }
+func (r *noAskHumanRule) HighConfidence() bool  { return false }
+func (r *noAskHumanRule) TextPreFilter() string { return `(?i)\b(should I|do you want|would you like|shall I)\b` }
+
+func (r *noAskHumanRule) Eval(_ Transcript, _ ShellContext) (bool, string) {
+	v := os.Getenv("CLAUDE_GUARD_AUTONOMOUS")
+	if v != "1" && v != "true" {
+		return false, ""
+	}
+	return true, "You're in autonomous mode — decide and act. Don't ask for permission."
+}
+
 // DefaultRules returns the built-in rule set in evaluation order.
 // Transcript-only rules (no shell cost) run first, then shell-based.
 func DefaultRules() []StopRule {
@@ -237,6 +332,8 @@ func DefaultRules() []StopRule {
 		&openTodoItemsRule{},
 		&prCreatedNotVerifiedRule{},
 		&failingTestsRule{},
+		&stopPhraseGuardRule{},
+		&noAskHumanRule{},
 		&installNotRunRule{},
 		&proposedTestNotRunRule{},
 		// Shell-based (~5ms each).
