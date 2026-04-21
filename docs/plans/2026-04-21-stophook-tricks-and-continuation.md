@@ -1,7 +1,7 @@
 # Task: Stop Hook Tricks, Continuation Patterns & Permission Gap Fix
 
 **Created:** 2026-04-21
-**Status:** In Progress (Phase 1-3 done, Phase 4 partially done, Phase 5 partially done)
+**Status:** Nearly Complete (Phase 1-3 done, Phase 4 mostly done, Phase 5 done. Remaining: prompt-type hooks eval, compound command patterns)
 **Context:** Deep research into community stop hook patterns, autonomous operation tricks, and investigation of why claude-guard prompts commands that should auto-continue. Combines findings from community research with identified gaps in the current guard architecture.
 
 ## Problem Summary
@@ -69,7 +69,7 @@ The self-learning code is already committed (`a438fd0`). Install and verify.
    - `cd ~/Documents/code/claude-guard && make install`
    - **Verification:** `claude-guard --version` shows `a438fd0` or later
 
-2. [ ] Verify end-to-end learn cycle
+2. [x] Verify end-to-end learn cycle (doctor shows learned=1, pending=2)
    - Run a command that gets `continue` verdict
    - Approve it in Claude Code
    - Check `sqlite3 ~/.cache/claude-guard/guard.db "SELECT * FROM pending_approvals"`
@@ -153,7 +153,7 @@ Fix false positive "unsafe" classifications for common patterns.
     Known issue: prompt hooks can trigger false positive prompt injection detection (#17804).
     - **Verification:** Add test prompt hook, observe behavior over 1 day
 
-11. [ ] Add `context-monitor` awareness
+11. [x] Add `context-monitor` awareness (contextMonitorRule at 200+ turns)
     Detect when context window is getting full (from transcript size).
     Inject reminder: "Context is getting large. Summarize progress and key state before continuing."
     Challenge: transcript_path is provided but reading + counting tokens is expensive.
@@ -170,7 +170,7 @@ Fix false positive "unsafe" classifications for common patterns.
 
 ### Phase 5: Settings.json Hygiene (Priority: MEDIUM)
 
-13. [ ] Add `claude-guard settings audit` subcommand
+13. [x] Add `claude-guard settings audit` subcommand
     Reads `~/.claude/settings.json`, cross-references with guard's tier 2 rules and learned entries.
     Reports:
     - Entries redundant with tier 2 (already auto-allowed by guard)
@@ -180,7 +180,7 @@ Fix false positive "unsafe" classifications for common patterns.
     Output: diff that removes redundant entries + list of credential-containing entries for manual review.
     - **Verification:** `claude-guard settings audit | head -50`
 
-14. [ ] Add `claude-guard settings migrate` subcommand
+14. [x] Add `claude-guard settings migrate` subcommand (--dry-run / --apply)
     Moves settings.json entries to claude-guard's learned/tier2 rules:
     - Simple Bash patterns → tier 2 allow rules (via `.claude-guard.yml`)
     - Complex patterns → learned entries in SQLite
