@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>claude-guard dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <header>
+        <h1>claude-guard</h1>
+        <nav>
+            <button class="nav-btn active" data-page="overview">Overview</button>
+            <button class="nav-btn" data-page="timeline">Timeline</button>
+            <button class="nav-btn" data-page="cache">Cache</button>
+            <button class="nav-btn" data-page="learned">Learned</button>
+            <button class="nav-btn" data-page="stop-hooks">Stop Hooks</button>
+        </nav>
+        <span class="refresh-indicator" id="refreshIndicator" title="Auto-refreshes every 5s"></span>
+    </header>
+
+    <main>
+        <section id="page-overview" class="page active">
+            <div class="stats-grid" id="statsCards"></div>
+            <div class="charts-row">
+                <div class="chart-card">
+                    <h3>Verdict Distribution</h3>
+                    <canvas id="verdictChart"></canvas>
+                </div>
+                <div class="chart-card">
+                    <h3>Tier Distribution</h3>
+                    <canvas id="tierChart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <section id="page-timeline" class="page">
+            <div id="timelineTable"></div>
+        </section>
+
+        <section id="page-cache" class="page">
+            <div class="controls">
+                <input type="text" id="cacheSearch" placeholder="Search commands..." class="search-input">
+                <select id="cacheVerdict">
+                    <option value="">All verdicts</option>
+                    <option value="allow">Allow</option>
+                    <option value="deny">Deny</option>
+                </select>
+            </div>
+            <div id="cacheTable"></div>
+        </section>
+
+        <section id="page-learned" class="page">
+            <div class="section">
+                <h3>Learned Patterns</h3>
+                <p class="subtitle">Commands auto-approved from user feedback</p>
+            </div>
+            <div id="learnedTable"></div>
+        </section>
+
+        <section id="page-stop-hooks" class="page">
+            <div id="stopHooksTable"></div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

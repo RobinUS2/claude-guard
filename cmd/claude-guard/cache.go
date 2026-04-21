@@ -20,8 +20,17 @@ Usage:
 
 Subcommands:
   stats                        detailed cache health
+  inspect [flags]              search and display full cache entries
   prune [flags]                selectively delete entries
   clear --force                wipe the entire cache
+
+Inspect flags:
+  --match <substring>          command text contains substring (case-sensitive)
+  --disagreements              only entries where the verifier disagreed
+  --unverified                 only entries not yet verified
+  --verdict <allow|deny>       effective verdict equals this
+  --limit <N>                  max entries to display (default 20)
+  --json                       output raw JSON entries
 
 Prune flags (combine with AND — entries must match every filter given):
   --dry-run                    print matches, don't delete
@@ -34,6 +43,10 @@ Prune flags (combine with AND — entries must match every filter given):
 
 Examples:
   claude-guard cache stats
+  claude-guard cache inspect                            # show all entries (limit 20)
+  claude-guard cache inspect --disagreements            # verifier disagreements
+  claude-guard cache inspect --match "curl" --json      # curl entries as JSON
+  claude-guard cache inspect --unverified               # entries awaiting verification
   claude-guard cache prune                              # default: expired entries
   claude-guard cache prune --older-than 30d --dry-run
   claude-guard cache prune --match "Google Chrome" --dry-run
@@ -50,6 +63,8 @@ func cmdCache(args []string) int {
 	switch args[0] {
 	case "stats":
 		return cacheStatsCmd(args[1:])
+	case "inspect":
+		return cacheInspectCmd(args[1:])
 	case "prune":
 		return cachePruneCmd(args[1:])
 	case "clear":
@@ -128,6 +143,147 @@ func cacheStatsCmd(args []string) int {
 			for _, e := range list[:n] {
 				fmt.Printf("  %-20s %d\n", e.k, e.v)
 			}
+		}
+	}
+	return 0
+}
+
+func cacheInspectCmd(args []string) int {
+	fs := flag.NewFlagSet("cache inspect", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var (
+		matchSub     string
+		onlyDisagree bool
+		onlyUnverif  bool
+		verdictStr   string
+		limit        int
+		asJSON       bool
+	)
+	fs.StringVar(&matchSub, "match", "", "command text contains substring")
+	fs.BoolVar(&onlyDisagree, "disagreements", false, "only verifier disagreements")
+	fs.BoolVar(&onlyUnverif, "unverified", false, "only unverified entries")
+	fs.StringVar(&verdictStr, "verdict", "", "effective verdict (allow or deny)")
+	fs.IntVar(&limit, "limit", 20, "max entries to display")
+	fs.BoolVar(&asJSON, "json", false, "output raw JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	if verdictStr != "" && verdictStr != "allow" && verdictStr != "deny" {
+		fmt.Fprintf(os.Stderr, "cache inspect: --verdict must be allow or deny, got %q\n", verdictStr)
+		return 2
+	}
+
+	dir := cacheDirForOps()
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		fmt.Println("cache dir does not exist; nothing to inspect")
+		return 0
+	}
+
+	now := time.Now()
+	shown := 0
+
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".json") {
+			return nil
+		}
+		if shown >= limit {
+			return filepath.SkipAll
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		var e cache.Entry
+		if json.Unmarshal(data, &e) != nil {
+			return nil
+		}
+		if e.Expired(now) {
+			return nil
+		}
+
+		// Apply filters (AND).
+		if matchSub != "" && !strings.Contains(e.Command, matchSub) {
+			return nil
+		}
+		if onlyDisagree && !e.Disagreement {
+			return nil
+		}
+		if onlyUnverif && e.Verified {
+			return nil
+		}
+		if verdictStr != "" && string(e.EffectiveVerdict()) != verdictStr {
+			return nil
+		}
+
+		shown++
+		if asJSON {
+			fmt.Println(string(data))
+			return nil
+		}
+
+		// Human-readable display.
+		fmt.Printf("─── entry %d ───\n", shown)
+		fmt.Printf("command:    %s\n", truncateInline(e.Command, 120))
+		fmt.Printf("verdict:    %s", e.Verdict)
+		if e.EffectiveVerdict() != e.Verdict {
+			fmt.Printf(" → %s (overridden by verifier)", e.EffectiveVerdict())
+		}
+		fmt.Println()
+		fmt.Printf("tier:       %s\n", e.Tier)
+		if e.Reason != "" {
+			fmt.Printf("reason:     %s\n", e.Reason)
+		}
+		fmt.Printf("provider:   %s (%s)\n", e.Provider, e.Model)
+		fmt.Printf("stored:     %s (%s ago)\n", e.StoredAt.Format(time.RFC3339), time.Since(e.StoredAt).Round(time.Second))
+		if !e.ExpiresAt.IsZero() {
+			remaining := time.Until(e.ExpiresAt).Round(time.Second)
+			if remaining > 0 {
+				fmt.Printf("expires:    %s (in %s)\n", e.ExpiresAt.Format(time.RFC3339), remaining)
+			} else {
+				fmt.Printf("expires:    %s (expired)\n", e.ExpiresAt.Format(time.RFC3339))
+			}
+		}
+		if e.CWD != "" {
+			fmt.Printf("cwd:        %s\n", e.CWD)
+		}
+		if e.CanonicalForm != "" {
+			fmt.Printf("canonical:  %s (matches: %d)\n", e.CanonicalForm, e.MatchCount)
+		}
+
+		// Verification details.
+		if e.Verified {
+			fmt.Printf("verified:   %s by %s (%s)\n",
+				e.VerifiedAt.Format(time.RFC3339), e.VerifierProvider, e.VerifierModel)
+			fmt.Printf("  verdict:  %s\n", e.VerifierVerdict)
+			if e.VerifierReason != "" {
+				fmt.Printf("  reason:   %s\n", e.VerifierReason)
+			}
+			if e.Disagreement {
+				fmt.Printf("  ⚠ DISAGREEMENT: verifier overrides original verdict\n")
+			}
+		} else {
+			fmt.Printf("verified:   pending\n")
+		}
+		if !e.TrustedAt.IsZero() {
+			fmt.Printf("trusted:    %s\n", e.TrustedAt.Format(time.RFC3339))
+			if e.TrustedReason != "" {
+				fmt.Printf("  reason:   %s\n", e.TrustedReason)
+			}
+		}
+		fmt.Println()
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cache inspect: walk: %v\n", err)
+		return 1
+	}
+
+	if !asJSON {
+		if shown == 0 {
+			fmt.Println("no matching entries found")
+		} else {
+			fmt.Printf("(%d entr%s shown)\n", shown, pluralIES(shown))
 		}
 	}
 	return 0
@@ -353,9 +509,12 @@ func cacheClearCmd(args []string) int {
 	return 0
 }
 
-// cacheDirForOps resolves the verdict cache directory the same way the
-// engine does: XDG_CACHE_HOME wins over the default $HOME/.cache path.
-func cacheDirForOps() string {
+// cacheDirFn resolves the verdict cache directory. Overridable in tests.
+var cacheDirFn = defaultCacheDirForOps
+
+func cacheDirForOps() string { return cacheDirFn() }
+
+func defaultCacheDirForOps() string {
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".cache", "claude-guard", "verdicts")
 	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {

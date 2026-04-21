@@ -12,8 +12,9 @@ import (
 const maxContinuesPerSession = 3
 
 type sessionState struct {
-	Continues int               `json:"continues"`
-	Fired     map[string]string `json:"fired"` // rule name → shell output hash
+	Continues  int               `json:"continues"`
+	Fired      map[string]string `json:"fired"`       // rule name → shell output hash
+	FireCounts map[string]int    `json:"fire_counts"` // rule name → times fired
 }
 
 type session struct {
@@ -43,7 +44,10 @@ func (s *session) load() sessionState {
 	}
 	var st sessionState
 	if err := json.Unmarshal(data, &st); err != nil || st.Fired == nil {
-		return sessionState{Fired: map[string]string{}}
+		return sessionState{Fired: map[string]string{}, FireCounts: map[string]int{}}
+	}
+	if st.FireCounts == nil {
+		st.FireCounts = map[string]int{}
 	}
 	return st
 }
@@ -84,8 +88,18 @@ func (s *session) shellHashChanged(rule, currentHash string) bool {
 
 func (s *session) markFired(rule, shellHash string) {
 	st := s.load()
+	if st.FireCounts == nil {
+		st.FireCounts = map[string]int{}
+	}
 	st.Fired[rule] = shellHash
+	st.FireCounts[rule]++
 	s.save(st)
+}
+
+// ruleFireCount returns how many times a rule has fired in this session.
+func (s *session) ruleFireCount(rule string) int {
+	st := s.load()
+	return st.FireCounts[rule]
 }
 
 // shellHash returns a short hash of output for cool-down comparison.

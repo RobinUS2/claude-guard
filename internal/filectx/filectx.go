@@ -40,6 +40,11 @@ type runner struct {
 
 // runners is the known runner table. Order doesn't matter — we match
 // on program name.
+//
+// Shells (bash/sh/zsh) are included so `bash path/to/script.sh` surfaces
+// the script contents to the LLM. `bash -c '<cmd>'` is tier-1 denied by
+// shell-dash-c before we ever get here, so there's no risk of treating
+// an inline command string as a file path.
 var runners = []runner{
 	{program: "go", subcmd: "run"},
 	{program: "python"},
@@ -49,6 +54,9 @@ var runners = []runner{
 	{program: "deno", subcmd: "run"},
 	{program: "ruby"},
 	{program: "bun", subcmd: "run"},
+	{program: "bash"},
+	{program: "sh"},
+	{program: "zsh"},
 }
 
 // Extract examines a parsed command and returns file context if the

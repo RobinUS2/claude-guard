@@ -49,6 +49,13 @@ type StopHookRecord struct {
 	Suppressed     string `json:"suppressed,omitempty"` // "max_continues_reached" or ""
 	ContinueCount  int    `json:"continue_count"`
 	LatencyUS      int64  `json:"latency_us"`
+
+	// Diagnostic fields for debugging rule misses.
+	TranscriptTurns    int    `json:"transcript_turns,omitempty"`
+	LastAssistantLen   int    `json:"last_assistant_len,omitempty"`
+	LastAssistantHead  string `json:"last_assistant_head,omitempty"` // first 200 chars
+	BashCallCount      int    `json:"bash_call_count,omitempty"`
+	HasTodoWrite       bool   `json:"has_todo_write,omitempty"`
 }
 
 // ReadRecord is the shape for reading decision records back from the
@@ -100,6 +107,7 @@ type DecisionRecord struct {
 	Verdict      string
 	Rule         string
 	Reason       string
+	SkipReason   string `json:"skip_reason,omitempty"`
 	LatencyUS    int64
 
 	// Shadow fields: populated when shadow mode runs a tier it didn't enforce.
@@ -250,6 +258,22 @@ func (l *DecisionLogger) StopHook(rec StopHookRecord) {
 		slog.Int("continue_count", rec.ContinueCount),
 		slog.Int64("latency_us", rec.LatencyUS),
 	)
+	// Diagnostic fields — omit when zero to keep existing log lines short.
+	if rec.TranscriptTurns > 0 {
+		attrs = append(attrs, slog.Int("transcript_turns", rec.TranscriptTurns))
+	}
+	if rec.LastAssistantLen > 0 {
+		attrs = append(attrs,
+			slog.Int("last_assistant_len", rec.LastAssistantLen),
+			slog.String("last_assistant_head", rec.LastAssistantHead),
+		)
+	}
+	if rec.BashCallCount > 0 {
+		attrs = append(attrs, slog.Int("bash_call_count", rec.BashCallCount))
+	}
+	if rec.HasTodoWrite {
+		attrs = append(attrs, slog.Bool("has_todo_write", true))
+	}
 	l.firehose.LogAttrs(context.Background(), slog.LevelInfo, MsgStopHook, attrs...)
 }
 

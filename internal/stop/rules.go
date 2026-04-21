@@ -2,18 +2,21 @@ package stop
 
 import (
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
 )
 
-// uncommittedChangesRule fires when Claude says it's done but git status
-// shows staged or unstaged changes.
+// uncommittedChangesRule fires when Claude stops but git status shows
+// staged or unstaged changes. No text pre-filter — always checks git
+// status (~5ms) because Claude often stops without explicit completion
+// words, especially when the last turn ends with a tool_use block.
 type uncommittedChangesRule struct{}
 
-func (r *uncommittedChangesRule) Name() string         { return "uncommitted-changes" }
-func (r *uncommittedChangesRule) HighConfidence() bool { return true }
-func (r *uncommittedChangesRule) TextPreFilter() string {
-	return `\b(done|complete|finished|all set|pushed|merged|shipped)\b`
-}
+func (r *uncommittedChangesRule) Name() string          { return "uncommitted-changes" }
+func (r *uncommittedChangesRule) HighConfidence() bool  { return true }
+func (r *uncommittedChangesRule) MaxContinues() int     { return 0 } // use global cap
+func (r *uncommittedChangesRule) TextPreFilter() string { return "" }
 
 func (r *uncommittedChangesRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
 	out, err := sh.Run("git status --short")
@@ -32,6 +35,7 @@ type proposedTestNotRunRule struct{}
 
 func (r *proposedTestNotRunRule) Name() string         { return "proposed-test-not-run" }
 func (r *proposedTestNotRunRule) HighConfidence() bool { return false }
+func (r *proposedTestNotRunRule) MaxContinues() int    { return 1 }
 func (r *proposedTestNotRunRule) TextPreFilter() string {
 	return `\b(go test|npm test|make test|pytest|cargo test)\b`
 }
@@ -54,6 +58,7 @@ type installNotRunRule struct{}
 
 func (r *installNotRunRule) Name() string         { return "install-not-run" }
 func (r *installNotRunRule) HighConfidence() bool { return false }
+func (r *installNotRunRule) MaxContinues() int    { return 1 }
 func (r *installNotRunRule) TextPreFilter() string {
 	return `\b(make install|install)\b`
 }
@@ -76,6 +81,7 @@ type openTodoItemsRule struct{}
 
 func (r *openTodoItemsRule) Name() string          { return "open-todo-items" }
 func (r *openTodoItemsRule) HighConfidence() bool  { return true }
+func (r *openTodoItemsRule) MaxContinues() int     { return 0 } // use global cap
 func (r *openTodoItemsRule) TextPreFilter() string { return "" }
 
 func (r *openTodoItemsRule) Eval(t Transcript, _ ShellContext) (bool, string) {
@@ -103,6 +109,7 @@ type prCreatedNotVerifiedRule struct{}
 
 func (r *prCreatedNotVerifiedRule) Name() string          { return "pr-created-not-verified" }
 func (r *prCreatedNotVerifiedRule) HighConfidence() bool  { return false }
+func (r *prCreatedNotVerifiedRule) MaxContinues() int     { return 1 }
 func (r *prCreatedNotVerifiedRule) TextPreFilter() string { return "" }
 
 func (r *prCreatedNotVerifiedRule) Eval(t Transcript, _ ShellContext) (bool, string) {
@@ -125,14 +132,250 @@ func (r *prCreatedNotVerifiedRule) Eval(t Transcript, _ ShellContext) (bool, str
 	return true, "A PR was created but CI status wasn't checked. Run `gh pr checks <num>` to verify, or note the PR number for manual follow-up."
 }
 
+// committedNotPushedRule fires when there are local commits not pushed
+// to the remote tracking branch.
+type committedNotPushedRule struct{}
+
+func (r *committedNotPushedRule) Name() string          { return "committed-not-pushed" }
+func (r *committedNotPushedRule) HighConfidence() bool  { return true }
+func (r *committedNotPushedRule) MaxContinues() int     { return 0 } // use global cap
+func (r *committedNotPushedRule) TextPreFilter() string { return "" }
+
+func (r *committedNotPushedRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
+	out, err := sh.Run("git log --oneline @{u}..HEAD 2>/dev/null")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return false, ""
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	return true, fmt.Sprintf(
+		"There are %d unpushed commit(s):\n%s\nPush to remote, or confirm you intend to keep these local.",
+		len(lines), strings.TrimSpace(out),
+	)
+}
+
+// failingTestsRule fires when a test command was run in the session
+// and the last assistant text mentions failures or errors.
+type failingTestsRule struct{}
+
+func (r *failingTestsRule) Name() string         { return "failing-tests" }
+func (r *failingTestsRule) HighConfidence() bool { return false }
+func (r *failingTestsRule) MaxContinues() int    { return 0 } // use global cap
+func (r *failingTestsRule) TextPreFilter() string {
+	return `(?i)\b(FAIL|FAILED|ERROR|panic|test.*fail)`
+}
+
+func (r *failingTestsRule) Eval(t Transcript, _ ShellContext) (bool, string) {
+	// Only fire if tests were actually run in this session.
+	testPatterns := []string{"go test", "npm test", "make test", "pytest", "cargo test", "jest", "vitest"}
+	ran := false
+	for _, bash := range t.BashCalls {
+		for _, pat := range testPatterns {
+			if strings.Contains(bash, pat) {
+				ran = true
+				break
+			}
+		}
+		if ran {
+			break
+		}
+	}
+	if !ran {
+		return false, ""
+	}
+	return true, "Tests appear to have failures. Review the output and fix before finishing, or confirm the failures are expected."
+}
+
+// featureBranchLeftRule fires when Claude stops on a feature branch
+// (not main/master) — a reminder to merge, PR, or note the branch.
+type featureBranchLeftRule struct{}
+
+func (r *featureBranchLeftRule) Name() string          { return "feature-branch-left" }
+func (r *featureBranchLeftRule) HighConfidence() bool  { return false }
+func (r *featureBranchLeftRule) MaxContinues() int     { return 1 } // fire once only
+func (r *featureBranchLeftRule) TextPreFilter() string { return "" }
+
+func (r *featureBranchLeftRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
+	branch, err := sh.Run("git branch --show-current 2>/dev/null")
+	if err != nil {
+		return false, ""
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" || branch == "main" || branch == "master" || branch == "develop" {
+		return false, ""
+	}
+	return true, fmt.Sprintf(
+		"Still on branch '%s'. Merge to main, create a PR, or note the branch name before finishing.",
+		branch,
+	)
+}
+
+// worktreeLeftOpenRule fires when there are active git worktrees
+// under .claude/worktrees/.
+type worktreeLeftOpenRule struct{}
+
+func (r *worktreeLeftOpenRule) Name() string          { return "worktree-left-open" }
+func (r *worktreeLeftOpenRule) HighConfidence() bool  { return false }
+func (r *worktreeLeftOpenRule) MaxContinues() int     { return 1 } // fire once only
+func (r *worktreeLeftOpenRule) TextPreFilter() string { return "" }
+
+func (r *worktreeLeftOpenRule) Eval(_ Transcript, sh ShellContext) (bool, string) {
+	out, err := sh.Run("git worktree list --porcelain 2>/dev/null")
+	if err != nil {
+		return false, ""
+	}
+	// Count worktrees — first one is always the main worktree.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	worktrees := 0
+	for _, line := range lines {
+		if strings.HasPrefix(line, "worktree ") {
+			worktrees++
+		}
+	}
+	if worktrees <= 1 {
+		return false, "" // only the main worktree
+	}
+	return true, fmt.Sprintf(
+		"There are %d git worktrees active (including main). Clean up finished worktrees, or note them for follow-up.",
+		worktrees,
+	)
+}
+
+// stopPhraseGuardRule catches premature stopping phrases across multiple
+// categories. Based on anthropics/claude-code#42796.
+type stopPhraseGuardRule struct{}
+
+func (r *stopPhraseGuardRule) Name() string          { return "stop-phrase-guard" }
+func (r *stopPhraseGuardRule) HighConfidence() bool  { return false }
+func (r *stopPhraseGuardRule) MaxContinues() int     { return 2 }
+func (r *stopPhraseGuardRule) TextPreFilter() string { return "" } // check all text
+
+// stopPhraseCategories maps category labels to their pattern strings.
+var stopPhraseCategories = []struct {
+	name     string
+	patterns []string
+}{
+	{"ownership dodging", []string{
+		`not caused by my changes`,
+		`existing issue`,
+		`pre-existing`,
+		`was already broken`,
+	}},
+	{"permission-seeking", []string{
+		`should I continue`,
+		`want me to keep going`,
+		`would you like me to`,
+		`shall I proceed`,
+		`do you want me to`,
+	}},
+	{"premature stopping", []string{
+		`good stopping point`,
+		`natural checkpoint`,
+		`leaving off here`,
+		`pick this up later`,
+		`continue in a new session`,
+		`getting long`,
+		`good place to pause`,
+	}},
+	{"known-limitation labeling", []string{
+		`known limitation`,
+		`future work`,
+		`out of scope for now`,
+		`beyond the scope`,
+		`left as an exercise`,
+	}},
+	{"session-length excuses", []string{
+		`continue in a new session`,
+		`context is getting long`,
+		`running out of context`,
+		`pick up later`,
+	}},
+}
+
+// stopPhraseCategoryRegexes holds compiled regexes per category, built once.
+var stopPhraseCategoryRegexes []struct {
+	name string
+	re   *regexp.Regexp
+}
+
+func init() {
+	for _, cat := range stopPhraseCategories {
+		combined := `(?i)(?:` + strings.Join(cat.patterns, `|`) + `)`
+		stopPhraseCategoryRegexes = append(stopPhraseCategoryRegexes, struct {
+			name string
+			re   *regexp.Regexp
+		}{cat.name, regexp.MustCompile(combined)})
+	}
+}
+
+func (r *stopPhraseGuardRule) Eval(t Transcript, _ ShellContext) (bool, string) {
+	for _, cat := range stopPhraseCategoryRegexes {
+		if cat.re.MatchString(t.LastAssistantText) {
+			return true, fmt.Sprintf(
+				"Premature stop detected: %s. Continue with the task — don't stop at checkpoints.",
+				cat.name,
+			)
+		}
+	}
+	return false, ""
+}
+
+// noAskHumanRule catches "Should I...?" patterns in autonomous sessions.
+type noAskHumanRule struct{}
+
+func (r *noAskHumanRule) Name() string          { return "no-ask-human" }
+func (r *noAskHumanRule) HighConfidence() bool  { return false }
+func (r *noAskHumanRule) MaxContinues() int     { return 2 }
+func (r *noAskHumanRule) TextPreFilter() string { return `(?i)\b(should I|do you want|would you like|shall I)\b` }
+
+func (r *noAskHumanRule) Eval(_ Transcript, _ ShellContext) (bool, string) {
+	v := os.Getenv("CLAUDE_GUARD_AUTONOMOUS")
+	if v != "1" && v != "true" {
+		return false, ""
+	}
+	return true, "You're in autonomous mode — decide and act. Don't ask for permission."
+}
+
+// contextMonitorRule fires when the transcript is getting large,
+// reminding Claude to summarize progress before context compaction
+// makes it lose state. Uses TurnCount as a lightweight proxy.
+type contextMonitorRule struct{}
+
+func (r *contextMonitorRule) Name() string          { return "context-monitor" }
+func (r *contextMonitorRule) HighConfidence() bool  { return false }
+func (r *contextMonitorRule) MaxContinues() int     { return 1 } // fire once only
+func (r *contextMonitorRule) TextPreFilter() string { return "" }
+
+// contextWarningThreshold is the turn count above which we warn.
+// ~200 turns typically means 60-80% context usage for a long session.
+const contextWarningThreshold = 200
+
+func (r *contextMonitorRule) Eval(t Transcript, _ ShellContext) (bool, string) {
+	if t.TurnCount < contextWarningThreshold {
+		return false, ""
+	}
+	return true, fmt.Sprintf(
+		"Context is getting large (%d turns). Summarize progress, key decisions, and remaining work before continuing. This prevents context compaction from losing important state.",
+		t.TurnCount,
+	)
+}
+
 // DefaultRules returns the built-in rule set in evaluation order.
-// Transcript-only rules (no shell cost) run first.
+// Transcript-only rules (no shell cost) run first, then shell-based.
 func DefaultRules() []StopRule {
 	return []StopRule{
-		&openTodoItemsRule{},        // transcript-only, no shell cost
-		&prCreatedNotVerifiedRule{}, // transcript-only
-		&uncommittedChangesRule{},   // text pre-filter + git status
-		&installNotRunRule{},        // text pre-filter + transcript check
-		&proposedTestNotRunRule{},   // text pre-filter + transcript check
+		// Transcript-only (no shell cost).
+		&openTodoItemsRule{},
+		&prCreatedNotVerifiedRule{},
+		&failingTestsRule{},
+		&stopPhraseGuardRule{},
+		&noAskHumanRule{},
+		&contextMonitorRule{},
+		&installNotRunRule{},
+		&proposedTestNotRunRule{},
+		// Shell-based (~5ms each).
+		&uncommittedChangesRule{},
+		&committedNotPushedRule{},
+		&featureBranchLeftRule{},
+		&worktreeLeftOpenRule{},
 	}
 }

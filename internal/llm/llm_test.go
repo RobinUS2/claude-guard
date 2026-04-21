@@ -67,6 +67,21 @@ func TestAutoSelect_PreferenceOrderGeminiFirst(t *testing.T) {
 }
 
 func TestAutoSelect_AnthropicPreferredButOnlyGeminiAvailable(t *testing.T) {
+	// Stub token-vault so LookupTokenVaultAnthropic can't find a real
+	// key from the host system, and reset the in-process cache.
+	old := tokenVaultBinary
+	tokenVaultBinary = "/nonexistent-token-vault-stub"
+	inProcessCache.Lock()
+	savedValue, savedChecked := inProcessCache.value, inProcessCache.checked
+	inProcessCache.value, inProcessCache.checked = "", false
+	inProcessCache.Unlock()
+	t.Cleanup(func() {
+		tokenVaultBinary = old
+		inProcessCache.Lock()
+		inProcessCache.value, inProcessCache.checked = savedValue, savedChecked
+		inProcessCache.Unlock()
+	})
+
 	c := AutoSelect("anthropic", fakeEnv(map[string]string{
 		"GEMINI_API_KEY": "gemini-yyy",
 	}))
@@ -76,6 +91,19 @@ func TestAutoSelect_AnthropicPreferredButOnlyGeminiAvailable(t *testing.T) {
 }
 
 func TestAutoSelect_NoKeysReturnsNil(t *testing.T) {
+	old := tokenVaultBinary
+	tokenVaultBinary = "/nonexistent-token-vault-stub"
+	inProcessCache.Lock()
+	savedValue, savedChecked := inProcessCache.value, inProcessCache.checked
+	inProcessCache.value, inProcessCache.checked = "", false
+	inProcessCache.Unlock()
+	t.Cleanup(func() {
+		tokenVaultBinary = old
+		inProcessCache.Lock()
+		inProcessCache.value, inProcessCache.checked = savedValue, savedChecked
+		inProcessCache.Unlock()
+	})
+
 	c := AutoSelect("", fakeEnv(nil))
 	if c != nil {
 		t.Errorf("expected nil when no keys; got %v", c)
@@ -130,6 +158,40 @@ func TestBuildUserMessage_WithoutFileContent(t *testing.T) {
 	msg := buildUserMessage(in)
 	if strings.Contains(msg, "REFERENCED FILE") {
 		t.Error("message should NOT contain REFERENCED FILE when no file content")
+	}
+}
+
+func TestBuildUserMessage_WithTrustedPrograms(t *testing.T) {
+	in := ClassifyInput{
+		Command: "for id in 19 20 21; do taufinity datasheet get $id; done",
+		CWD:     "/home/user",
+		TrustedPrograms: []string{
+			"gcloud", "git", "ls", "taufinity",
+		},
+	}
+	msg := buildUserMessage(in)
+	if !strings.Contains(msg, "OPERATOR-TRUSTED PROGRAMS") {
+		t.Error("message should contain OPERATOR-TRUSTED PROGRAMS section")
+	}
+	if !strings.Contains(msg, "taufinity") {
+		t.Error("trusted program name should appear in the prompt")
+	}
+	if !strings.Contains(msg, "LOOP COST") {
+		t.Error("LOOP COST guidance should appear when trusted programs are present")
+	}
+}
+
+func TestBuildUserMessage_WithoutTrustedPrograms(t *testing.T) {
+	in := ClassifyInput{
+		Command: "git status",
+		CWD:     "/home/user",
+	}
+	msg := buildUserMessage(in)
+	if strings.Contains(msg, "OPERATOR-TRUSTED PROGRAMS") {
+		t.Error("message should NOT contain OPERATOR-TRUSTED PROGRAMS when list is empty")
+	}
+	if strings.Contains(msg, "LOOP COST") {
+		t.Error("message should NOT contain LOOP COST when no trusted-program context")
 	}
 }
 

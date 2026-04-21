@@ -117,6 +117,11 @@ type Output struct {
 	// Deny verdicts; empty for Allow/Continue.
 	Hint string
 
+	// SkipReason records why a tier was skipped (e.g. "llm_budget_exhausted").
+	// Empty when no tier was skipped. Logged in the decision record so
+	// operators can see why a command fell through to default/prompt.
+	SkipReason string
+
 	// Shadow-mode snapshot of each tier's (hypothetical) verdict.
 	// Populated even when a tier doesn't fire, so shadow mode can be
 	// analysed post-hoc.
@@ -554,13 +559,18 @@ func (e *Engine) Decide(in Input) Output {
 					e.record(in, out)
 					return out
 				case cache.VerdictDeny:
-					// Verifier disagreement → block.
-					out.Verdict = Deny
+					// Verifier disagreement → forward to user (not auto-deny).
+					// Only tier 1 (deterministic rules) should hard-block.
+					// LLM/verifier disagreements surface as a prompt so the
+					// human decides.
+					out.Verdict = Continue
 					out.Tier = "cache"
 					out.Rule = "verifier:" + entry.VerifierProvider + "/" + entry.VerifierModel
 					out.Reason = "verified by " + entry.VerifierProvider + " (disagreement with original): " + entry.VerifierReason
+					out.SkipReason = "verifier_disagree_forwarded_to_user"
 					out.Latency = time.Since(start)
 					e.record(in, out)
+					writePendingApproval(in.ToolUseID, in.Command, "", in.CWD, in.SessionID, out.Reason)
 					return out
 				}
 			}
@@ -604,14 +614,15 @@ func (e *Engine) Decide(in Input) Output {
 					return out
 				}
 				if !e.cfg.ShadowMode && eff == cache.VerdictDeny {
-					// A canonical entry can carry a verifier-disagreement
-					// just like an exact entry. Same semantics.
-					out.Verdict = Deny
+					// Verifier disagreement → forward to user, not auto-deny.
+					out.Verdict = Continue
 					out.Tier = "cache"
 					out.Rule = "canonical/" + entry.CanonicalForm
 					out.Reason = "verified by " + entry.VerifierProvider + " (disagreement): " + entry.VerifierReason
+					out.SkipReason = "verifier_disagree_forwarded_to_user"
 					out.Latency = time.Since(start)
 					e.record(in, out)
+					writePendingApproval(in.ToolUseID, in.Command, entry.CanonicalForm, in.CWD, in.SessionID, out.Reason)
 					return out
 				}
 				// Shadow mode: log and fall through.
@@ -664,7 +675,8 @@ func (e *Engine) Decide(in Input) Output {
 			return out
 		}
 	} else if !llmBudgetOK {
-		e.appLog().Warn("llm_budget_exhausted", "tool_use_id", in.ToolUseID)
+		out.SkipReason = "llm_budget_exhausted"
+		e.appLog().Warn("llm_budget_exhausted", "tool_use_id", in.ToolUseID, "command", in.Command)
 	}
 
 	// Tier 5: legacy allow list (migrated from settings.json).
@@ -687,6 +699,7 @@ func (e *Engine) Decide(in Input) Output {
 	// Tier 6: default (no verdict, fall through to user prompt).
 	out.Latency = time.Since(start)
 	e.record(in, out)
+	writePendingApproval(in.ToolUseID, in.Command, "", in.CWD, in.SessionID, "no rule matched")
 	return out
 }
 
@@ -765,13 +778,29 @@ func (e *Engine) runLLMTier(
 	// cache on arrival.
 	asyncCtx, asyncCancel := context.WithTimeout(context.Background(), llmAsyncDeadline)
 	projCtx := projectctx.Context(in.CWD, in.Command)
+	// Operator-trusted CLIs (from the legacy allow list) — a list of
+	// pre-approved first-word programs the LLM uses to reason about
+	// compound shapes (for-loops, pipelines) whose body only invokes
+	// these. Capped to avoid prompt bloat; 60 is well above the size of
+	// any real settings.json allow list we've observed.
+	trusted := e.legacy.TrustedPrograms(60)
+	// Trusted domains from project config — tells the LLM that curl/wget
+	// to these domains is safe (project's own APIs).
+	var trustedDomains []string
+	if cached, ok := e.projectConfigCache.Load(in.CWD); ok {
+		if pc, ok := cached.(*projectconfig.Config); ok && pc != nil {
+			trustedDomains = pc.TrustedDomains
+		}
+	}
 	input := llm.ClassifyInput{
-		Command:        in.Command,
-		Description:    in.Description,
-		CWD:            in.CWD,
-		ProjectContext: projCtx,
-		FileContent:    in.FileContent,
-		FilePath:       in.RunnerFilePath,
+		Command:         in.Command,
+		Description:     in.Description,
+		CWD:             in.CWD,
+		ProjectContext:  projCtx,
+		FileContent:     in.FileContent,
+		FilePath:        in.RunnerFilePath,
+		TrustedPrograms: trusted,
+		TrustedDomains:  trustedDomains,
 	}
 
 	type outcome struct {
@@ -1502,6 +1531,7 @@ func (e *Engine) record(in Input, out Output) {
 		Verdict:      string(out.Verdict),
 		Rule:         out.Rule,
 		Reason:       out.Reason,
+		SkipReason:   out.SkipReason,
 		LatencyUS:    out.Latency.Microseconds(),
 	}
 	if out.Shadow.Tier1Rule != "" || out.Shadow.Tier2Rule != "" || out.Shadow.Tier4LLM != "" {

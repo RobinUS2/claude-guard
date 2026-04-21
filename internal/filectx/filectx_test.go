@@ -80,6 +80,64 @@ func TestExtract_NotARunner(t *testing.T) {
 	}
 }
 
+func TestExtract_BashScript(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "setup.sh")
+	os.WriteFile(f, []byte("#!/bin/bash\necho hello\n"), 0o644)
+
+	call := parseFirst(t, "bash "+f)
+	fc := Extract(call)
+	if fc == nil {
+		t.Fatal("expected FileContext for bash script")
+	}
+	if fc.Skipped {
+		t.Fatalf("unexpected skip: %s", fc.Reason)
+	}
+	if !strings.Contains(fc.Content, "echo hello") {
+		t.Errorf("content missing expected text: %q", fc.Content)
+	}
+}
+
+func TestExtract_ShScript(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "run.sh")
+	os.WriteFile(f, []byte("echo sh\n"), 0o644)
+
+	call := parseFirst(t, "sh "+f)
+	fc := Extract(call)
+	if fc == nil {
+		t.Fatal("expected FileContext for sh script")
+	}
+	if fc.Skipped {
+		t.Fatalf("unexpected skip: %s", fc.Reason)
+	}
+}
+
+func TestExtract_ZshScript(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "run.zsh")
+	os.WriteFile(f, []byte("echo zsh\n"), 0o644)
+
+	call := parseFirst(t, "zsh "+f)
+	fc := Extract(call)
+	if fc == nil {
+		t.Fatal("expected FileContext for zsh script")
+	}
+	if fc.Skipped {
+		t.Fatalf("unexpected skip: %s", fc.Reason)
+	}
+}
+
+// bash -c '<inline>' must NOT be mis-read as a file. shell-dash-c denies
+// it at tier-1, but filectx itself should also degrade cleanly if called.
+func TestExtract_BashDashC_NotAFile(t *testing.T) {
+	call := parseFirst(t, "bash -c 'rm -rf /etc'")
+	fc := Extract(call)
+	if fc == nil {
+		t.Fatal("expected FileContext (file lookup, even if missing)")
+	}
+	if !fc.Skipped {
+		t.Fatalf("expected Skipped (file does not exist), got content: %q", fc.Content)
+	}
+}
+
 func TestExtract_FileTooLarge(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "big.go")
 	os.WriteFile(f, make([]byte, MaxFileSize+1), 0o644)

@@ -636,6 +636,13 @@ func DefaultAllowRules() []rules.Rule {
 		RequireSubcmdAny: []string{"list", "ls", "view", "outdated", "audit", "config", "whoami", "why", "info", "version"},
 	}
 
+	// npm/yarn/pnpm dev commands (build, test, run, start, install, ci)
+	nodePmDev := &rules.AnchoredCommand{
+		RuleName:         "node-pm-dev",
+		Programs:         []string{"npm", "yarn", "pnpm"},
+		RequireSubcmdAny: []string{"run", "start", "test", "build", "install", "ci"},
+	}
+
 	// gh read-only (standalone-noun shapes).
 	//
 	// Accepts only nouns that have no destructive child commands at
@@ -743,6 +750,7 @@ func DefaultAllowRules() []rules.Rule {
 		firebaseReadonly,
 		goReadonly,
 		nodePmReadonly,
+		nodePmDev,
 		ghReadonly,
 		ghNounVerbReadonly,
 		ghPrApprove,
@@ -773,11 +781,28 @@ func DefaultAllowRules() []rules.Rule {
 		firebaseReadonly,
 		goReadonly,
 		nodePmReadonly,
+		nodePmDev,
 		ghReadonly,
 		ghNounVerbReadonly,
 		ghPrApprove,
 		claudeGuardReadonly,
 		catHeredocWrite,
+
+		// curl to trusted domains — allows all methods except DELETE.
+		// Mutations (PUT/POST/PATCH) are normal operational work.
+		// Forbidden flags (-o, --upload-file, --resolve) cause NoMatch.
+		// Data @file references cause NoMatch (exfiltration risk).
+		// Tolerates compound commands (TOKEN=$(cmd) && curl ... | jq).
+		//
+		// localhost is included because local development servers are
+		// the operator's own processes — no exfiltration or remote-code
+		// risk. Project configs can add additional domains via the
+		// `trusted_domains` YAML key (injected into LLM context).
+		&rules.CurlToDomain{
+			RuleName:        "curl-to-trusted-domain",
+			TrustedDomains:  []string{"studio.taufinity.io", "localhost"},
+			SafePipeTargets: safePipeTargets,
+		},
 
 		// curl with only -I / --head / -o /dev/null (HEAD and discard-body reads)
 		// is tricky to express with flag constraints, so it falls through to LLM.
@@ -813,6 +838,19 @@ func DefaultAllowRules() []rules.Rule {
 			RuleName:        "pipeline-readonly",
 			InnerRules:      innerReadRules,
 			SafePipeTargets: safePipeTargets,
+		},
+
+		// Bounded for-loops over literal tokens whose body only
+		// invokes read-only programs. Covers the common pattern:
+		//   for id in 19 20 21; do taufinity datasheet get $id; done
+		// Iterator items must be literals (no $(...), no globs), body
+		// must be a plain CallExpr (no pipes/redirects), and every
+		// synthesized iteration must match an inner read-only rule.
+		// MaxIterations caps cost to prevent "massive loops".
+		&rules.LoopReadonly{
+			RuleName:      "loop-readonly",
+			InnerRules:    innerReadRules,
+			MaxIterations: 50,
 		},
 	}
 }

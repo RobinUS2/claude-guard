@@ -1181,6 +1181,73 @@ func (r *PipelineReadonly) matchesInnerRule(c *shellparse.Call) bool {
 	return false
 }
 
+// --- LoopReadonly: for-loop over literal tokens whose body only
+// invokes read-only programs.
+//
+// Motivating shape:
+//
+//	for id in 19 20 21 22; do taufinity datasheet get $id; done
+//
+// AnchoredCommand refuses this because a for-loop has shell features
+// (iterator expansion, multi-iteration side effects). PipelineReadonly
+// refuses it because there's no pipeline. But the security question is
+// really "does the loop body invoke a read-only allowed program?" — if
+// yes, and the iteration count is bounded, the whole loop is just a
+// sequence of pre-approved single calls.
+//
+// LoopReadonly expands the loop via shellparse.ExpandForLoop (which
+// enforces the strict shape: literal iterator items, no shell
+// features, simple-CallExpr body, only the iterator variable may be
+// unresolved in body args) and requires EVERY synthesized body call
+// across ALL iterations to match one of InnerRules.
+//
+// MaxIterations caps the iterator size so `for i in {1..1000000}` (if
+// ever parsed as literal items) or `for id in $(seq 1 50000)` (would
+// be rejected earlier for command substitution) can't bypass the
+// structural-cost check. Default 50 when zero.
+type LoopReadonly struct {
+	RuleName      string
+	InnerRules    []Rule
+	MaxIterations int
+}
+
+func (r *LoopReadonly) Name() string { return r.RuleName }
+func (r *LoopReadonly) Kind() string { return "loop_readonly" }
+
+func (r *LoopReadonly) Eval(p *shellparse.Parsed) (Verdict, string) {
+	maxIter := r.MaxIterations
+	if maxIter <= 0 {
+		maxIter = 50
+	}
+	exp, ok := shellparse.ExpandForLoop(p, maxIter)
+	if !ok {
+		return NoMatch, ""
+	}
+	for i := range exp.Calls {
+		if !r.matchesInnerRule(&exp.Calls[i]) {
+			return NoMatch, ""
+		}
+	}
+	return Match, r.RuleName
+}
+
+func (r *LoopReadonly) matchesInnerRule(c *shellparse.Call) bool {
+	if c.Nesting != shellparse.NestTopLevel || c.HasUnresolved {
+		return false
+	}
+	miniParsed := &shellparse.Parsed{
+		Calls:     []shellparse.Call{*c},
+		Pipelines: [][]shellparse.Call{{*c}},
+		Features:  shellparse.Features{},
+	}
+	for _, rule := range r.InnerRules {
+		if verdict, _ := rule.Eval(miniParsed); verdict == Match {
+			return true
+		}
+	}
+	return false
+}
+
 // --- SedReadonly: sed invoked in a guaranteed read-only shape.
 //
 // GNU sed has escape hatches that make blanket allow-listing unsafe:

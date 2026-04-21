@@ -48,10 +48,12 @@ const MaxAllowRules = 100
 
 // File is the on-disk YAML shape.
 type File struct {
-	Version       int         `yaml:"version"`
-	ProjectName   string      `yaml:"project_name"`
-	Allow         []AllowSpec `yaml:"allow"`
-	PromoteGlobal []string    `yaml:"promote_global"`
+	Version        int         `yaml:"version"`
+	ProjectName    string      `yaml:"project_name"`
+	Allow          []AllowSpec `yaml:"allow"`
+	PromoteGlobal  []string    `yaml:"promote_global"`
+	Scope          string      `yaml:"scope"`           // project purpose for LLM context
+	TrustedDomains []string    `yaml:"trusted_domains"` // domains safe for curl/wget
 }
 
 // AllowSpec is one allow-rule entry in the project config.
@@ -77,6 +79,12 @@ type Config struct {
 	// list. Engine consults it when choosing a cache key. (Plumbed in a
 	// follow-up; unused by v1 engine.)
 	PromoteGlobal []string
+	// Scope is a free-text description of the project's purpose, injected
+	// into the LLM classifier prompt as PROJECT SCOPE context.
+	Scope string
+	// TrustedDomains are domains the project considers safe for curl/wget.
+	// Injected into the LLM classifier prompt as trusted context.
+	TrustedDomains []string
 	// Hash is the sha256 of the raw file contents. Included in the
 	// engine's cache key so a config edit invalidates stale verdicts.
 	Hash string
@@ -177,11 +185,13 @@ func LoadFile(path string) (*Config, error) {
 
 	ruleset, vErr := validateAndMaterialize(&file)
 	cfg := &Config{
-		Path:          path,
-		ProjectName:   file.ProjectName,
-		Rules:         ruleset,
-		PromoteGlobal: file.PromoteGlobal,
-		Hash:          hashOf(data),
+		Path:           path,
+		ProjectName:    file.ProjectName,
+		Rules:          ruleset,
+		PromoteGlobal:  file.PromoteGlobal,
+		Scope:          file.Scope,
+		TrustedDomains: file.TrustedDomains,
+		Hash:           hashOf(data),
 	}
 	if vErr != nil {
 		cfg.Warning = fmt.Errorf("%s: %w", path, vErr)

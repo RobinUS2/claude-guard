@@ -17,6 +17,7 @@ type mockRule struct {
 
 func (m *mockRule) Name() string          { return m.name }
 func (m *mockRule) HighConfidence() bool  { return m.highConfidence }
+func (m *mockRule) MaxContinues() int     { return 0 }
 func (m *mockRule) TextPreFilter() string { return m.preFilter }
 func (m *mockRule) Eval(_ Transcript, _ ShellContext) (bool, string) {
 	return m.shouldFire, m.reason

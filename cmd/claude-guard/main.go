@@ -30,6 +30,8 @@ Subcommands:
   cache <sub>         inspect/prune the verdict cache: stats, prune, clear
   stats [--since T]   aggregate decisions.jsonl: verdicts, tiers, latency, cache hit rate
   explain <id|--last> re-run a historical decision against the current rules
+  dashboard           web dashboard: live stats, decisions, cache, learned patterns
+  settings <sub>   audit/migrate settings.json permissions
   lint                validate config + run the adversarial corpus as self-tests
   trust "<cmd>"       override a verifier disagreement (future cache hits ALLOW)
   init-project-config write a starter .claude-guard.yml in cwd for per-project allow rules
@@ -75,6 +77,10 @@ func run(args []string) int {
 		return cmdBackup(args[1:])
 	case "cache":
 		return cmdCache(args[1:])
+	case "learn":
+		return cmdLearn(args[1:])
+	case "settings":
+		return cmdSettings(args[1:])
 	case "trust":
 		return cmdTrust(args[1:])
 	case "init-project-config":
@@ -85,6 +91,8 @@ func run(args []string) int {
 		return cmdReview(args[1:])
 	case "eval-prompt":
 		return cmdEvalPrompt(args[1:])
+	case "dashboard":
+		return cmdDashboard(args[1:])
 	case "bench":
 		return cmdBench(args[1:])
 	case "version", "--version", "-v":

@@ -762,6 +762,91 @@ func TestPipelineReadonly(t *testing.T) {
 	}
 }
 
+// --- LoopReadonly ---
+
+func TestLoopReadonly(t *testing.T) {
+	posixReadonly := &AnchoredCommand{
+		RuleName: "posix-readonly",
+		Programs: []string{"ls", "cat", "head", "tail", "echo", "grep", "wc"},
+	}
+	gitReadonly := &AnchoredCommand{
+		RuleName:         "git-readonly",
+		Programs:         []string{"git"},
+		RequireSubcmdAny: []string{"status", "log", "show"},
+	}
+	// Stand-in for an operator-trusted noun-verb CLI (taufinity in
+	// real use). Use a 3-token fixed shape so the unit test doesn't
+	// depend on the real config's permissive rules.
+	taufinityReadonly := &AnchoredCommand{
+		RuleName:          "taufinity-readonly",
+		Programs:          []string{"taufinity"},
+		RequireSubcmdAny:  []string{"datasheet"},
+		RequireSubcmd2Any: []string{"get"},
+	}
+	r := &LoopReadonly{
+		RuleName:      "loop-readonly",
+		InnerRules:    []Rule{posixReadonly, gitReadonly, taufinityReadonly},
+		MaxIterations: 10,
+	}
+
+	matchCases := []string{
+		// Canonical motivating shape — iteration var in body
+		`for id in 19 20 21; do taufinity datasheet get $id; done`,
+		`for id in 19 20 21; do taufinity datasheet get ${id}; done`,
+		// Quoted form
+		`for f in a b c; do cat "$f"; done`,
+		// Body is a simple read-only call with no iter-var reference
+		`for i in 1 2 3; do git status; done`,
+		// Single-iteration edge case
+		`for i in 1; do echo $i; done`,
+		// Mixed literal/iter-var-inside-dblquoted
+		`for id in 1 2; do echo "id=${id}"; done`,
+	}
+	for _, cmd := range matchCases {
+		t.Run("match/"+cmd, func(t *testing.T) {
+			p := mustParse(t, cmd)
+			v, _ := r.Eval(p)
+			if v != Match {
+				t.Errorf("Eval(%q) = %v, want Match", cmd, v)
+			}
+		})
+	}
+
+	noMatchCases := []struct {
+		cmd    string
+		reason string
+	}{
+		// Over the iteration cap (rule has MaxIterations=10)
+		{`for i in 1 2 3 4 5 6 7 8 9 10 11; do echo $i; done`, "over cap"},
+		// Body invokes a non-read-only program
+		{`for id in 1 2; do rm -rf /tmp/$id; done`, "rm body"},
+		// Command substitution in iterator list — cannot enumerate statically
+		{`for id in $(seq 1 5); do echo $id; done`, "command-sub iterator"},
+		// Unresolved non-iterator variable in body
+		{`for i in 1 2; do echo $OTHER_VAR; done`, "unrelated var"},
+		// Body has a pipe — shape not supported in v1
+		{`for i in 1 2; do git log | head; done`, "pipe in body"},
+		// Body has a file redirect
+		{`for i in 1 2; do echo $i > /tmp/out; done`, "redirect in body"},
+		// Not a for-loop
+		{`git status`, "not a for-loop"},
+		{`git status && git log`, "compound, not for"},
+		// C-style for
+		{`for ((i=0; i<3; i++)); do echo $i; done`, "c-style loop"},
+		// Program slot itself is the iterator — program must be literal
+		{`for cmd in ls cat; do $cmd /tmp; done`, "program is iter var"},
+	}
+	for _, tc := range noMatchCases {
+		t.Run("nomatch/"+tc.reason, func(t *testing.T) {
+			p := mustParse(t, tc.cmd)
+			v, _ := r.Eval(p)
+			if v != NoMatch {
+				t.Errorf("Eval(%q) = %v, want NoMatch (%s)", tc.cmd, v, tc.reason)
+			}
+		})
+	}
+}
+
 // --- SedReadonly ---
 
 func TestSedReadonly(t *testing.T) {

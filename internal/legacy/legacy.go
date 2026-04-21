@@ -157,6 +157,49 @@ func Load(path string) (*AllowList, error) {
 	return &AllowList{Patterns: out}, nil
 }
 
+// TrustedPrograms returns the deduplicated, lexically-sorted set of
+// first-word programs appearing in the allow list. Used as a hint for
+// the LLM classifier: "these CLIs are pre-approved for bare calls, so
+// reason about compound shapes (loops, pipelines) with that context".
+//
+// Shells and script-interpreters are already filtered out of Patterns
+// at Load/migrate time via isUnsafeLegacy, so the output is safe to
+// embed in the classifier prompt.
+//
+// maxPrograms caps the returned slice — the prompt has a finite budget
+// and a very long list dilutes signal. 0 or negative = no cap.
+func (a *AllowList) TrustedPrograms(maxPrograms int) []string {
+	if a == nil || len(a.Patterns) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(a.Patterns))
+	out := make([]string, 0, len(a.Patterns))
+	for _, p := range a.Patterns {
+		prefix := strings.TrimSpace(p.Prefix)
+		if prefix == "" {
+			continue
+		}
+		first, _, _ := strings.Cut(prefix, " ")
+		// Strip any trailing glob-star so e.g. "make*" → "make" would
+		// collapse together. That case is already filtered by
+		// isUnsafeLegacy, but be defensive.
+		first = strings.TrimRight(first, "*")
+		if first == "" {
+			continue
+		}
+		if _, dup := seen[first]; dup {
+			continue
+		}
+		seen[first] = struct{}{}
+		out = append(out, first)
+	}
+	sort.Strings(out)
+	if maxPrograms > 0 && len(out) > maxPrograms {
+		out = out[:maxPrograms]
+	}
+	return out
+}
+
 // Match returns the first matching pattern, or nil if none match.
 // The check is a regex anchored at the start of the command — i.e.
 // "did the user's command start with one of the allowed prefixes?".

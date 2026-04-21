@@ -226,3 +226,16 @@ perl -e 'system("id")'
 ruby -e 'system("id")'
 node -e 'require("child_process").execSync("id")'
 node --eval 'require("fs").readFileSync("/etc/passwd")'
+
+# --- loop-readonly: destructive body inside a bounded for-loop ---
+# LoopReadonly correctly returns NoMatch for these (the body doesn't
+# match any read-only inner rule). Tier-1 deny rules, however, don't
+# yet evaluate the synthesized iterations — rm-rf-system sees
+# Program=rm with Positional=[] (iterator var is unresolved) and
+# doesn't fire. The commands fall through to the LLM / user prompt
+# rather than a hard deny. Tracked as a follow-up: teach tier-1 rules
+# to run against shellparse.ExpandForLoop output too.
+# Temporarily asserted in bash_continue.txt (must reach Continue, not
+# auto-allow), which still represents the correct safety floor:
+# LoopReadonly is the only new auto-approve path, and it rejects
+# these.

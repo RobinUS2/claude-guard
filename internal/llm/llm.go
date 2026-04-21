@@ -121,6 +121,18 @@ type ClassifyInput struct {
 	FileContent string
 	// FilePath is the path of the referenced file (for prompt context).
 	FilePath string
+	// TrustedPrograms is a deduplicated list of first-word programs the
+	// operator has pre-approved via the legacy allow list (tier 5).
+	// Passed to the classifier as context so it can reason about
+	// compound shapes (for-loops, pipelines) whose body only invokes
+	// these programs — something tier-2 structural rules can't see but
+	// a human-level reader easily can. Empty when legacy is disabled or
+	// holds no entries.
+	TrustedPrograms []string
+	// TrustedDomains is a list of domains the project considers safe for
+	// HTTP requests (from .claude-guard.yml trusted_domains). When set,
+	// the classifier is told these domains are project-owned and safe.
+	TrustedDomains []string
 }
 
 // Classifier is the provider-agnostic interface. AnthropicClassifier and
@@ -269,9 +281,22 @@ func buildUserMessage(in ClassifyInput) string {
 		b.WriteString("\n")
 	}
 	if in.FileContent != "" {
-		b.WriteString(fmt.Sprintf("\nREFERENCED FILE (%s, %d bytes):\n", in.FilePath, len(in.FileContent)))
+		fmt.Fprintf(&b, "\nREFERENCED FILE (%s, %d bytes):\n", in.FilePath, len(in.FileContent))
 		b.WriteString(in.FileContent)
 		b.WriteString("\n")
+	}
+	if len(in.TrustedDomains) > 0 {
+		b.WriteString("\nTRUSTED DOMAINS (from project .claude-guard.yml — these are the project's own APIs):\n  ")
+		b.WriteString(strings.Join(in.TrustedDomains, ", "))
+		b.WriteString("\n")
+		b.WriteString("HTTP requests (curl, wget, fetch) to these domains are SAFE — they are the project's own APIs, not exfiltration targets. PUT, POST, PATCH, DELETE to these domains are normal project operations, not external writes.\n")
+	}
+	if len(in.TrustedPrograms) > 0 {
+		b.WriteString("\nOPERATOR-TRUSTED PROGRAMS (pre-approved via the operator's legacy allow list):\n  ")
+		b.WriteString(strings.Join(in.TrustedPrograms, ", "))
+		b.WriteString("\n")
+		b.WriteString("A single bare invocation of any of these (e.g. `taufinity foo`, `gcloud bar`) is already auto-allowed by an earlier tier — you only see COMPOUND shapes that the structural allow rules couldn't match (for/while loops, command substitution, multi-statement scripts). Use this list as context: if every program invoked in the command is in this list AND the arguments look like normal usage (no `rm -rf`, no shell injection, no credential paths), you MAY approve. You are not required to — use judgement.\n")
+		b.WriteString("LOOP COST: if the command is a for/while loop, estimate (iteration count) × (per-iteration blast radius). A loop of 50 iterations calling `taufinity datasheet get <id>` is 50 idempotent reads — safe. A loop of 10,000 iterations, an unbounded iterator (`$(...)`, `seq 1 1000000`), or a loop whose body mutates external state (writes, deletes, deploys) is NOT safe — return unsafe with a short reason naming the cost concern.\n")
 	}
 	b.WriteString("\nReturn JSON only with these fields:\n")
 	b.WriteString(`  decision: "safe" | "unsafe" | "unsure"

@@ -118,9 +118,8 @@ func TestEngine_EnforceMode_BlockBeatsAllow(t *testing.T) {
 
 func TestEngine_EnforceMode_FallsThroughOnNoMatch(t *testing.T) {
 	e, _ := newTestEngine(t, false)
-	// Use a command that is genuinely not in any allow rule (npm install
-	// has side effects and is intentionally excluded from tier 2).
-	out := e.Decide(Input{ToolName: "Bash", Command: "npm install"})
+	// Use a command that is genuinely not in any allow rule.
+	out := e.Decide(Input{ToolName: "Bash", Command: "make deploy"})
 	if out.Verdict != Continue {
 		t.Errorf("Verdict = %v (tier=%s), want Continue", out.Verdict, out.Tier)
 	}
@@ -377,7 +376,7 @@ func TestEngine_Verifier_AgreementMarksEntryVerified(t *testing.T) {
 	}
 }
 
-func TestEngine_Verifier_DisagreementBlocksNextCall(t *testing.T) {
+func TestEngine_Verifier_DisagreementForwardsToUser(t *testing.T) {
 	fast := &stubClassifier{verdict: llm.VerdictSafe}
 	verifier := &stubClassifier{verdict: llm.VerdictUnsafe}
 
@@ -406,10 +405,10 @@ func TestEngine_Verifier_DisagreementBlocksNextCall(t *testing.T) {
 	// Wait for the verifier goroutine to complete.
 	e.AwaitVerifications(5 * time.Second)
 
-	// Second call hits the cache. Now the entry has Disagreement → Deny.
+	// Second call hits the cache. Disagreement → Continue (forwarded to user, not auto-deny).
 	second := e.Decide(Input{ToolName: "Bash", Command: cmd, CWD: "/tmp"})
-	if second.Verdict != Deny {
-		t.Errorf("second call Verdict = %v, want Deny (verifier disagreement)", second.Verdict)
+	if second.Verdict != Continue {
+		t.Errorf("second call Verdict = %v, want Continue (verifier disagreement forwards to user)", second.Verdict)
 	}
 	if second.Tier != "cache" {
 		t.Errorf("second call Tier = %q, want cache", second.Tier)
@@ -1569,8 +1568,8 @@ func TestEngine_RewriteHint_EmptyOnAllow(t *testing.T) {
 
 func TestEngine_RewriteHint_EmptyOnContinue(t *testing.T) {
 	e, _ := newTestEngine(t, false)
-	// npm install falls through all tiers to Continue.
-	out := e.Decide(Input{ToolName: "Bash", Command: "npm install"})
+	// make deploy falls through all tiers to Continue.
+	out := e.Decide(Input{ToolName: "Bash", Command: "make deploy"})
 	if out.Verdict != Continue {
 		t.Fatalf("Verdict = %v, want Continue", out.Verdict)
 	}
