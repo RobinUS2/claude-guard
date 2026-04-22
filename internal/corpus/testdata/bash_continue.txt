@@ -113,6 +113,10 @@ R=rm; $R -rf /
 # state-mutating verbs (rm/mv/push) still fall through via the
 # SafeVerbs check AND are denied by tier-1 `terraform-state-mutation`.
 
+# --- terraform import: prompts user (not instant-block) ---
+terraform import aws_s3_bucket.foo bar
+terraform import aws_instance.web i-1234567890abcdef0
+
 # --- step 13: shell without -c still falls through to LLM ---
 bash script.sh
 

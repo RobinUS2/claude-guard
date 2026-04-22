@@ -356,7 +356,9 @@ func DefaultBlockRules() []rules.Rule {
 				"state/push",
 				"state/replace-provider",
 				"state/rename",
-				"import", // any `terraform import` args = deny
+				// `terraform import` intentionally omitted — it prompts
+				// the user via tier 6 instead of instant-blocking, so the
+				// operator can approve legitimate import workflows.
 			},
 			Reason: "terraform state mutation requires user approval",
 		},
