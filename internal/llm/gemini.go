@@ -48,7 +48,7 @@ func NewGemini(apiKey, model string) *GeminiClassifier {
 	if model == "" {
 		model = DefaultGeminiModel
 	}
-	timeout := 6 * time.Second
+	timeout := 14 * time.Second
 	if model == "gemini-2.5-pro" || model == "gemini-pro" {
 		timeout = 20 * time.Second
 	}

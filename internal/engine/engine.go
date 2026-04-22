@@ -42,13 +42,13 @@ import (
 
 // Tier 4 (LLM) sync deadline. User-visible wait — the hook blocks up
 // to this long for a classifier verdict. Inner providers have tighter
-// per-call caps (Anthropic 3s, Gemini Flash 6s) so this is the engine
+// per-call caps (Anthropic 3s, Gemini Flash 14s) so this is the engine
 // ceiling. Cache hits bypass it entirely (~1ms file read).
 //
 // Declared as var (not const) so tests can reduce it to milliseconds
 // for timing-based cases. Production code never mutates it after
 // package init.
-var llmDeadline = 7 * time.Second
+var llmDeadline = 15 * time.Second
 
 // Tier 4 async deadline. When llmDeadline fires mid-classification,
 // the hook returns "continue" to unblock the user, but the in-flight
