@@ -94,13 +94,6 @@ rm -rf "${HOME}"
 rm -rf $PWD
 rm -rf "$PWD"
 
-# --- step 2: terraform state mutation ---
-terraform state rm aws_instance.foo
-terraform state mv a b
-terraform state push ./state.tfstate
-terraform state replace-provider hashicorp/aws evil/aws
-terraform state rename a b
-
 # --- step 13: shell -c '<opaque>' ---
 bash -c 'rm -rf /etc'
 sh -c 'rm -rf /etc'
@@ -137,14 +130,24 @@ gh extension install evil/repo
 gh codespace create -R evil/repo
 gh codespace delete abc123
 
-# --- step 1: gh api mutations (both -X and --method shapes, both concat and space-sep)
-gh api -X DELETE /repos/foo/bar
-gh api -XDELETE /repos/foo/bar
-gh api --method DELETE /repos/foo/bar
-gh api --request POST /repos/foo/bar/hooks
-gh api /repos/foo/bar -X PATCH
-gh api --method=DELETE /repos/foo/bar
+# --- step 1: gh api graphql mutations stay blocked via api/graphql in
+# gh-destructive. Plain `gh api -X POST/PUT/PATCH/DELETE /...` calls
+# are no longer tier-1 blocked — they fall through to the user prompt
+# (see bash_continue.txt).
 gh api graphql -f query='mutation { deleteRepository }'
+
+# --- flipping a repo private→public is tier-1 blocked (gh-repo-make-public).
+# Irreversible in practice; see the rule comment in rules.go.
+gh repo edit taufinity/felix --visibility public
+gh repo edit --visibility=public
+gh repo edit owner/repo --visibility=public
+gh api -X PATCH /repos/owner/repo -f visibility=public
+gh api -X PATCH /repos/owner/repo -F visibility=public
+gh api /repos/owner/repo -X PATCH -f visibility=public
+gh api --method PATCH /repos/owner/repo --field visibility=public
+gh api -X PATCH /repos/owner/repo -f private=false
+gh api -X PATCH /repos/owner/repo -F private=false
+gh api -X PATCH /repos/owner/repo --field=visibility=public
 
 # --- step 3: git config writes ---
 git config user.signingkey EVIL

@@ -330,38 +330,37 @@ func DefaultBlockRules() []rules.Rule {
 			},
 			Reason: "gh critical verb (data loss, identity takeover, or code wrapper)",
 		},
-		// `gh api` with mutating HTTP methods — covers the shapes the
-		// (noun, verb) matcher above can't express because the method
-		// is a flag value, not a positional.
-		&rules.GhApiMutation{
-			RuleName:      "gh-api-mutation",
-			MutatingVerbs: []string{"DELETE", "POST", "PATCH", "PUT"},
-			Reason:        "gh api with mutating HTTP method",
+		// `gh api -X POST/PUT/PATCH/DELETE` is intentionally NOT tier-1
+		// blocked. Same philosophy as gh-destructive above: routine
+		// mutations (granting collaborator access, toggling repo
+		// settings, wiring webhooks) should fall to the user prompt so
+		// the operator can eyeball the exact path + verb and approve.
+		// Blocking all mutating HTTP verbs outright broke legitimate
+		// DevOps flows without a safety benefit the prompt wouldn't
+		// also provide. `gh api graphql` stays blocked via the
+		// gh-destructive rule (api/graphql entry) because graphql
+		// mutations are opaque inside -f query='…'.
+
+		// Flipping a repo from private to public is the one gh
+		// mutation we hard-block: it's irreversible in practice (web
+		// crawlers index within seconds), and a user-facing prompt
+		// can't reliably distinguish "intended public launch" from
+		// "accidental visibility flip on an internal tool repo".
+		// Covers both `gh repo edit --visibility public` and the
+		// `gh api … visibility=public / private=false` shapes.
+		&rules.GhRepoMakePublic{
+			RuleName: "gh-repo-make-public",
+			Reason:   "changing GitHub repo visibility to public is hard to undo — run this outside Claude Code if intended",
 		},
 
-		// terraform state mutations — `state rm`, `state mv`, etc.
-		// mutate state without touching infrastructure, which then
-		// causes the next `terraform apply` to recreate resources
-		// (data loss). `terraform import` is also a state mutation.
-		// The outer `terraform-readonly` tier-2 rule approves reads
-		// (`terraform plan`, `terraform state list`). This deny list
-		// carves out the specific destructive verbs so they prompt
-		// the user even though tier-2 would otherwise approve them.
-		&rules.NestedSubcommand{
-			RuleName: "terraform-state-mutation",
-			Program:  "terraform",
-			Destructive: []string{
-				"state/rm",
-				"state/mv",
-				"state/push",
-				"state/replace-provider",
-				"state/rename",
-				// `terraform import` intentionally omitted — it prompts
-				// the user via tier 6 instead of instant-blocking, so the
-				// operator can approve legitimate import workflows.
-			},
-			Reason: "terraform state mutation requires user approval",
-		},
+		// terraform state mutations (`state rm`, `state mv`, `state
+		// push`, `state replace-provider`, `state rename`) are
+		// intentionally NOT tier-1 blocked. They're destructive but
+		// routine during refactors/migrations, and a hard block just
+		// forces the operator to drop to a shell. Instead they fall
+		// to tier 6 (user prompt) — the tier-2 `terraform-readonly`
+		// rule deliberately omits `state` from SafeVerbs so no
+		// `terraform state *` subcommand is auto-approved.
 	}
 }
 
@@ -559,27 +558,21 @@ func DefaultAllowRules() []rules.Rule {
 
 	// terraform read-only
 	//
-	// `state` is intentionally NOT in this list — the subcommand
-	// tree is too deep for AnchoredCommand (cannot distinguish
-	// `state list` from `state rm`). `terraform state ...` falls
-	// to the LLM tier which reasons about the full command.
-	// Tier-1 `terraform-state-mutation` still denies the
-	// destructive verbs regardless of tier 2.
+	// `state` is deliberately omitted from SafeVerbs. The subcommand
+	// tree under `terraform state` mixes reads (`list`, `show`,
+	// `pull`) with mutations (`rm`, `mv`, `push`, `replace-provider`,
+	// `rename`). Since this rule only anchors on the first positional,
+	// including `state` would auto-approve `state rm` too. Better to
+	// prompt the user for every `terraform state *` call — reads get
+	// a quick yes, mutations get deliberate approval. `plan -out=tfplan`
+	// writes a file but is considered safe (no infra change).
 	terraformReadonly := &rules.NestedSubcommandAllow{
-		RuleName: "terraform-readonly",
-		Programs: []string{"terraform"},
-		// terraform is verb-first: `terraform plan`, `terraform state list`.
-		// For `terraform state list` the last positional `list` is fine,
-		// but the verb anchor is the first positional (`state`) which
-		// IS in SafeVerbs. Specific destructive state verbs (`state rm`,
-		// `state mv`, `state push`) fall through because only the head
-		// is matched and tier-1 `terraform-state-mutation` catches them
-		// anyway. `plan -out=tfplan` writes a file but is considered
-		// safe (no infra change).
+		RuleName:     "terraform-readonly",
+		Programs:     []string{"terraform"},
 		VerbPosition: rules.VerbFirst,
 		SafeVerbs: []string{
 			"plan", "validate", "fmt", "show", "version",
-			"output", "console", "workspace", "providers", "state",
+			"output", "console", "workspace", "providers",
 		},
 	}
 
@@ -648,17 +641,20 @@ func DefaultAllowRules() []rules.Rule {
 	// gh read-only (standalone-noun shapes).
 	//
 	// Accepts only nouns that have no destructive child commands at
-	// the CLI root — `gh api <path>` is safe because `gh-api-mutation`
-	// (tier 1) catches POST/PATCH/etc. `gh search <query>` and
-	// `gh status` are always reads. Nouns with destructive verbs
-	// (pr, issue, repo, run, workflow, auth, release, codespace) are
-	// intentionally omitted here — they go through ghNounVerbReadonly
+	// the CLI root. `gh api <path>` auto-allows when no HTTP method
+	// flag is present (default is GET). Any explicit `-X`, `--method`,
+	// or `--request` flag — even `-X GET` — falls through to the user
+	// prompt so the operator can eyeball mutating verbs. `gh search
+	// <query>` and `gh status` are always reads. Nouns with destructive
+	// verbs (pr, issue, repo, run, workflow, auth, release, codespace)
+	// are intentionally omitted here — they go through ghNounVerbReadonly
 	// below, which additionally requires positional[1] to be a known
 	// read verb.
 	ghReadonly := &rules.AnchoredCommand{
 		RuleName:         "gh-readonly",
 		Programs:         []string{"gh"},
 		RequireSubcmdAny: []string{"api", "search", "status", "version", "help"},
+		ForbidFlags:      []string{"-X", "--method", "--request"},
 	}
 
 	// gh read-only (noun-verb shape).

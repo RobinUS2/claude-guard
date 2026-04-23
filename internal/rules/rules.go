@@ -777,33 +777,34 @@ func (r *GitConfigWrite) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
-// --- GhApiMutation: block rule for `gh api` calls with mutating HTTP
-// verbs. Distinct from NestedSubcommand because `-X DELETE` is
-// adjacency-based (two tokens) and the flag is also spellable in
-// multiple shapes: `-X DELETE`, `-XDELETE`, `--method DELETE`,
-// `--request DELETE`.
+// --- GhRepoMakePublic: block rule for flipping a GitHub repo from
+// private to public. Publishing is effectively irreversible — web
+// crawlers index and cache content within seconds, and the operator
+// has no way to unpublish what's already been scraped. Tier-1 hard
+// block; if the change is genuinely intended, the operator can run
+// the gh command directly in a shell outside Claude Code.
 //
 // Fires when:
 //   - program is `gh` (top-level)
-//   - positional[0] == "api"
 //   - AND any of:
-//     - a Flag equals `-X<METHOD>` (short-form concat) with METHOD in MutatingVerbs
-//     - FlagValue(`-X`,`--method`,`--request`) resolves to a MutatingVerb
-//
-// MutatingVerbs is typically {DELETE, POST, PATCH, PUT}. GET/HEAD don't
-// mutate; OPTIONS is metadata.
+//     - `gh repo edit [<target>] --visibility public` (either
+//       `--visibility=public` concat form or `--visibility public`
+//       space-separated form)
+//     - `gh api <any>` with any arg equal to `visibility=public` or
+//       `private=false` (covers -f, -F, --field, --raw-field shapes;
+//       REST API uses both `visibility` and the legacy `private`
+//       boolean)
 
-// GhApiMutation blocks `gh api` calls with mutating HTTP methods.
-type GhApiMutation struct {
-	RuleName      string
-	MutatingVerbs []string
-	Reason        string
+// GhRepoMakePublic blocks gh commands that change repo visibility to public.
+type GhRepoMakePublic struct {
+	RuleName string
+	Reason   string
 }
 
-func (r *GhApiMutation) Name() string { return r.RuleName }
-func (r *GhApiMutation) Kind() string { return "gh_api_mutation" }
+func (r *GhRepoMakePublic) Name() string { return r.RuleName }
+func (r *GhRepoMakePublic) Kind() string { return "gh_repo_make_public" }
 
-func (r *GhApiMutation) Eval(p *shellparse.Parsed) (Verdict, string) {
+func (r *GhRepoMakePublic) Eval(p *shellparse.Parsed) (Verdict, string) {
 	for _, c := range p.Calls {
 		if c.Nesting != shellparse.NestTopLevel {
 			continue
@@ -811,27 +812,49 @@ func (r *GhApiMutation) Eval(p *shellparse.Parsed) (Verdict, string) {
 		if baseProgram(c.Program) != "gh" && c.Program != "gh" {
 			continue
 		}
-		if len(c.Positional) == 0 || c.Positional[0] != "api" {
+		if len(c.Positional) == 0 {
 			continue
 		}
-		// Short-form concat: `-XDELETE`, `-XPOST`, etc.
-		for _, f := range c.Flags {
-			if !strings.HasPrefix(f, "-X") || len(f) == 2 {
+		switch c.Positional[0] {
+		case "repo":
+			// `gh repo edit [<target>] --visibility public`
+			if len(c.Positional) < 2 || c.Positional[1] != "edit" {
 				continue
 			}
-			verb := f[2:]
-			if stringIn(strings.ToUpper(verb), r.MutatingVerbs) {
-				return Match, r.Reason
+			if v, ok := c.FlagValue("--visibility"); ok {
+				if strings.EqualFold(v, "public") {
+					return Match, r.Reason
+				}
 			}
-		}
-		// Space-separated: `-X DELETE`, `--method DELETE`, `--request DELETE`.
-		if v, ok := c.FlagValue("-X", "--method", "--request"); ok {
-			if stringIn(strings.ToUpper(v), r.MutatingVerbs) {
-				return Match, r.Reason
+		case "api":
+			// Any arg of form visibility=public or private=false —
+			// lands in Positional (after -f/-F) or as a Flag if the
+			// argument happens to start with '-'. Scan Args (both).
+			for _, a := range c.Args {
+				if ghApiArgMakesPublic(a) {
+					return Match, r.Reason
+				}
 			}
 		}
 	}
 	return NoMatch, ""
+}
+
+func ghApiArgMakesPublic(s string) bool {
+	// Strip an optional `--field=` / `--raw-field=` wrapper so
+	// `--field=visibility=public` matches the same way as the
+	// positional `visibility=public` following `-f`.
+	for _, pfx := range []string{"--field=", "--raw-field="} {
+		if strings.HasPrefix(s, pfx) {
+			s = s[len(pfx):]
+			break
+		}
+	}
+	switch strings.ToLower(s) {
+	case "visibility=public", "private=false":
+		return true
+	}
+	return false
 }
 
 // --- GitForcePush: block rule for force pushes to protected branches.

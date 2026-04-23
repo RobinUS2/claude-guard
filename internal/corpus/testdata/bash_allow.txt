@@ -141,9 +141,6 @@ terraform fmt
 terraform show
 terraform output
 terraform version
-terraform state list
-terraform state show
-terraform state pull
 
 # --- firebase read-only ---
 firebase list
@@ -214,7 +211,8 @@ gh pr list
 gh issue list
 gh repo view foo/bar
 gh api /user
-gh api -X GET /user
+# `gh api -X GET /user` moved to bash_continue.txt — any explicit -X
+# now falls through to the user prompt (gh-readonly ForbidFlags).
 
 # --- gh pr review --approve: approving a PR is non-destructive ---
 gh pr review --approve 42
