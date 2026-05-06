@@ -860,6 +860,13 @@ func TestSedReadonly(t *testing.T) {
 		`sed -n '1,$p' /tmp/file`,
 		`sed --quiet '5p' /tmp/file`,
 		`/usr/bin/sed -n '1p' /tmp/file`,
+		// Letters w/W/e/E/r/R inside /regex/ are literals, not
+		// commands — must NOT trip containsSedEscape after the
+		// regex-aware fix.
+		`sed -n '/warn/p' /tmp/f`,
+		`sed -n '/error/p' /tmp/log`,
+		`sed -n '/^## Summary/,/^## /p' /tmp/file`,
+		`sed -n '/[Ww]arning/p' /tmp/log`,
 	}
 	for _, cmd := range matchCases {
 		t.Run("match/"+cmd, func(t *testing.T) {
@@ -884,7 +891,11 @@ func TestSedReadonly(t *testing.T) {
 		{"sed -n '1w /tmp/evil' /tmp/f", "script contains w (write)"},
 		{"sed -n '1e date' /tmp/f", "script contains e (execute)"},
 		{"sed -n '1r /etc/passwd' /tmp/f", "script contains r (read file)"},
-		{"sed -n '/warn/p' /tmp/f", "script regex contains 'w' and 'r' (conservative)"},
+		// w/r/e following a /regex/ address — bare command after the
+		// closing delimiter, NOT inside the regex. Must still trip.
+		{"sed -n '/foo/w /tmp/evil' /tmp/f", "w command after /regex/ still caught"},
+		{"sed -n '/foo/r /etc/passwd' /tmp/f", "r command after /regex/ still caught"},
+		{"sed -n '/foo/e date' /tmp/f", "e command after /regex/ still caught"},
 		// Not sed
 		{"ls -n", "not sed"},
 		// Shell trickery

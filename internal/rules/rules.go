@@ -1358,8 +1358,57 @@ func (r *SedReadonly) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return Match, r.RuleName
 }
 
+// containsSedEscape returns true if the sed script contains a
+// dangerous COMMAND character (w/W = write file, r/R = read file,
+// e/E = exec shell). Letters that appear as literal characters
+// inside a regex address (`/Summary/`) or character class (`[abc]`)
+// don't count — that's the false-positive this skipping logic
+// guards against. Bare-command shapes still trip:
+//
+//	'e echo hi'    → e at top level → caught
+//	'1w /tmp/out'  → w after numeric address → caught
+//	'/Summary/p'   → r inside regex → SKIPPED (correct: it's a literal)
+//	'/^## /,/^## /p' → no danger chars in regex bodies → ok
+//
+// Known limitation: the `s` substitution command using a non-`/`
+// delimiter (`s|pat|repl|flags`) is NOT lexed — the rule above
+// requires `-n` and the script is allowed if it parses through
+// here, but a `w FILE` flag inside such a substitution is not
+// detected. Robin's threat model relies on the LLM tier and
+// PathAccess (tier 1) for that residual risk.
 func containsSedEscape(script string) bool {
+	inRegex := false
+	inBrackets := false
+	escaped := false
 	for _, ch := range script {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if inBrackets {
+			if ch == ']' {
+				inBrackets = false
+			}
+			continue
+		}
+		if inRegex {
+			switch ch {
+			case '[':
+				inBrackets = true
+			case '/':
+				inRegex = false
+			}
+			continue
+		}
+		// Outside any regex/bracket context.
+		if ch == '/' {
+			inRegex = true
+			continue
+		}
 		switch ch {
 		case 'w', 'W', 'e', 'E', 'r', 'R':
 			return true

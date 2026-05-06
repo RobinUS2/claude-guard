@@ -241,3 +241,4 @@ node --eval 'require("fs").readFileSync("/etc/passwd")'
 # auto-allow), which still represents the correct safety floor:
 # LoopReadonly is the only new auto-approve path, and it rejects
 # these.
+
