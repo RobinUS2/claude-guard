@@ -402,7 +402,27 @@ func DefaultAllowRules() []rules.Rule {
 			"cmp", "diff",
 			"tar", "zcat", "gzcat",
 			"xxd", "od", "hexdump",
+			"identify",
 		},
+	}
+
+	// magick (ImageMagick 7) — image transforms. Writes the last
+	// positional, so technically not read-only, but the write target
+	// is always operator-specified. Risky escapes blocked via
+	// ForbidFlags:
+	//   -script  — executes an MSL script file (arbitrary IM ops)
+	//   -debug   — verbose internals; not destructive but used as a
+	//              fingerprint for debug-mode escapes (defensive)
+	//   -write   — writes ADDITIONAL outputs mid-pipeline beyond the
+	//              last positional (operator can't easily see all writes)
+	//   -process — runs an installed module by name (arbitrary code)
+	// Convert/mogrify (legacy IM6 + in-place editor) are intentionally
+	// NOT included: convert is being deprecated and mogrify writes
+	// the INPUT, surprising bypass for "write to /tmp" assumptions.
+	magickSafe := &rules.AnchoredCommand{
+		RuleName:    "magick-safe",
+		Programs:    []string{"magick"},
+		ForbidFlags: []string{"-script", "-debug", "-write", "-process"},
 	}
 
 	// find — safe when no destructive flag. `-fprint`, `-fprintf`,
@@ -624,6 +644,18 @@ func DefaultAllowRules() []rules.Rule {
 		RequireSubcmdAny: []string{"version", "env", "list", "vet", "fmt", "doc", "help", "build", "test", "run"},
 	}
 
+	// staticcheck — Go static analyzer, no subcommands. Pure read-only
+	// analysis of source/packages. The `-debug.cpuprofile`,
+	// `-debug.memprofile`, and `-debug.measure` flags write
+	// profiling/measurement files to a user-supplied path; forbid
+	// them so an arbitrary write can't sneak through. Other `-debug.*`
+	// flags (repeat-analysis, json) just affect output and are safe.
+	staticcheckReadonly := &rules.AnchoredCommand{
+		RuleName:    "staticcheck-readonly",
+		Programs:    []string{"staticcheck"},
+		ForbidFlags: []string{"-debug.cpuprofile", "-debug.memprofile", "-debug.measure"},
+	}
+
 	// npm/yarn/pnpm read-only
 	nodePmReadonly := &rules.AnchoredCommand{
 		RuleName:         "node-pm-readonly",
@@ -734,6 +766,7 @@ func DefaultAllowRules() []rules.Rule {
 	// in one applies to the other.
 	innerReadRules := []rules.Rule{
 		posixReadonly,
+		magickSafe,
 		findReadonly,
 		sedReadonly,
 		gitReadonly,
@@ -747,6 +780,7 @@ func DefaultAllowRules() []rules.Rule {
 		kubectlReadonly,
 		firebaseReadonly,
 		goReadonly,
+		staticcheckReadonly,
 		nodePmReadonly,
 		nodePmDev,
 		ghReadonly,
@@ -765,6 +799,7 @@ func DefaultAllowRules() []rules.Rule {
 
 	return []rules.Rule{
 		posixReadonly,
+		magickSafe,
 		findReadonly,
 		sedReadonly,
 		gitReadonly,
@@ -778,6 +813,7 @@ func DefaultAllowRules() []rules.Rule {
 		kubectlReadonly,
 		firebaseReadonly,
 		goReadonly,
+		staticcheckReadonly,
 		nodePmReadonly,
 		nodePmDev,
 		ghReadonly,

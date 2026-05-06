@@ -97,6 +97,11 @@ ls $HOME
 make deploy
 ./bin/myapp serve
 
+# --- staticcheck with file-writing debug flags must fall through ---
+staticcheck -debug.cpuprofile=/tmp/x.prof ./...
+staticcheck -debug.memprofile=/tmp/x.mprof ./...
+staticcheck -debug.measure=/tmp/x.csv ./...
+
 # --- Long pipelines / compound commands ---
 # xargs is NOT a safe pipe target — can execute arbitrary commands.
 find . -name "*.go" | xargs wc -l
@@ -287,3 +292,21 @@ curl -s -X POST "http://localhost:8090/api/database/drop"
 # --- cp/mkdir: write operations fall through to LLM ---
 cp ~/.claude/CLAUDE.md /tmp/backup.md
 mkdir -p /tmp/test
+
+# --- magick-safe: dangerous flags MUST NOT auto-allow (fall through) ---
+# -script executes an MSL script file (arbitrary IM ops, can shell out
+# in some builds). magick-safe ForbidFlags rejects → reaches Continue.
+magick -script /tmp/evil.msl
+magick -script /tmp/evil.msl /tmp/out.png
+# -write writes ADDITIONAL outputs mid-pipeline beyond the last
+# positional — operator can't see all writes.
+magick input.png -write /etc/hosts output.png
+# -process runs an installed module by name (arbitrary code).
+magick input.png -process foo output.png
+# -debug — defensive: paired with bypass shapes, kept out of auto-allow.
+magick -debug all input.png output.png
+# convert (legacy IM6) is intentionally NOT in magick-safe Programs.
+convert input.png -resize 50% output.png
+# mogrify writes the INPUT in place — surprising "write to /tmp"
+# bypass; intentionally not in magick-safe.
+mogrify -resize 50% /tmp/somefile.png
