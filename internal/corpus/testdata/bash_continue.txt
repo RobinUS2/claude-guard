@@ -40,13 +40,13 @@ gh api -X PATCH /repos/owner/repo -f private=true
 # --- Commands not in any anchored allow list ---
 # go build/test/run are now instant-allow (moved to bash_allow.txt)
 # npm install/run/build/start/test/ci are now instant-allow (moved to bash_allow.txt)
+# docker build is now instant-allow (moved to bash_allow.txt)
 bq query --nouse_legacy_sql 'SELECT 1'
 gcloud
 gcloud builds submit
 gcloud run deploy
 gcloud projects describe foo
 gcloud secrets versions access latest --secret=foo
-docker build .
 docker run alpine
 docker compose up
 kubectl apply -f deploy.yaml
@@ -101,6 +101,14 @@ make deploy
 staticcheck -debug.cpuprofile=/tmp/x.prof ./...
 staticcheck -debug.memprofile=/tmp/x.mprof ./...
 staticcheck -debug.measure=/tmp/x.csv ./...
+
+# --- docker build with --output / -o (host filesystem extraction) must fall through ---
+docker build --output type=local,dest=/tmp/extracted .
+docker build -o /tmp/extracted .
+docker build -t myimg --output=type=tar,dest=/tmp/x.tar .
+
+# --- docker buildx build is NOT auto-allowed (subcommand chain) ---
+docker buildx build -t myimg .
 
 # --- Long pipelines / compound commands ---
 # xargs is NOT a safe pipe target — can execute arbitrary commands.

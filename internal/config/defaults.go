@@ -603,6 +603,22 @@ func DefaultAllowRules() []rules.Rule {
 		RequireSubcmdAny: []string{"ps", "images", "inspect", "logs", "port", "top", "stats", "version", "info", "history", "events"},
 	}
 
+	// docker build — common dev-loop operation. Build context and
+	// Dockerfile are trust-of-the-user; the meaningful flag risk is
+	// `--output` / `-o`, which extracts files from the build to an
+	// arbitrary host path (e.g. `--output type=local,dest=/tmp/x`).
+	// Forbid that; everything else (--tag, --file, --build-arg,
+	// --secret, --ssh, --platform, --no-cache, --pull, --target,
+	// --load, --push) is fine. `docker buildx build ...` is NOT
+	// matched here because the anchored subcommand would be `buildx`,
+	// not `build` — falls through to the user prompt by design.
+	dockerBuild := &rules.AnchoredCommand{
+		RuleName:         "docker-build",
+		Programs:         []string{"docker", "podman"},
+		RequireSubcmdAny: []string{"build"},
+		ForbidFlags:      []string{"--output", "-o"},
+	}
+
 	// kubectl read-only — nested (noun, verb) shape (e.g.
 	// `kubectl get pods`, `kubectl describe deployment x`). Exec/
 	// apply/delete/patch/edit/scale are writes (absent from SafeVerbs)
@@ -777,6 +793,7 @@ func DefaultAllowRules() []rules.Rule {
 		bqDryRunHyphen,
 		terraformReadonly,
 		dockerReadonly,
+		dockerBuild,
 		kubectlReadonly,
 		firebaseReadonly,
 		goReadonly,
@@ -810,6 +827,7 @@ func DefaultAllowRules() []rules.Rule {
 		bqDryRunHyphen,
 		terraformReadonly,
 		dockerReadonly,
+		dockerBuild,
 		kubectlReadonly,
 		firebaseReadonly,
 		goReadonly,
