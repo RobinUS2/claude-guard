@@ -822,3 +822,43 @@ func TestReplacedKindsListed(t *testing.T) {
 		t.Errorf("missing replaced kinds: %v (got %v)", want, res.ReplacedKinds)
 	}
 }
+
+// Apply is the convenience wrapper used by the log writer to redact
+// command content before it hits disk. Decision=Send returns Redacted;
+// Decision=Skip returns a stable placeholder rather than the input,
+// so a SKIP-matching command never leaks its literal text to the log.
+
+func TestApply_GenericTokenRedacted(t *testing.T) {
+	in := `TOKEN="cef27339abc" curl https://example.com`
+	out := Apply(in)
+	if strings.Contains(out, "cef27339abc") {
+		t.Errorf("token leaked through Apply: %s", out)
+	}
+	if !strings.Contains(out, "REDACTED") {
+		t.Errorf("expected REDACTED marker, got: %s", out)
+	}
+}
+
+func TestApply_AnthropicKey_SkipReturnsPlaceholder(t *testing.T) {
+	in := `curl -H "Authorization: Bearer sk-ant-abc123def456ghi789jkl" https://api.example.com`
+	out := Apply(in)
+	if strings.Contains(out, "sk-ant-abc123def456ghi789jkl") {
+		t.Errorf("anthropic key leaked: %s", out)
+	}
+	if !strings.Contains(out, "REDACTED") {
+		t.Errorf("expected REDACTED placeholder, got: %s", out)
+	}
+}
+
+func TestApply_EmptyInputReturnsEmpty(t *testing.T) {
+	if got := Apply(""); got != "" {
+		t.Errorf("Apply(\"\") = %q, want \"\"", got)
+	}
+}
+
+func TestApply_CleanCommandPassesThrough(t *testing.T) {
+	in := "git status"
+	if got := Apply(in); got != in {
+		t.Errorf("Apply(%q) = %q, want unchanged", in, got)
+	}
+}

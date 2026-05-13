@@ -203,6 +203,26 @@ func isShellVarReference(matched string) bool {
 	return shellVarRE.MatchString(value)
 }
 
+// Apply is the convenience wrapper used by the log writer to redact a
+// command before it is persisted to disk. It constructs a default
+// Redactor and runs Scan. Decision=Send returns Redacted (which equals
+// the input when no replacement was needed). Decision=Skip returns a
+// stable placeholder that names the matched pattern — never the input —
+// so SKIP-classified commands cannot leak their literal text to logs.
+//
+// Apply is safe to call from any goroutine; it constructs a fresh
+// Redactor per call so callers do not need to share state.
+func Apply(command string) string {
+	if command == "" {
+		return ""
+	}
+	res := New(nil, nil).Scan(command)
+	if res.Decision == Skip {
+		return "<REDACTED:skip-pattern=" + res.SkipReason + ">"
+	}
+	return res.Redacted
+}
+
 // MustCompilePatterns is a helper for static pattern lists. Panics on
 // regex syntax errors — those are programming errors, not config errors.
 func MustCompilePatterns(specs []PatternSpec) []Pattern {
@@ -367,8 +387,15 @@ func DefaultReplacePatterns() []Pattern {
 		// real tokens embedded in a generic shape still never reach
 		// the LLM.
 		{
+			// Allow an optional `<PREFIX>_` before the api_key token so
+			// product-specific names like SITEGEN_API_KEY=, STRIPE_API_KEY=,
+			// GOOGLE_API_KEY=, etc. are caught. The underscore character is
+			// a word char in regex, so \b does NOT fire between an underscore
+			// and a following letter — without the explicit prefix group
+			// these names slipped through. (Real incident: ~570 SITEGEN_API_KEY=
+			// values logged in claude-guard's decisions.jsonl pre-fix.)
 			Name:        "generic-api-key",
-			Regex:       `(?i)\b(["']?api[_-]?key["']?\s*[:=]\s*["']?)([^"'\s]+)`,
+			Regex:       `(?i)\b(["']?(?:[a-z0-9]+_)?api[_-]?key["']?\s*[:=]\s*["']?)([^"'\s]+)`,
 			Placeholder: "<REDACTED-API-KEY>",
 		},
 		{

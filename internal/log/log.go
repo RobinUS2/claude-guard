@@ -196,9 +196,12 @@ func OpenDecisionLogger(paths Paths, maxSizeMB, keepFiles int) (*DecisionLogger,
 		},
 	}
 
+	// Wrap each JSON handler so the `command` attr is redacted before
+	// hitting disk. See redact_handler.go — single chokepoint for command
+	// secrets across decisions.jsonl and denies.jsonl.
 	return &DecisionLogger{
-		firehose:  slog.New(slog.NewJSONHandler(firehose, opts)),
-		denies:    slog.New(slog.NewJSONHandler(denies, opts)),
+		firehose:  slog.New(newRedactingHandler(slog.NewJSONHandler(firehose, opts))),
+		denies:    slog.New(newRedactingHandler(slog.NewJSONHandler(denies, opts))),
 		firehoseW: firehose,
 		deniesW:   denies,
 	}, nil
@@ -367,5 +370,7 @@ func OpenAppLogger(path string, maxSizeMB, keepFiles int) (*slog.Logger, io.Clos
 			return a
 		},
 	}
-	return slog.New(slog.NewJSONHandler(w, opts)), w, nil
+	// Wrap so `command` attrs passed by engine callsites (e.g.
+	// llm_budget_exhausted) are redacted before reaching app.jsonl.
+	return slog.New(newRedactingHandler(slog.NewJSONHandler(w, opts))), w, nil
 }

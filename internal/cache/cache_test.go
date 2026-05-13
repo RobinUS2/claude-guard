@@ -36,6 +36,18 @@ func TestKey_DifferentCommandsDifferentKeys(t *testing.T) {
 	}
 }
 
+// TestKey_DifferentSecretsProduceDifferentKeys verifies the cache key is
+// computed from the raw command, not a redacted form. If this breaks, the
+// log-writer redaction strategy is unsafe — two commands with identical
+// structure but different secret values would collide in cache.
+func TestKey_DifferentSecretsProduceDifferentKeys(t *testing.T) {
+	a := Key(KeyInputs{Command: `TOKEN="aaa" curl https://example.com`, PromptVersion: "v1"})
+	b := Key(KeyInputs{Command: `TOKEN="bbb" curl https://example.com`, PromptVersion: "v1"})
+	if a == b {
+		t.Fatal("cache key must differ for different secret values; if equal, the cache pre-redacts and log-writer redaction is unsafe")
+	}
+}
+
 func TestKey_CWDChangesKey(t *testing.T) {
 	a := Key(KeyInputs{Command: "rm -rf node_modules", CWD: "/tmp/scoped"})
 	b := Key(KeyInputs{Command: "rm -rf node_modules", CWD: "/Users/robin/code/prod"})

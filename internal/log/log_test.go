@@ -277,3 +277,126 @@ func TestOpenAppLogger(t *testing.T) {
 		t.Errorf("config_fallback message missing: %s", data)
 	}
 }
+
+// TestDecisionLogger_RedactsSecretCommands verifies the slog handler
+// wrapper strips secret values from the `command` attr before writing
+// to decisions.jsonl. Without this, ~570 production API keys leaked
+// to the on-disk log (see 2026-05-13 audit).
+func TestDecisionLogger_RedactsSecretCommands(t *testing.T) {
+	dir := t.TempDir()
+	paths := DefaultPaths(dir)
+	dl, err := OpenDecisionLogger(paths, 10, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		cmd   string
+		leak  []string // substrings that must NOT appear in the log
+		needs string   // substring that MUST appear (redaction marker)
+	}{
+		{
+			name:  "generic-token-assignment",
+			cmd:   `TOKEN="cef27339abc" curl https://example.com`,
+			leak:  []string{"cef27339abc"},
+			needs: "REDACTED",
+		},
+		{
+			name:  "bearer-with-anthropic-key",
+			cmd:   `curl -H "Authorization: Bearer sk-ant-abc123def456ghi789jkl" https://api.example.com`,
+			leak:  []string{"sk-ant-abc123def456ghi789jkl"},
+			needs: "REDACTED",
+		},
+		{
+			name:  "api-key-assignment",
+			cmd:   `SITEGEN_API_KEY="cef27339abc" taufinity dashboards sync`,
+			leak:  []string{"cef27339abc"},
+			needs: "REDACTED",
+		},
+	}
+	for _, tc := range cases {
+		dl.Decision(DecisionRecord{
+			ToolName: "Bash",
+			Command:  tc.cmd,
+			Tier:     "llm",
+			Verdict:  "allow",
+		})
+	}
+	dl.Close()
+
+	data, err := os.ReadFile(paths.Decisions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, leak := range tc.leak {
+				if strings.Contains(s, leak) {
+					t.Errorf("secret %q leaked into decisions.jsonl:\n%s", leak, s)
+				}
+			}
+			if !strings.Contains(s, tc.needs) {
+				t.Errorf("expected redaction marker %q absent for case %q", tc.needs, tc.name)
+			}
+		})
+	}
+}
+
+// TestDecisionLogger_NonCommandFieldsUntouched ensures the redacting
+// handler only rewrites the `command` attr, not e.g. `reason` or
+// `rule`. Wholesale redaction would hide useful monitoring signals.
+func TestDecisionLogger_NonCommandFieldsUntouched(t *testing.T) {
+	dir := t.TempDir()
+	paths := DefaultPaths(dir)
+	dl, err := OpenDecisionLogger(paths, 10, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dl.Decision(DecisionRecord{
+		ToolName: "Bash",
+		Command:  "git status",
+		Tier:     "instant_allow",
+		Verdict:  "allow",
+		Rule:     "git-readonly",
+		Reason:   "git-readonly",
+	})
+	dl.Close()
+
+	data, _ := os.ReadFile(paths.Decisions)
+	s := string(data)
+	for _, want := range []string{"git status", "git-readonly", "instant_allow"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expected %q in log line, got:\n%s", want, s)
+		}
+	}
+}
+
+// TestAppLogger_RedactsCommandAttr exercises the same redaction on
+// app.jsonl. Engine callsites pass `command` as an attr to Warn/Error
+// calls (e.g. llm_budget_exhausted). Those must redact too.
+func TestAppLogger_RedactsCommandAttr(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.jsonl")
+	logger, closer, err := OpenAppLogger(path, 10, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Warn("llm_budget_exhausted",
+		"tool_use_id", "tu1",
+		"command", `TOKEN="cef27339abc" curl https://example.com`,
+	)
+	_ = closer.Close()
+
+	data, _ := os.ReadFile(path)
+	s := string(data)
+	if strings.Contains(s, "cef27339abc") {
+		t.Errorf("token leaked into app.jsonl:\n%s", s)
+	}
+	if !strings.Contains(s, "REDACTED") {
+		t.Errorf("expected REDACTED marker in app.jsonl:\n%s", s)
+	}
+	if !strings.Contains(s, "llm_budget_exhausted") {
+		t.Errorf("msg field stripped: %s", s)
+	}
+}
