@@ -252,3 +252,20 @@ curl -s -X POST "http://localhost:8090/api/database/drop"
 # --- cp/mkdir: write operations fall through to LLM ---
 cp ~/.claude/CLAUDE.md /tmp/backup.md
 mkdir -p /tmp/test
+
+# --- gcloud logging mutations (2026-05-13) ---
+# Companion to "gcloud logging read"/"gcloud logging tail" allow rules.
+# Mutations must NOT auto-allow when SafeVerbs gain "read"/"tail" — they
+# fall through to LLM/user prompt (the safe default; no tier-1 rule
+# exists for gcloud logging mutations specifically).
+gcloud logging sinks create foo storage.googleapis.com/bucket
+gcloud logging sinks delete foo
+gcloud logging metrics create foo --description=x --log-filter=y
+gcloud logging metrics delete foo
+gcloud logging buckets delete foo
+gcloud logging views delete foo
+# SafeVerb-padding bypass attempt: "read" at tail but "delete" inside
+# must NOT auto-allow.
+gcloud logging sinks delete read
+gcloud --quiet logging sinks delete foo
+gcloud --quiet logging buckets delete foo

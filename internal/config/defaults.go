@@ -455,6 +455,14 @@ func DefaultAllowRules() []rules.Rule {
 			"list", "describe", "get-value",
 			"get-iam-policy", "get-ancestors-iam-policy",
 			"list-available-services", "list-enabled-services",
+			// `read` / `tail` cover `gcloud logging read` and
+			// `gcloud logging tail` — readonly log queries that
+			// previously fell through to the LLM tier (added 2026-05-13).
+			// Adversarial cases live in bash_continue.txt: SafeVerb-padding
+			// like `gcloud logging sinks delete read` must NOT auto-allow.
+			// ForbidVerbs below catches that — `delete` mid-positional
+			// fails the rule regardless of the tail verb.
+			"read", "tail",
 			"version", "help",
 		},
 		// Defense-in-depth against the SafeVerb-padding bypass on
@@ -553,6 +561,44 @@ func DefaultAllowRules() []rules.Rule {
 		Programs:         []string{"bq"},
 		RequireSubcmdAny: []string{"query"},
 		RequireFlags:     []string{"--dry-run"},
+	}
+
+	// gcloud logging read / tail — readonly log queries.
+	//
+	// gcloudReadonly (NestedSubcommandAllow) can't match these because
+	// the realistic shape is `gcloud logging read severity=ERROR --limit=10`
+	// — the `severity=ERROR` positional fails NestedSubcommandAllow's
+	// "safe identifier" gate (it contains `=`).
+	//
+	// AnchoredCommand with RequireSubcmdAny + RequireSubcmd2Any handles
+	// `gcloud <noun> <verb> <args>` where args can be free-form. Safety:
+	//   - positional[0] must be "logging"
+	//   - positional[1] must be "read" or "tail" (readonly verbs)
+	//   - subsequent positionals are filter expressions evaluated
+	//     server-side — they cannot mutate state. Cloud Logging's read
+	//     surface has no write capability regardless of filter content.
+	//   - same ForbidFlags as gcloudReadonly (impersonation, account
+	//     override, etc.) so identity-laundering bypasses stay blocked.
+	//
+	// Adversarial cases live in bash_continue.txt: `gcloud logging
+	// sinks delete foo` has positional[1]="sinks", fails this rule,
+	// falls through to user prompt (no tier-1 deny for logging mutations
+	// today — separate concern).
+	gcloudLoggingReadonly := &rules.AnchoredCommand{
+		RuleName:          "gcloud-logging-readonly",
+		Programs:          []string{"gcloud"},
+		RequireSubcmdAny:  []string{"logging"},
+		RequireSubcmd2Any: []string{"read", "tail"},
+		ForbidFlags: []string{
+			"--impersonate-service-account",
+			"--account",
+			"--configuration",
+			"--credential-file-override",
+			"--billing-project",
+			"--access-token-file",
+			"--quota-project",
+			"--log-http",
+		},
 	}
 
 	// terraform read-only
@@ -740,6 +786,7 @@ func DefaultAllowRules() []rules.Rule {
 		sedReadonly,
 		gitReadonly,
 		gcloudReadonly,
+		gcloudLoggingReadonly,
 		gsutilReadonly,
 		bqReadonly,
 		bqDryRunUnderscore,
@@ -771,6 +818,7 @@ func DefaultAllowRules() []rules.Rule {
 		sedReadonly,
 		gitReadonly,
 		gcloudReadonly,
+		gcloudLoggingReadonly,
 		gsutilReadonly,
 		bqReadonly,
 		bqDryRunUnderscore,

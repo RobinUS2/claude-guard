@@ -124,6 +124,12 @@ gcloud run services list --region=europe-west4
 gcloud config list
 gcloud auth list
 
+# gcloud logging read/tail — added 2026-05-13 to instant-allow the
+# common Cloud Logging read paths that previously hit LLM tier.
+gcloud logging read severity=ERROR
+gcloud logging read severity=ERROR --limit=10
+gcloud logging tail severity=ERROR
+
 # --- gsutil / bq read-only ---
 gsutil version
 gsutil ls
