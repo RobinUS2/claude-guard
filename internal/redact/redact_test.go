@@ -862,3 +862,31 @@ func TestApply_CleanCommandPassesThrough(t *testing.T) {
 		t.Errorf("Apply(%q) = %q, want unchanged", in, got)
 	}
 }
+
+// TestApply_MultiSegmentPrefixApiKey covers names with multiple
+// underscore-segments before api_key. The original prefix group
+// (`[a-z0-9]+_`) only matched a single segment, leaking
+// FOO_BAR_API_KEY=, STRIPE_LIVE_API_KEY=, etc. CTO review 2026-05-13.
+func TestApply_MultiSegmentPrefixApiKey(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		leak  string
+	}{
+		{"two segments", `STRIPE_LIVE_API_KEY=sk_live_abc123`, "sk_live_abc123"},
+		{"three segments", `GOOGLE_CLOUD_PROJECT_API_KEY=AIzaXYZ123`, "AIzaXYZ123"},
+		{"underscore inner", `FOO_BAR_API_KEY=verysecret`, "verysecret"},
+		{"mixed case", `Sitegen_Api_Key=mysecretvalue`, "mysecretvalue"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := Apply(tc.input)
+			if strings.Contains(out, tc.leak) {
+				t.Errorf("secret %q leaked: %s", tc.leak, out)
+			}
+			if !strings.Contains(out, "REDACTED") {
+				t.Errorf("expected REDACTED marker: %s", out)
+			}
+		})
+	}
+}

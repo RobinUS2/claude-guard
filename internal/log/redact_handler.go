@@ -61,15 +61,34 @@ func (h *redactingHandler) WithGroup(name string) slog.Handler {
 	return &redactingHandler{inner: h.inner.WithGroup(name)}
 }
 
+// redactedFields lists attr keys whose string value passes through
+// redact.Apply before reaching disk. Defense-in-depth: callers anywhere
+// in the codebase using these conventional keys cannot accidentally
+// leak secrets.
+//
+// `command`         — the canonical command attr used by decisionAttrs
+//
+//	and several engine.go callsites (e.g. llm_budget_exhausted).
+//
+// `verifier_reason` — the LLM verifier sometimes echoes command fragments
+//
+//	into its reason text. Treating it as a redacted field
+//	is cheap defensive coverage even if today's verifier
+//	implementation does not appear to leak.
+var redactedFields = map[string]bool{
+	"command":         true,
+	"verifier_reason": true,
+}
+
 // redactAttr returns the attr unchanged unless it names a known
 // command-bearing field with a string value, in which case the value
 // is replaced with redact.Apply(value).
 func redactAttr(a slog.Attr) slog.Attr {
-	if a.Key != "command" {
+	if !redactedFields[a.Key] {
 		return a
 	}
 	if a.Value.Kind() != slog.KindString {
 		return a
 	}
-	return slog.String("command", redact.Apply(a.Value.String()))
+	return slog.String(a.Key, redact.Apply(a.Value.String()))
 }

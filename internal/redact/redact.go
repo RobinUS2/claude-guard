@@ -389,13 +389,19 @@ func DefaultReplacePatterns() []Pattern {
 		{
 			// Allow an optional `<PREFIX>_` before the api_key token so
 			// product-specific names like SITEGEN_API_KEY=, STRIPE_API_KEY=,
-			// GOOGLE_API_KEY=, etc. are caught. The underscore character is
-			// a word char in regex, so \b does NOT fire between an underscore
-			// and a following letter — without the explicit prefix group
-			// these names slipped through. (Real incident: ~570 SITEGEN_API_KEY=
-			// values logged in claude-guard's decisions.jsonl pre-fix.)
+			// STRIPE_LIVE_API_KEY=, GOOGLE_CLOUD_API_KEY=, etc. are caught.
+			// The underscore character is a word char in regex, so \b does
+			// NOT fire between an underscore and a following letter —
+			// without the explicit prefix group these names slipped through.
+			// (Real incident: ~570 SITEGEN_API_KEY= values logged in
+			// claude-guard's decisions.jsonl pre-fix.)
+			//
+			// `[a-z0-9_]+_` is greedy and matches multi-segment prefixes —
+			// FOO_BAR_API_KEY=, STRIPE_LIVE_API_KEY=, etc. The earlier
+			// `[a-z0-9]+_` only matched a single segment, leaving these
+			// open. Caught in 2026-05-13 CTO review.
 			Name:        "generic-api-key",
-			Regex:       `(?i)\b(["']?(?:[a-z0-9]+_)?api[_-]?key["']?\s*[:=]\s*["']?)([^"'\s]+)`,
+			Regex:       `(?i)\b(["']?(?:[a-z0-9_]+_)?api[_-]?key["']?\s*[:=]\s*["']?)([^"'\s]+)`,
 			Placeholder: "<REDACTED-API-KEY>",
 		},
 		{

@@ -372,6 +372,31 @@ func TestDecisionLogger_NonCommandFieldsUntouched(t *testing.T) {
 	}
 }
 
+// TestAppLogger_RedactsVerifierReason: defense-in-depth — if the LLM
+// verifier ever echoes a command fragment into its reason text, that
+// must not leak. Verifier-disagreement events live in app.jsonl.
+func TestAppLogger_RedactsVerifierReason(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.jsonl")
+	logger, closer, err := OpenAppLogger(path, 10, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Warn("verifier_disagree_DENY_NEXT_CALL",
+		"verifier_reason", `command uses TOKEN="cef27339abc" which looks risky`,
+	)
+	_ = closer.Close()
+
+	data, _ := os.ReadFile(path)
+	s := string(data)
+	if strings.Contains(s, "cef27339abc") {
+		t.Errorf("token leaked via verifier_reason:\n%s", s)
+	}
+	if !strings.Contains(s, "REDACTED") {
+		t.Errorf("expected REDACTED marker:\n%s", s)
+	}
+}
+
 // TestAppLogger_RedactsCommandAttr exercises the same redaction on
 // app.jsonl. Engine callsites pass `command` as an attr to Warn/Error
 // calls (e.g. llm_budget_exhausted). Those must redact too.
