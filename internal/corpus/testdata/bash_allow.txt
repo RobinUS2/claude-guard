@@ -168,6 +168,15 @@ go test ./...
 go test -race ./...
 go run main.go
 
+# --- gofmt (formatting is reversible style normalization) ---
+gofmt -l pkg/auth/password.go
+gofmt -l pkg/auth/password.go pkg/auth/password_test.go
+gofmt -d ./pkg
+gofmt -s -l .
+gofmt main.go
+gofmt -w main.go
+gofmt -w pkg/
+
 # --- node package managers, read-only ---
 npm list
 npm ls
@@ -221,6 +230,10 @@ gh issue list
 gh repo view foo/bar
 gh api /user
 gh api -X GET /user
+
+# --- gh api PR review and comment creation (AllowPathSuffixes) ---
+gh api repos/foo/bar/pulls/28/reviews --method POST --input /tmp/review.json
+gh api repos/foo/bar/pulls/28/comments --method POST --input /tmp/comment.json
 
 # --- gh pr review --approve: approving a PR is non-destructive ---
 gh pr review --approve 42

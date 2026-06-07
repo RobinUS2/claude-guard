@@ -146,6 +146,11 @@ gh api --request POST /repos/foo/bar/hooks
 gh api /repos/foo/bar -X PATCH
 gh api --method=DELETE /repos/foo/bar
 gh api graphql -f query='mutation { deleteRepository }'
+# AllowPathSuffixes bypass attempts: path that merely CONTAINS a suffix keyword
+gh api repos/foo/bar/reviews/evil --method POST
+gh api repos/foo/bar/comments/evil --method POST
+# delete on an allowed-suffix path must still be blocked
+gh api repos/foo/bar/pulls/1/reviews --method DELETE
 
 # --- step 3: git config writes ---
 git config user.signingkey EVIL

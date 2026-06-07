@@ -99,7 +99,7 @@ are safe to auto-allow — the user controls their own repos.
     RuleName:    "git-push-nonforce",
     Programs:    []string{"git"},
     RequireSubcmdAny: []string{"push"},
-    ForbidFlags: []string{"--force", "-f", "--force-with-lease"},
+    ForbidFlags: []string{"--force", "-f"},
 },
 ```
 

@@ -797,7 +797,11 @@ func (r *GitConfigWrite) Eval(p *shellparse.Parsed) (Verdict, string) {
 type GhApiMutation struct {
 	RuleName      string
 	MutatingVerbs []string
-	Reason        string
+	// AllowPathSuffixes lists API path suffixes that are explicitly safe to
+	// mutate (e.g. "/reviews" for PR review creation). Checked against
+	// positional[1] (the path after "api"). Must be non-empty strings.
+	AllowPathSuffixes []string
+	Reason            string
 }
 
 func (r *GhApiMutation) Name() string { return r.RuleName }
@@ -812,6 +816,9 @@ func (r *GhApiMutation) Eval(p *shellparse.Parsed) (Verdict, string) {
 			continue
 		}
 		if len(c.Positional) == 0 || c.Positional[0] != "api" {
+			continue
+		}
+		if r.isAllowedPost(&c) {
 			continue
 		}
 		// Short-form concat: `-XDELETE`, `-XPOST`, etc.
@@ -832,6 +839,26 @@ func (r *GhApiMutation) Eval(p *shellparse.Parsed) (Verdict, string) {
 		}
 	}
 	return NoMatch, ""
+}
+
+// isAllowedPost returns true if this `gh api` call is a POST to a path that
+// ends with one of AllowPathSuffixes. POST-only: PATCH/PUT on collection paths
+// is unusual; DELETE on a collection path is never a GitHub API pattern.
+func (r *GhApiMutation) isAllowedPost(c *shellparse.Call) bool {
+	if len(r.AllowPathSuffixes) == 0 || len(c.Positional) < 2 {
+		return false
+	}
+	verb, ok := c.FlagValue("-X", "--method", "--request")
+	if !ok || strings.ToUpper(verb) != "POST" {
+		return false
+	}
+	apiPath := c.Positional[1]
+	for _, suffix := range r.AllowPathSuffixes {
+		if suffix != "" && strings.HasSuffix(apiPath, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- GitForcePush: block rule for force pushes to protected branches.

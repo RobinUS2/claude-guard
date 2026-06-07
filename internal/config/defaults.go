@@ -336,7 +336,10 @@ func DefaultBlockRules() []rules.Rule {
 		&rules.GhApiMutation{
 			RuleName:      "gh-api-mutation",
 			MutatingVerbs: []string{"DELETE", "POST", "PATCH", "PUT"},
-			Reason:        "gh api with mutating HTTP method",
+			// PR review creation and inline comment creation are safe mutations:
+			// scoped to a single PR, no data loss, fully auditable on GitHub.
+			AllowPathSuffixes: []string{"/reviews", "/comments"},
+			Reason:            "gh api with mutating HTTP method",
 		},
 
 		// terraform state mutations — `state rm`, `state mv`, etc.
@@ -418,6 +421,16 @@ func DefaultAllowRules() []rules.Rule {
 		RuleName:    "find-readonly",
 		Programs:    []string{"find"},
 		ForbidFlags: []string{"-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls"},
+	}
+
+	// gofmt — all invocations safe to auto-allow. `-l`/`-d` print
+	// to stdout; `-w` rewrites files in place but only with style
+	// normalization (whitespace, gofmt-canonical form). It cannot
+	// introduce or remove logic, and any change is trivially
+	// reversible via the same tool.
+	gofmtReadonly := &rules.AnchoredCommand{
+		RuleName: "gofmt-readonly",
+		Programs: []string{"gofmt"},
 	}
 
 	// sed — read-only, print-only shape. See SedReadonly docstring
@@ -791,6 +804,7 @@ func DefaultAllowRules() []rules.Rule {
 	innerReadRules := []rules.Rule{
 		posixReadonly,
 		findReadonly,
+		gofmtReadonly,
 		sedReadonly,
 		gitReadonly,
 		gcloudReadonly,
@@ -823,6 +837,7 @@ func DefaultAllowRules() []rules.Rule {
 	return []rules.Rule{
 		posixReadonly,
 		findReadonly,
+		gofmtReadonly,
 		sedReadonly,
 		gitReadonly,
 		gcloudReadonly,

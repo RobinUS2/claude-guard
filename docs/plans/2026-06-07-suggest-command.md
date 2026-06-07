@@ -171,3 +171,11 @@ Uses a lookup table of known-safe patterns + the existing block-rule set to dete
 - Top-3 suggestions match what a human would propose from looking at the data
 - YAML output is valid and parseable by `jq`
 - Adds at least one actionable suggestion per day of usage
+
+---
+
+## CTO Feedback Applied (2026-06-07)
+
+1. **Confidence heuristic must be deterministic** — replace vague "check against block rules" with a fixed lookup table of program→safety classification. No engine calls during suggest.
+2. **Dedup by canonical, not raw occurrence** — count unique (session_id, canonical) pairs to avoid counting the same session's repeated command as N separate events. This prevents skewed counts from a single long session.
+3. **Min-count default of 3** documents correctly as "must appear across at least 3 separate sessions OR 3+ times in one session" — clarify in help text.
