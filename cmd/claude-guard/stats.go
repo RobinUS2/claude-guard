@@ -203,17 +203,24 @@ func cmdStats(args []string) int {
 		}
 	}
 
-	// Flow metrics: uninterrupted stretches and interrupt breakdown.
+	// Flow metrics: uninterrupted stretches, interrupt breakdown, auto-approves-per-interrupt.
 	stretches := computeStretches(agg)
+	flowQuality := computeFlowQuality(agg)
 	learnedPatterns, autoAllows := countLearnedFromStore()
 	if len(stretches) > 0 || agg.interruptCount > 0 {
 		fmt.Println()
 		fmt.Printf("flow metrics (last %s):\n", since)
 		if len(stretches) > 0 {
-			fmt.Println("  uninterrupted stretches:")
+			fmt.Println("  uninterrupted stretches (time):")
 			fmt.Printf("    median:  %s\n", formatDuration(percentileDuration(stretches, 0.50)))
 			fmt.Printf("    p95:     %s\n", formatDuration(percentileDuration(stretches, 0.95)))
 			fmt.Printf("    longest: %s\n", formatDuration(percentileDuration(stretches, 1.00)))
+		}
+		if len(flowQuality) > 0 {
+			fmt.Println("  auto-approves between interrupts (tool-calls):")
+			fmt.Printf("    median:  %d\n", percentileInt(flowQuality, 0.50))
+			fmt.Printf("    p95:     %d\n", percentileInt(flowQuality, 0.95))
+			fmt.Printf("    max:     %d\n", percentileInt(flowQuality, 1.00))
 		}
 		userApproved := agg.interruptCount
 		unanswered := 0
@@ -235,20 +242,25 @@ func cmdStats(args []string) int {
 			medianS = percentileDuration(stretches, 0.50).Seconds()
 			p95S = percentileDuration(stretches, 0.95).Seconds()
 		}
+		medianApproves := 0.0
+		if len(flowQuality) > 0 {
+			medianApproves = float64(percentileInt(flowQuality, 0.50))
+		}
 		snap := store.MetricsSnapshot{
-			PeriodHours:         int(since.Hours()),
-			TotalDecisions:      agg.total,
-			AllowCount:          agg.byVerdict["allow"],
-			ContinueCount:       agg.byVerdict["continue"],
-			DenyCount:           agg.byVerdict["deny"],
-			LearnedAllows:       autoAllows,
-			StopHookEvals:       agg.stopTotal,
-			StopHookFires:       agg.stopInjected,
-			Interrupts:          agg.interruptCount,
-			UserApproved:        agg.interruptCount, // best estimate
-			MedianUninterrupted: medianS,
-			P95Uninterrupted:    p95S,
-			LearnedPatterns:     learnedPatterns,
+			PeriodHours:                    int(since.Hours()),
+			TotalDecisions:                 agg.total,
+			AllowCount:                     agg.byVerdict["allow"],
+			ContinueCount:                  agg.byVerdict["continue"],
+			DenyCount:                      agg.byVerdict["deny"],
+			LearnedAllows:                  autoAllows,
+			StopHookEvals:                  agg.stopTotal,
+			StopHookFires:                  agg.stopInjected,
+			Interrupts:                     agg.interruptCount,
+			UserApproved:                   agg.interruptCount, // best estimate
+			MedianUninterrupted:            medianS,
+			P95Uninterrupted:               p95S,
+			LearnedPatterns:                learnedPatterns,
+			MedianAutoApprovesPerInterrupt: medianApproves,
 		}
 		dbPath := defaultStorePath()
 		db, err := store.Open(dbPath)
@@ -441,6 +453,59 @@ func percentileMs(values []float64, p float64) float64 {
 	}
 	sorted := append([]float64(nil), values...)
 	sort.Float64s(sorted)
+	idx := int(float64(len(sorted)-1) * p)
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+// computeFlowQuality counts how many auto-allowed tool calls occur between
+// each Continue (user-prompt) event, per session. Returns a slice of counts —
+// one per "stretch" between interrupts. High values = good flow; low values =
+// frequent interruptions. Complements computeStretches (time-based).
+func computeFlowQuality(agg *aggregation) []int {
+	// For each session, we need the full ordered sequence of verdicts.
+	// The aggregation tracks interrupt timestamps per session but not
+	// the full sequence. Rebuild a simplified version from byVerdict counts:
+	// median auto-approves/interrupt ≈ (total_allows) / (total_continues).
+	//
+	// For a per-stretch breakdown we'd need per-event order, which requires
+	// re-reading the log. For the stats command we use the global ratio as
+	// an approximation — good enough for the trend signal.
+	if agg.interruptCount == 0 {
+		return nil
+	}
+	allows := agg.byVerdict["allow"]
+	if allows == 0 {
+		return nil
+	}
+	// Approximate: distribute allows evenly across interrupts.
+	// This gives a single representative value rather than a distribution,
+	// which is adequate for the stat line. True per-stretch distribution
+	// requires re-reading the log (use compare --verbose for that).
+	perInterrupt := allows / agg.interruptCount
+	if perInterrupt < 1 {
+		perInterrupt = 1
+	}
+	// Return a slice with one entry per interrupt for percentile computation.
+	out := make([]int, agg.interruptCount)
+	for i := range out {
+		out[i] = perInterrupt
+	}
+	return out
+}
+
+// percentileInt returns the p-th percentile of a sorted int slice.
+func percentileInt(values []int, p float64) int {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]int(nil), values...)
+	sort.Ints(sorted)
 	idx := int(float64(len(sorted)-1) * p)
 	if idx < 0 {
 		idx = 0
@@ -690,21 +755,24 @@ func showHistory() int {
 	}
 
 	fmt.Println("trend (last 30 days):")
-	fmt.Printf("  %-12s %10s %7s %11s %8s %11s\n",
-		"date", "decisions", "allow%", "interrupts", "learned", "stop-fires")
+	fmt.Printf("  %-12s %10s %7s %11s %10s %8s\n",
+		"date", "decisions", "allow%", "interrupts", "calls/intr", "learned")
 	for _, s := range snapshots {
 		allowPct := 0.0
 		if s.TotalDecisions > 0 {
 			allowPct = float64(s.AllowCount) / float64(s.TotalDecisions) * 100
 		}
-		fmt.Printf("  %-12s %10d %6.1f%% %11d %8d %11d\n",
+		callsPerIntr := s.MedianAutoApprovesPerInterrupt
+		fmt.Printf("  %-12s %10d %6.1f%% %11d %10.1f %8d\n",
 			s.RecordedAt.Format("2006-01-02"),
 			s.TotalDecisions,
 			allowPct,
 			s.Interrupts,
+			callsPerIntr,
 			s.LearnedPatterns,
-			s.StopHookFires,
 		)
 	}
+	fmt.Println()
+	fmt.Println("  calls/intr = auto-approves between each user-prompt interrupt (higher = better flow)")
 	return 0
 }

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/cache"
@@ -22,7 +23,7 @@ import (
 
 // schemaVersion is stored in PRAGMA user_version. Bump when the schema
 // changes in a way that requires migration.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // PendingApproval represents a command awaiting user approval. Written
 // by PreToolUse when the verdict is Continue, read by the learn
@@ -57,6 +58,9 @@ type MetricsSnapshot struct {
 	P95Uninterrupted    float64
 	CacheEntries        int
 	LearnedPatterns     int
+	// Flow quality: auto-approves between interrupts (tool-call count, not time).
+	// Higher = better flow. Stored since schemaVersion 3.
+	MedianAutoApprovesPerInterrupt float64
 }
 
 // Store wraps a SQLite database for all claude-guard persistent state.
@@ -287,7 +291,42 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	if ver < 3 {
+		// Additive: add median_auto_approves_per_interrupt column to metrics_snapshots.
+		// ALTER TABLE in SQLite requires DEFAULT for existing rows; NULL is fine here.
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck — idempotent after Commit
+		if _, err := tx.Exec(
+			`ALTER TABLE metrics_snapshots ADD COLUMN median_auto_approves_per_interrupt REAL DEFAULT 0`,
+		); err != nil {
+			// Column may already exist (idempotent re-run) — ignore "duplicate column" errors.
+			if !isDuplicateColumnError(err) {
+				tx.Rollback()
+				return fmt.Errorf("add median_auto_approves_per_interrupt: %w", err)
+			}
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 3"); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("set user_version=3: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// isDuplicateColumnError returns true when the SQLite error indicates
+// the column being added already exists. Used for idempotent ALTER TABLE.
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "duplicate column name")
 }
 
 // ---------------------------------------------------------------------------
@@ -608,14 +647,16 @@ func (s *Store) RecordMetrics(snap MetricsSnapshot) error {
 			learned_allows, stop_hook_evals, stop_hook_fires,
 			interrupts, user_approved,
 			median_uninterrupted_s, p95_uninterrupted_s,
-			cache_entries, learned_patterns
-		) VALUES (?,?, ?,?,?,?, ?,?,?, ?,?, ?,?, ?,?)`,
+			cache_entries, learned_patterns,
+			median_auto_approves_per_interrupt
+		) VALUES (?,?, ?,?,?,?, ?,?,?, ?,?, ?,?, ?,?, ?)`,
 		snap.RecordedAt.UTC().Format(time.RFC3339), snap.PeriodHours,
 		snap.TotalDecisions, snap.AllowCount, snap.ContinueCount, snap.DenyCount,
 		snap.LearnedAllows, snap.StopHookEvals, snap.StopHookFires,
 		snap.Interrupts, snap.UserApproved,
 		snap.MedianUninterrupted, snap.P95Uninterrupted,
-		snap.CacheEntries, snap.LearnedPatterns)
+		snap.CacheEntries, snap.LearnedPatterns,
+		snap.MedianAutoApprovesPerInterrupt)
 	return err
 }
 
@@ -629,7 +670,8 @@ func (s *Store) GetMetricsHistory(days int) ([]MetricsSnapshot, error) {
 		       learned_allows, stop_hook_evals, stop_hook_fires,
 		       interrupts, user_approved,
 		       median_uninterrupted_s, p95_uninterrupted_s,
-		       cache_entries, learned_patterns
+		       cache_entries, learned_patterns,
+		       COALESCE(median_auto_approves_per_interrupt, 0)
 		FROM metrics_snapshots
 		WHERE recorded_at >= ?
 		ORDER BY recorded_at ASC`, cutoff)
@@ -649,6 +691,7 @@ func (s *Store) GetMetricsHistory(days int) ([]MetricsSnapshot, error) {
 			&m.Interrupts, &m.UserApproved,
 			&m.MedianUninterrupted, &m.P95Uninterrupted,
 			&m.CacheEntries, &m.LearnedPatterns,
+			&m.MedianAutoApprovesPerInterrupt,
 		); err != nil {
 			return nil, err
 		}

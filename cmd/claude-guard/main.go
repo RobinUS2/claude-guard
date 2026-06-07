@@ -22,8 +22,10 @@ Subcommands:
   test <command>      dry-run a command through the tiers (use --live to hit the real LLM)
   monitor [--since N] live-tail the decisions log with pretty-printing
   explain [-n N]      last N decisions from the log
-  replay [--since 7d] batch-replay historical Continue decisions — measures rule improvement
+  replay [--since 7d]   batch-replay historical Continue decisions — measures rule improvement
   compare [--since 14d] compare two time windows: interrupt rate, tier distribution, latency
+  suggest [--since 7d]  analyse recurring Continue patterns and propose allow-rules or hints
+  hints [--output PATH] generate CLAUDE.md-compatible hints: what auto-approves, what prompts
   stats [--since T]   aggregate decisions.jsonl: verdicts, tiers, latency, cache hit rate
   doctor              health check: config, schema, API key, hook wiring
   migrate             settings.json allow-list → legacy-patterns.yaml
@@ -65,6 +67,10 @@ func run(args []string) int {
 		return cmdReplay(args[1:])
 	case "compare":
 		return cmdCompare(args[1:])
+	case "suggest":
+		return cmdSuggest(args[1:])
+	case "hints":
+		return cmdHints(args[1:])
 	case "stats":
 		return cmdStats(args[1:])
 	case "stop":
