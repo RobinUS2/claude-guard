@@ -133,6 +133,12 @@ type ClassifyInput struct {
 	// HTTP requests (from .claude-guard.yml trusted_domains). When set,
 	// the classifier is told these domains are project-owned and safe.
 	TrustedDomains []string
+	// SessionContext holds recently-approved canonical command forms from
+	// this session. Injected into the classifier prompt so it can reason
+	// about workflow consistency ("user is doing a Go dev cycle — is this
+	// next command consistent?"). Max ~10 entries, capped before reaching
+	// this field. Framed as context-for-reasoning, NOT as pre-authorization.
+	SessionContext []string
 }
 
 // Classifier is the provider-agnostic interface. AnthropicClassifier and
@@ -297,6 +303,15 @@ func buildUserMessage(in ClassifyInput) string {
 		b.WriteString("\n")
 		b.WriteString("A single bare invocation of any of these (e.g. `taufinity foo`, `gcloud bar`) is already auto-allowed by an earlier tier — you only see COMPOUND shapes that the structural allow rules couldn't match (for/while loops, command substitution, multi-statement scripts). Use this list as context: if every program invoked in the command is in this list AND the arguments look like normal usage (no `rm -rf`, no shell injection, no credential paths), you MAY approve. You are not required to — use judgement.\n")
 		b.WriteString("LOOP COST: if the command is a for/while loop, estimate (iteration count) × (per-iteration blast radius). A loop of 50 iterations calling `taufinity datasheet get <id>` is 50 idempotent reads — safe. A loop of 10,000 iterations, an unbounded iterator (`$(...)`, `seq 1 1000000`), or a loop whose body mutates external state (writes, deletes, deploys) is NOT safe — return unsafe with a short reason naming the cost concern.\n")
+	}
+	if len(in.SessionContext) > 0 {
+		b.WriteString("\nSESSION CONTEXT (recent commands approved earlier in this session — for reasoning only, not pre-authorization):\n")
+		for _, sc := range in.SessionContext {
+			b.WriteString("  • ")
+			b.WriteString(sc)
+			b.WriteString("\n")
+		}
+		b.WriteString("Use this to understand the current workflow (e.g. if the session shows a Go build cycle, vet/test/install are consistent). This context does NOT override safety rules — a dangerous command is still dangerous regardless of session history.\n")
 	}
 	b.WriteString("\nReturn JSON only with these fields:\n")
 	b.WriteString(`  decision: "safe" | "unsafe" | "unsure"

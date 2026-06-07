@@ -17,6 +17,7 @@ import (
 	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 	"github.com/RobinUS2/claude-guard/internal/redact"
+	"github.com/RobinUS2/claude-guard/internal/store"
 )
 
 // cmdDecide is the PreToolUse hook entrypoint.
@@ -90,6 +91,9 @@ func cmdDecide(_ []string) int {
 	// Tier 5: legacy allow list (migrated from settings.json). Missing
 	// file is fine — it just means tier 5 is empty.
 	legacyList, _ := legacy.Load(defaultLegacyPath())
+
+	// Session store (Tier 2.5 + 2.6). Open best-effort — nil disables session tiers.
+	sessionStore, _ := store.Open(defaultStorePath())
 
 	// Parse the PreToolUse payload from stdin.
 	req, err := hook.ReadRequest(os.Stdin)
@@ -191,7 +195,11 @@ func cmdDecide(_ []string) int {
 		Legacy:              legacyList,
 		ProjectConfigLoader: projectconfig.Load,
 		BQBudget:            bqBudget,
+		Store:               sessionStore,
 	})
+	if sessionStore != nil {
+		defer sessionStore.Close()
+	}
 	out := eng.Decide(in)
 
 	// Translate engine verdict to hook response.

@@ -27,11 +27,12 @@ func cmdStats(args []string) int {
 
 	var since time.Duration
 	var pathOverride string
-	var record, history bool
+	var record, history, bySession bool
 	fs.DurationVar(&since, "since", 24*time.Hour, "only consider log entries from the last N (e.g. 24h, 7d)")
 	fs.StringVar(&pathOverride, "path", "", "override the decisions log path")
 	fs.BoolVar(&record, "record", false, "write a metrics snapshot to SQLite")
 	fs.BoolVar(&history, "history", false, "show metrics trend over time")
+	fs.BoolVar(&bySession, "by-session", false, "show per-session interrupt rate breakdown")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -48,6 +49,11 @@ func cmdStats(args []string) int {
 	path := paths.Decisions
 	if pathOverride != "" {
 		path = pathOverride
+	}
+
+	// --by-session: group by session and show interrupt rate per session.
+	if bySession {
+		return showBySession(path, since)
 	}
 
 	f, err := os.Open(path)
@@ -552,6 +558,113 @@ func countLearnedFromStore() (int, int) {
 		return 0, 0
 	}
 	return patterns, autoAllows
+}
+
+// showBySession reads decisions.jsonl and prints per-session interrupt rates.
+// This is Phase 0 baseline measurement: see how often each session falls
+// through to a user prompt (Continue verdict) vs auto-approving.
+func showBySession(logPath string, since time.Duration) int {
+	f, err := os.Open(logPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "stats: cannot read %s: %v\n", logPath, err)
+		return 1
+	}
+	defer f.Close()
+
+	type sessionData struct {
+		total     int
+		continues int // human interrupts (verdict=continue, tier=default)
+		allows    int
+		first     time.Time
+		last      time.Time
+	}
+	sessions := map[string]*sessionData{}
+	cutoff := time.Now().Add(-since)
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1<<16), 1<<20)
+	for scanner.Scan() {
+		var rec clog.ReadRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil || rec.Msg != clog.MsgDecision {
+			continue
+		}
+		if rec.SessionID == "" {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339Nano, rec.Time)
+		if err != nil || ts.Before(cutoff) {
+			continue
+		}
+		sd := sessions[rec.SessionID]
+		if sd == nil {
+			sd = &sessionData{}
+			sessions[rec.SessionID] = sd
+		}
+		sd.total++
+		if strings.EqualFold(rec.Verdict, "continue") {
+			sd.continues++
+		} else if strings.EqualFold(rec.Verdict, "allow") {
+			sd.allows++
+		}
+		if sd.first.IsZero() || ts.Before(sd.first) {
+			sd.first = ts
+		}
+		if sd.last.IsZero() || ts.After(sd.last) {
+			sd.last = ts
+		}
+	}
+
+	if len(sessions) == 0 {
+		fmt.Println("no session data in the given window")
+		return 0
+	}
+
+	type sessionRow struct {
+		id        string
+		data      *sessionData
+		interruptPct float64
+	}
+	rows := make([]sessionRow, 0, len(sessions))
+	for id, sd := range sessions {
+		pct := 0.0
+		if sd.total > 0 {
+			pct = float64(sd.continues) / float64(sd.total) * 100
+		}
+		rows = append(rows, sessionRow{id: id, data: sd, interruptPct: pct})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].data.first.After(rows[j].data.first) // newest first
+	})
+
+	fmt.Printf("per-session interrupt rate (last %s)\n\n", since)
+	fmt.Printf("  %-14s  %-19s  %6s  %7s  %7s  %9s\n",
+		"session", "started", "total", "allows", "prompts", "interrupt%")
+	fmt.Printf("  %-14s  %-19s  %6s  %7s  %7s  %9s\n",
+		"──────────────", "───────────────────", "──────", "───────", "───────", "─────────")
+	totalContinues, totalDecisions := 0, 0
+	for _, row := range rows {
+		shortID := row.id
+		if len(shortID) > 14 {
+			shortID = shortID[:14]
+		}
+		fmt.Printf("  %-14s  %-19s  %6d  %7d  %7d  %8.1f%%\n",
+			shortID,
+			row.data.first.Format("2006-01-02 15:04"),
+			row.data.total,
+			row.data.allows,
+			row.data.continues,
+			row.interruptPct,
+		)
+		totalContinues += row.data.continues
+		totalDecisions += row.data.total
+	}
+	avgPct := 0.0
+	if totalDecisions > 0 {
+		avgPct = float64(totalContinues) / float64(totalDecisions) * 100
+	}
+	fmt.Printf("\n  baseline interrupt rate: %.1f%% across %d sessions (%d/%d decisions prompted user)\n",
+		avgPct, len(rows), totalContinues, totalDecisions)
+	return 0
 }
 
 // showHistory prints a trend table from SQLite metrics_snapshots.

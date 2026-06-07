@@ -206,6 +206,47 @@ func GlobalKey(in KeyInputs) string {
 	return keyWithDimensions(in, false)
 }
 
+// SessionKey returns a deterministic key for a session-scoped approval.
+// The key is used as canonical_key in the session_approvals table — it
+// does NOT include the session_id or agent_id because those are stored
+// as separate columns used in the WHERE clause.
+//
+// Only the canonical command form participates in the hash (not cwd, branch,
+// or prompt version) so semantically identical commands share one entry
+// across different cwds within the same session.
+func SessionKey(canonicalCmd string) string {
+	h := sha256.Sum256([]byte("session\x00" + canonicalCmd))
+	return hex.EncodeToString(h[:])
+}
+
+// SessionCanonical returns the session-scope canonical form of a shell command:
+// the first two space-separated tokens (program + subcommand). For programs
+// that don't have meaningful subcommands (ls, grep, find, cat) only the
+// program name is returned. This is intentionally coarser than the LLM's
+// normalize package to maximise within-session cache hits.
+//
+// Both the engine (Tier 2.5 write/read) and the learn hook (PostToolUse)
+// MUST use this function so their session keys are consistent.
+func SessionCanonical(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return cmd
+	}
+	parts := strings.Fields(cmd)
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	oneWordPrograms := map[string]bool{
+		"ls": true, "cat": true, "find": true, "grep": true, "rg": true,
+		"head": true, "tail": true, "wc": true, "stat": true, "file": true,
+		"tree": true, "echo": true, "which": true,
+	}
+	if oneWordPrograms[parts[0]] {
+		return parts[0]
+	}
+	return parts[0] + " " + parts[1]
+}
+
 func keyWithDimensions(in KeyInputs, includeProject bool) string {
 	var b strings.Builder
 	b.WriteString(SchemaVersion)

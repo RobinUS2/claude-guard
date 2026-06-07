@@ -360,6 +360,14 @@ func DefaultBlockRules() []rules.Rule {
 			},
 			Reason: "terraform state mutation requires user approval",
 		},
+		// terraform destroy is irreversible — always require user approval.
+		// Cannot be auto-approved via the session-sequence tier because Tier 1
+		// fires unconditionally before any session tier.
+		&rules.AnchoredCommand{
+			RuleName:         "terraform-destroy-standalone",
+			Programs:         []string{"terraform"},
+			RequireSubcmdAny: []string{"destroy"},
+		},
 	}
 }
 
@@ -900,5 +908,81 @@ func DefaultAllowRules() []rules.Rule {
 			InnerRules:    innerReadRules,
 			MaxIterations: 50,
 		},
+	}
+}
+
+// AgentTrustProfile holds pre-approved programs for a specific Claude Code
+// agent type. Each entry in Programs is a bare program name (no path) that
+// is auto-allowed in Tier 2 when the request comes from an agent of that type.
+// Used for read-only agents whose behavioral profile is well-known (Explore).
+type AgentTrustProfile struct {
+	// Programs is a list of bare program names that are always safe for
+	// this agent type (e.g. ["find", "grep", "cat", "ls"]).
+	Programs []string
+}
+
+// DefaultAgentTrustProfiles returns the compiled-in trust profiles for
+// known Claude Code agent types. Keyed by agent_type string from the hook.
+func DefaultAgentTrustProfiles() map[string]AgentTrustProfile {
+	return map[string]AgentTrustProfile{
+		// Explore agents are read-only search agents: find files, grep
+		// for symbols, read file excerpts. They never write or execute.
+		"Explore": {
+			Programs: []string{
+				"find", "grep", "rg", "ripgrep", "ag",
+				"cat", "head", "tail", "less", "wc",
+				"ls", "stat", "file", "tree",
+				"git",   // read-only git subcommands checked separately
+				"echo",  // safe: prints to stdout
+				"which", "type", "command",
+			},
+		},
+		// claude-code-guide answers questions about the CLI — it reads
+		// files and fetches docs, never executes project code.
+		"claude-code-guide": {
+			Programs: []string{
+				"find", "grep", "rg", "cat", "head", "tail", "ls", "wc",
+				"which", "command",
+			},
+		},
+	}
+}
+
+// WorkflowSequence is an ordered list of canonical command patterns that
+// represent a known multi-step developer workflow. Approving step N within
+// the inactivity window auto-approves step N+1. Tier 1 always fires first —
+// sequences cannot bypass block rules.
+type WorkflowSequence struct {
+	Name  string
+	Steps []string // canonical forms (same normalised style as the cache)
+}
+
+// DefaultWorkflowSequences returns the compiled-in workflow sequences.
+// Steps are matched by canonical prefix — a concrete command matches a step
+// if it starts with the step's program and subcommand (e.g. "go test" matches
+// "go test ./..."). Tier 1 block rules always evaluate first.
+func DefaultWorkflowSequences() []WorkflowSequence {
+	return []WorkflowSequence{
+		{Name: "go-dev", Steps: []string{
+			"go build", "go test", "go vet", "go install", "go run",
+		}},
+		{Name: "make-dev", Steps: []string{
+			"make build", "make test", "make install", "make lint", "make check",
+		}},
+		{Name: "git-commit", Steps: []string{
+			"git add", "git diff", "git status", "git commit", "git push",
+		}},
+		{Name: "npm-dev", Steps: []string{
+			"npm install", "npm run build", "npm test", "npm run lint", "npm run check",
+		}},
+		{Name: "cargo-dev", Steps: []string{
+			"cargo build", "cargo test", "cargo clippy", "cargo fmt", "cargo check",
+		}},
+		{Name: "terraform", Steps: []string{
+			"terraform init", "terraform plan", "terraform apply",
+		}},
+		{Name: "docker-build", Steps: []string{
+			"docker build", "docker run",
+		}},
 	}
 }

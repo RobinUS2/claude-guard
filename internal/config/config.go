@@ -44,6 +44,14 @@ type Config struct {
 	// are intentionally not supported in v1.
 	InstantBlock []rules.Rule `yaml:"-"`
 	InstantAllow []rules.Rule `yaml:"-"`
+
+	// AgentTrustProfiles holds per-agent-type pre-approved program lists.
+	// Populated from DefaultAgentTrustProfiles(); YAML override not supported.
+	AgentTrustProfiles map[string]AgentTrustProfile `yaml:"-"`
+
+	// WorkflowSequences holds the compiled-in workflow sequence table.
+	// Populated from DefaultWorkflowSequences(); YAML override not supported.
+	WorkflowSequences []WorkflowSequence `yaml:"-"`
 }
 
 // Log configures the decision log paths and rotation.
@@ -138,8 +146,10 @@ func Default() *Config {
 			LLMCalls:          1000,
 			FileAnalysisCalls: 50,
 		},
-		InstantBlock: DefaultBlockRules(),
-		InstantAllow: DefaultAllowRules(),
+		InstantBlock:       DefaultBlockRules(),
+		InstantAllow:       DefaultAllowRules(),
+		AgentTrustProfiles: DefaultAgentTrustProfiles(),
+		WorkflowSequences:  DefaultWorkflowSequences(),
 	}
 }
 
@@ -203,9 +213,11 @@ func Load(path string) LoadResult {
 		}
 	}
 
-	// Re-apply compiled-in rules — they're authoritative, not YAML-driven in v1.
+	// Re-apply compiled-in rules/profiles — authoritative, not YAML-driven.
 	cfg.InstantBlock = DefaultBlockRules()
 	cfg.InstantAllow = DefaultAllowRules()
+	cfg.AgentTrustProfiles = DefaultAgentTrustProfiles()
+	cfg.WorkflowSequences = DefaultWorkflowSequences()
 
 	if cfg.Version != SchemaVersion {
 		return LoadResult{

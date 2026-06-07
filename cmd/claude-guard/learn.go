@@ -140,12 +140,24 @@ func cmdLearnWithIO(r io.Reader, w io.Writer) int {
 		db.PutVerdict(globalKey, entry, 0) //nolint:errcheck
 	}
 
+	// Session promotion: immediately write a session-scoped approval so
+	// the next call within this session auto-approves without prompting.
+	// Uses cache.SessionCanonical — the SAME canonical algorithm as the
+	// engine's Tier 2.5 lookup — so the key is consistent between writer
+	// (learn hook) and reader (engine Decide).
+	if in.SessionID != "" {
+		sessCanon := cache.SessionCanonical(bash.Command)
+		sessKey := cache.SessionKey(sessCanon)
+		db.WriteSessionApproval(in.SessionID, "", sessKey, sessCanon, bash.Command, "user") //nolint:errcheck
+	}
+
 	// Delete the pending approval.
 	db.DeletePending(in.ToolUseID) //nolint:errcheck
 
 	writeLearnResp(w, true, canonical)
 	return 0
 }
+
 
 func writeLearnResp(w io.Writer, learned bool, pattern string) {
 	resp := learnResponse{Learned: learned, Pattern: pattern}

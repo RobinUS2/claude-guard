@@ -37,6 +37,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/review"
 	"github.com/RobinUS2/claude-guard/internal/rules"
 	"github.com/RobinUS2/claude-guard/internal/shellparse"
+	"github.com/RobinUS2/claude-guard/internal/store"
 	"github.com/RobinUS2/claude-guard/internal/version"
 )
 
@@ -147,8 +148,9 @@ type Engine struct {
 	breaker  *breaker.Breaker
 	budget   *budget.Budget
 	cache    *cache.Cache
-	legacy   *legacy.AllowList   // tier 5: migrated allow list from settings.json
-	bqBudget *budget.BQBudget    // BQ pre-flight budget tracker (nil = disabled)
+	legacy   *legacy.AllowList // tier 5: migrated allow list from settings.json
+	bqBudget *budget.BQBudget  // BQ pre-flight budget tracker (nil = disabled)
+	store    *store.Store      // session-aware state (nil = session tier disabled)
 
 	// ProjectConfigLoader is called per-decide to look up a
 	// per-project .claude-guard.yml. Can be nil (feature disabled).
@@ -205,6 +207,11 @@ type Options struct {
 	// the engine runs a `bq query --dry_run` pre-flight for real BQ
 	// queries and gates on the daily limit. Nil disables BQ pre-flight.
 	BQBudget *budget.BQBudget
+
+	// Store is the SQLite-backed session state DB. When non-nil, enables
+	// the session-cache tier (Tier 2.5) and workflow-sequence tier (Tier 2.6).
+	// Nil disables both session tiers (engine falls back to Tier 3 global cache).
+	Store *store.Store
 }
 
 // New creates an engine with the given config and logger.
@@ -229,6 +236,7 @@ func NewWithOptions(opts Options) *Engine {
 		legacy:              opts.Legacy,
 		projectConfigLoader: opts.ProjectConfigLoader,
 		bqBudget:            opts.BQBudget,
+		store:               opts.Store,
 	}
 	if e.cfg == nil {
 		e.cfg = config.Default()
@@ -415,7 +423,7 @@ func (e *Engine) Decide(in Input) Output {
 		}
 	}
 
-	// Tier 2: ALLOW (compiled defaults + project-config extensions).
+	// Tier 2: ALLOW (compiled defaults + project-config extensions + agent-type profiles).
 	// Project rules are namespaced as "project:<name>" so log output
 	// distinguishes them from built-in rules. Project rules CANNOT
 	// weaken tier 1 — this loop runs only if tier 1 did not match.
@@ -425,10 +433,6 @@ func (e *Engine) Decide(in Input) Output {
 	for _, r := range allowRules {
 		if v, reason := r.Eval(parsed); v == rules.Match {
 			out.Shadow.Tier2Rule = r.Name()
-			// In enforce mode: only allow if tier 1 didn't match.
-			// In shadow mode: tier 1 block wins in real mode too, but since we
-			// already broke out of the tier 1 loop above in shadow mode, we
-			// only reach here if tier 1 had no match (correct behavior).
 			if !e.cfg.ShadowMode && out.Shadow.Tier1Rule == "" {
 				out.Verdict = Allow
 				out.Tier = "instant_allow"
@@ -439,6 +443,87 @@ func (e *Engine) Decide(in Input) Output {
 				return out
 			}
 			break
+		}
+	}
+
+	// Tier 2 (agent-type extension): if the request comes from a known
+	// subagent type with a compiled-in trust profile, check whether the
+	// command's first program is in that profile's pre-approved list.
+	// Only fires for subagents (AgentID != ""); main-agent commands always
+	// go through the full pipeline. Tier 1 has already run unconditionally.
+	if in.AgentID != "" && in.AgentType != "" && out.Shadow.Tier1Rule == "" {
+		if profile, ok := e.cfg.AgentTrustProfiles[in.AgentType]; ok {
+			program := firstProgram(in.Command)
+			for _, p := range profile.Programs {
+				if p == program {
+					ruleName := "agent-trust:" + in.AgentType
+					out.Shadow.Tier2Rule = ruleName
+					if !e.cfg.ShadowMode {
+						out.Verdict = Allow
+						out.Tier = "instant_allow"
+						out.Rule = ruleName
+						out.Reason = "agent type " + in.AgentType + " pre-approved for " + program
+						out.Latency = time.Since(start)
+						e.record(in, out)
+						return out
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Tier 2.5: session-scoped approval cache. Checked before the global/project
+	// LLM cache so within-session repeated commands are instant (~1ms SQLite read).
+	// Key: SessionKey(canonical_form) looked up against (session_id, agent_id).
+	// Deny entries (explicit user deny this session) block the command immediately
+	// by returning Continue (fall to user prompt, not hard-deny — only Tier 1 hard-denies).
+	if e.store != nil && in.SessionID != "" && out.Shadow.Tier1Rule == "" {
+		// Derive canonical form for session key. Use AST-based normalisation
+		// if available; fall back to the raw command. Errors are safe to ignore.
+		canonical := normalizeCommand(in.Command)
+		sessKey := cache.SessionKey(canonical)
+		verdict := e.store.ReadSessionApproval(in.SessionID, in.AgentID, sessKey)
+		switch verdict {
+		case "allow":
+			if !e.cfg.ShadowMode {
+				out.Verdict = Allow
+				out.Tier = "session"
+				out.Rule = "session-cache"
+				out.Reason = "approved earlier in this session"
+				out.Latency = time.Since(start)
+				e.record(in, out)
+				return out
+			}
+			// Shadow: log what tier would have fired, continue pipeline.
+			out.Shadow.Tier4LLM = "session:allow"
+		case "deny":
+			// Explicit deny this session — forward to user (not hard-block).
+			out.Verdict = Continue
+			out.Tier = "session"
+			out.Rule = "session-deny"
+			out.Reason = "explicitly denied earlier in this session"
+			out.SkipReason = "session_deny_forwarded_to_user"
+			out.Latency = time.Since(start)
+			e.record(in, out)
+			return out
+		}
+
+		// Tier 2.6: workflow sequence detection. If the current command is the
+		// next step in a known sequence whose previous step was approved within
+		// the last 10 minutes, auto-allow it. Tier 1 has already run.
+		if seqAllow, seqName := e.checkWorkflowSequence(in, canonical); seqAllow {
+			if !e.cfg.ShadowMode {
+				out.Verdict = Allow
+				out.Tier = "session"
+				out.Rule = "workflow-sequence:" + seqName
+				out.Reason = "logical follow-up in " + seqName + " workflow"
+				out.Latency = time.Since(start)
+				e.record(in, out)
+				// Write to session cache so subsequent identical commands are Tier 2.5 hits.
+				_ = e.store.WriteSessionApproval(in.SessionID, in.AgentID, sessKey, canonical, in.Command, "sequence")
+				return out
+			}
 		}
 	}
 
@@ -792,6 +877,13 @@ func (e *Engine) runLLMTier(
 			trustedDomains = pc.TrustedDomains
 		}
 	}
+	// Fetch recent session context (last 10 approved canonicals) to help
+	// the LLM reason about workflow consistency. Only when session store is live.
+	var sessionCtx []string
+	if e.store != nil && in.SessionID != "" {
+		sessionCtx = e.store.GetSessionContext(in.SessionID, in.AgentID, 10)
+	}
+
 	input := llm.ClassifyInput{
 		Command:         in.Command,
 		Description:     in.Description,
@@ -801,6 +893,7 @@ func (e *Engine) runLLMTier(
 		FilePath:        in.RunnerFilePath,
 		TrustedPrograms: trusted,
 		TrustedDomains:  trustedDomains,
+		SessionContext:  sessionCtx,
 	}
 
 	type outcome struct {
@@ -1173,6 +1266,16 @@ func (e *Engine) persistLLMAllowImpl(
 	if e.cache == nil || !v.allow {
 		return
 	}
+	// Tier 2.5 write: also store in session_approvals so subsequent calls
+	// within this session skip the LLM entirely (~1ms SQLite hit).
+	if e.store != nil && in.SessionID != "" {
+		canonical := normalizeCommand(in.Command)
+		sessKey := cache.SessionKey(canonical)
+		_ = e.store.WriteSessionApproval(in.SessionID, in.AgentID, sessKey, canonical, in.Command, "llm")
+		// Advance any matching workflow sequence to the next step.
+		e.advanceWorkflowSequence(in, canonical)
+	}
+
 	storeKey := projectKey
 	if v.scope == llm.ScopeGlobal {
 		storeKey = globalKey
@@ -1542,4 +1645,99 @@ func (e *Engine) record(in Input, out Output) {
 		}
 	}
 	e.log.Decision(rec)
+}
+
+// ---------------------------------------------------------------------------
+// Session-tier helpers
+// ---------------------------------------------------------------------------
+
+// normalizeCommand is an alias for cache.SessionCanonical used within the engine.
+// Both the engine and the learn hook (cmd layer) use cache.SessionCanonical so
+// their session keys are always consistent — critical for the PostToolUse
+// session-promotion path to be visible to the Tier 2.5 lookup.
+func normalizeCommand(cmd string) string {
+	return cache.SessionCanonical(cmd)
+}
+
+// firstProgram returns the first space-separated token of cmd (the program name).
+func firstProgram(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if i := strings.IndexByte(cmd, ' '); i > 0 {
+		return cmd[:i]
+	}
+	return cmd
+}
+
+// sequenceInactivityTimeout is how long after the last approved step a
+// sequence remains active. After this window the sequence resets.
+const sequenceInactivityTimeout = 10 * time.Minute
+
+// sequenceDangerFlags are command-line flags that significantly change the
+// blast radius of a command and must not be auto-approved by sequence detection,
+// even when the program+subcommand match a known sequence step. The user must
+// explicitly approve any command containing these flags.
+var sequenceDangerFlags = []string{
+	"-destroy", "--destroy",   // terraform apply -destroy
+	"-force", "--force",       // various force operations
+	"--purge",                 // apt/dpkg --purge
+	"--delete", "-D",          // git branch -D, etc.
+}
+
+// checkWorkflowSequence checks whether cmd is the next step in any
+// in-progress workflow sequence for this session/agent. Returns (true, name)
+// on a match. Sequences are started by the first step being approved through
+// any tier; subsequent steps match here. All checks happen after Tier 1.
+func (e *Engine) checkWorkflowSequence(in Input, canonical string) (bool, string) {
+	if e.store == nil || in.SessionID == "" || len(e.cfg.WorkflowSequences) == 0 {
+		return false, ""
+	}
+	// Reject any command with a danger flag regardless of sequence position.
+	// Protects against `terraform apply -destroy` matching "terraform apply" step.
+	for _, flag := range sequenceDangerFlags {
+		if strings.Contains(in.Command, flag) {
+			return false, ""
+		}
+	}
+	for idx, seq := range e.cfg.WorkflowSequences {
+		stepIdx, lastUpdated, found := e.store.ReadSequenceProgress(in.SessionID, in.AgentID, idx)
+		if !found {
+			continue
+		}
+		// Check inactivity timeout.
+		if time.Since(lastUpdated) > sequenceInactivityTimeout {
+			_ = e.store.DeleteSequenceProgress(in.SessionID, in.AgentID, idx)
+			continue
+		}
+		// The next step is stepIdx+1.
+		nextStep := stepIdx + 1
+		if nextStep >= len(seq.Steps) {
+			continue // sequence complete
+		}
+		if strings.HasPrefix(canonical, seq.Steps[nextStep]) {
+			// Match: advance sequence.
+			_ = e.store.WriteSequenceProgress(in.SessionID, in.AgentID, idx, nextStep)
+			return true, seq.Name
+		}
+	}
+	return false, ""
+}
+
+// advanceWorkflowSequence records an approved command against all matching
+// workflow sequences. Called from persistLLMAllowImpl when the LLM approves.
+// If the command matches step 0 of a sequence, it starts that sequence.
+// If it matches a later step, it advances it (in case sequence was not started
+// through Tier 2.5 but through a different tier).
+func (e *Engine) advanceWorkflowSequence(in Input, canonical string) {
+	if e.store == nil || in.SessionID == "" || len(e.cfg.WorkflowSequences) == 0 {
+		return
+	}
+	for idx, seq := range e.cfg.WorkflowSequences {
+		for stepIdx, step := range seq.Steps {
+			if strings.HasPrefix(canonical, step) {
+				// Record progress (upsert — handles both start and mid-sequence).
+				_ = e.store.WriteSequenceProgress(in.SessionID, in.AgentID, idx, stepIdx)
+				break
+			}
+		}
+	}
 }

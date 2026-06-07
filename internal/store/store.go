@@ -22,7 +22,7 @@ import (
 
 // schemaVersion is stored in PRAGMA user_version. Bump when the schema
 // changes in a way that requires migration.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // PendingApproval represents a command awaiting user approval. Written
 // by PreToolUse when the verdict is Continue, read by the learn
@@ -104,7 +104,9 @@ func (s *Store) Close() error {
 }
 
 // migrate creates tables if they don't exist and updates
-// PRAGMA user_version.
+// PRAGMA user_version. Additive: each version block runs only when the
+// current DB version is below that version, so existing DBs upgrade
+// without data loss.
 func (s *Store) migrate() error {
 	var ver int
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil {
@@ -114,100 +116,178 @@ func (s *Store) migrate() error {
 		return nil // already at current schema
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
+	if ver < 1 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck — idempotent after Commit; protects against panics
+		// --- verdicts ---
+		if _, err := tx.Exec(`
+			CREATE TABLE IF NOT EXISTS verdicts (
+				key TEXT PRIMARY KEY,
+				command TEXT,
+				canonical_form TEXT,
+				program TEXT,
+				cwd TEXT,
+				verdict TEXT NOT NULL,
+				tier TEXT,
+				reason TEXT,
+				provider TEXT,
+				model TEXT,
+				stored_at TEXT NOT NULL,
+				expires_at TEXT,
+				verified INTEGER DEFAULT 0,
+				verified_at TEXT,
+				verifier_provider TEXT,
+				verifier_model TEXT,
+				verifier_verdict TEXT,
+				verifier_reason TEXT,
+				disagreement INTEGER DEFAULT 0,
+				trusted_at TEXT,
+				trusted_reason TEXT,
+				match_count INTEGER DEFAULT 0,
+				approval_count INTEGER DEFAULT 0
+			)`); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("create verdicts: %w", err)
+		}
+		for _, idx := range []string{
+			`CREATE INDEX IF NOT EXISTS idx_verdicts_program ON verdicts(program)`,
+			`CREATE INDEX IF NOT EXISTS idx_verdicts_expires ON verdicts(expires_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_verdicts_canonical ON verdicts(canonical_form) WHERE canonical_form != ''`,
+		} {
+			if _, err := tx.Exec(idx); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("create verdict index: %w", err)
+			}
+		}
+		// --- pending_approvals ---
+		if _, err := tx.Exec(`
+			CREATE TABLE IF NOT EXISTS pending_approvals (
+				tool_use_id TEXT PRIMARY KEY,
+				command TEXT NOT NULL,
+				canonical_form TEXT,
+				cwd TEXT,
+				session_id TEXT,
+				prompted_at TEXT NOT NULL,
+				reason TEXT
+			)`); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("create pending_approvals: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_pending_age ON pending_approvals(prompted_at)`); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("create idx_pending_age: %w", err)
+		}
+		// --- metrics_snapshots ---
+		if _, err := tx.Exec(`
+			CREATE TABLE IF NOT EXISTS metrics_snapshots (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				recorded_at TEXT NOT NULL,
+				period_hours INTEGER NOT NULL,
+				total_decisions INTEGER,
+				allow_count INTEGER,
+				continue_count INTEGER,
+				deny_count INTEGER,
+				learned_allows INTEGER,
+				stop_hook_evals INTEGER,
+				stop_hook_fires INTEGER,
+				interrupts INTEGER,
+				user_approved INTEGER,
+				median_uninterrupted_s REAL,
+				p95_uninterrupted_s REAL,
+				cache_entries INTEGER,
+				learned_patterns INTEGER
+			)`); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("create metrics_snapshots: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_metrics_time ON metrics_snapshots(recorded_at)`); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("create idx_metrics_time: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 1"); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("set user_version=1: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
-	defer tx.Rollback()
 
-	// --- verdicts ---
-	if _, err := tx.Exec(`
-		CREATE TABLE IF NOT EXISTS verdicts (
-			key TEXT PRIMARY KEY,
-			command TEXT,
-			canonical_form TEXT,
-			program TEXT,
-			cwd TEXT,
-			verdict TEXT NOT NULL,
-			tier TEXT,
-			reason TEXT,
-			provider TEXT,
-			model TEXT,
-			stored_at TEXT NOT NULL,
-			expires_at TEXT,
-			verified INTEGER DEFAULT 0,
-			verified_at TEXT,
-			verifier_provider TEXT,
-			verifier_model TEXT,
-			verifier_verdict TEXT,
-			verifier_reason TEXT,
-			disagreement INTEGER DEFAULT 0,
-			trusted_at TEXT,
-			trusted_reason TEXT,
-			match_count INTEGER DEFAULT 0,
-			approval_count INTEGER DEFAULT 0
-		)`); err != nil {
-		return fmt.Errorf("create verdicts: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_verdicts_program ON verdicts(program)`); err != nil {
-		return fmt.Errorf("create idx_verdicts_program: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_verdicts_expires ON verdicts(expires_at)`); err != nil {
-		return fmt.Errorf("create idx_verdicts_expires: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_verdicts_canonical ON verdicts(canonical_form) WHERE canonical_form != ''`); err != nil {
-		return fmt.Errorf("create idx_verdicts_canonical: %w", err)
-	}
-
-	// --- pending_approvals ---
-	if _, err := tx.Exec(`
-		CREATE TABLE IF NOT EXISTS pending_approvals (
-			tool_use_id TEXT PRIMARY KEY,
-			command TEXT NOT NULL,
-			canonical_form TEXT,
-			cwd TEXT,
-			session_id TEXT,
-			prompted_at TEXT NOT NULL,
-			reason TEXT
-		)`); err != nil {
-		return fmt.Errorf("create pending_approvals: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_pending_age ON pending_approvals(prompted_at)`); err != nil {
-		return fmt.Errorf("create idx_pending_age: %w", err)
-	}
-
-	// --- metrics_snapshots ---
-	if _, err := tx.Exec(`
-		CREATE TABLE IF NOT EXISTS metrics_snapshots (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			recorded_at TEXT NOT NULL,
-			period_hours INTEGER NOT NULL,
-			total_decisions INTEGER,
-			allow_count INTEGER,
-			continue_count INTEGER,
-			deny_count INTEGER,
-			learned_allows INTEGER,
-			stop_hook_evals INTEGER,
-			stop_hook_fires INTEGER,
-			interrupts INTEGER,
-			user_approved INTEGER,
-			median_uninterrupted_s REAL,
-			p95_uninterrupted_s REAL,
-			cache_entries INTEGER,
-			learned_patterns INTEGER
-		)`); err != nil {
-		return fmt.Errorf("create metrics_snapshots: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_metrics_time ON metrics_snapshots(recorded_at)`); err != nil {
-		return fmt.Errorf("create idx_metrics_time: %w", err)
+	if ver < 2 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck — idempotent after Commit; protects against panics
+		// --- session_approvals ---
+		// Stores commands approved (or explicitly denied) within a session.
+		// Key = (session_id, agent_id, canonical_key) — agent_id is empty
+		// for the main agent, non-empty for subagents (isolated by default).
+		// source: "llm" | "user" | "sequence"
+		// verdict: "allow" | "deny"  (deny wins over allow, blocks rest-of-session)
+		// expires_at: 8-hour TTL from approved_at (covers a full workday)
+		// max 500 rows per (session_id, agent_id) — enforced at write time.
+		if _, err := tx.Exec(`
+			CREATE TABLE IF NOT EXISTS session_approvals (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				agent_id TEXT NOT NULL DEFAULT '',
+				canonical_key TEXT NOT NULL,
+				canonical_form TEXT,
+				command TEXT,
+				source TEXT NOT NULL,
+				verdict TEXT NOT NULL DEFAULT 'allow',
+				approved_at TEXT NOT NULL,
+				expires_at TEXT NOT NULL,
+				UNIQUE(session_id, agent_id, canonical_key)
+			)`); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("create session_approvals: %w", err)
+		}
+		for _, idx := range []string{
+			`CREATE INDEX IF NOT EXISTS idx_sa_lookup ON session_approvals(session_id, agent_id, canonical_key)`,
+			`CREATE INDEX IF NOT EXISTS idx_sa_expiry ON session_approvals(expires_at)`,
+			`CREATE INDEX IF NOT EXISTS idx_sa_context ON session_approvals(session_id, agent_id, verdict, approved_at)`,
+		} {
+			if _, err := tx.Exec(idx); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("create session_approvals index: %w", err)
+			}
+		}
+		// --- session_sequence_progress ---
+		// Tracks position within known workflow sequences per session/agent.
+		// sequence_idx: index into the compiled workflow sequence table.
+		// step_idx: last approved step within that sequence (0-based).
+		// last_updated: used for the 10-minute inactivity timeout.
+		if _, err := tx.Exec(`
+			CREATE TABLE IF NOT EXISTS session_sequence_progress (
+				session_id TEXT NOT NULL,
+				agent_id TEXT NOT NULL DEFAULT '',
+				sequence_idx INTEGER NOT NULL,
+				step_idx INTEGER NOT NULL,
+				last_updated TEXT NOT NULL,
+				PRIMARY KEY (session_id, agent_id, sequence_idx)
+			)`); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("create session_sequence_progress: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_ssp_lookup ON session_sequence_progress(session_id, agent_id)`); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("create idx_ssp_lookup: %w", err)
+		}
+		if _, err := tx.Exec("PRAGMA user_version = 2"); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("set user_version=2: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 
-	// Stamp the schema version.
-	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
-		return fmt.Errorf("set user_version: %w", err)
-	}
-
-	return tx.Commit()
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -705,4 +785,193 @@ func (s *Store) LearnedStats() (patterns int, autoAllows int, err error) {
 		"SELECT COUNT(*), COALESCE(SUM(match_count), 0) FROM verdicts WHERE tier = 'learned'",
 	).Scan(&patterns, &autoAllows)
 	return
+}
+
+// ---------------------------------------------------------------------------
+// Session approvals
+// ---------------------------------------------------------------------------
+
+const sessionApprovalTTL = 8 * time.Hour
+const sessionApprovalCap = 500 // max rows per (session_id, agent_id)
+
+// WriteSessionApproval upserts an allow entry into session_approvals.
+// If the table already holds a deny entry for this key, the deny wins and
+// the write is skipped (returns nil). Enforces a cap of sessionApprovalCap
+// rows per session/agent by evicting the oldest on overflow.
+func (s *Store) WriteSessionApproval(sessionID, agentID, canonicalKey, canonicalForm, command, source string) error {
+	if sessionID == "" || canonicalKey == "" {
+		return nil
+	}
+	// Never overwrite an explicit deny.
+	var existing string
+	err := s.db.QueryRow(
+		`SELECT verdict FROM session_approvals WHERE session_id=? AND agent_id=? AND canonical_key=?`,
+		sessionID, agentID, canonicalKey,
+	).Scan(&existing)
+	if err == nil && existing == "deny" {
+		return nil // deny wins
+	}
+
+	now := time.Now().UTC()
+	expires := now.Add(sessionApprovalTTL)
+	_, err = s.db.Exec(`
+		INSERT OR REPLACE INTO session_approvals
+			(session_id, agent_id, canonical_key, canonical_form, command, source, verdict, approved_at, expires_at)
+		VALUES (?,?,?,?,?,?,'allow',?,?)`,
+		sessionID, agentID, canonicalKey, canonicalForm, command, source,
+		now.Format(time.RFC3339), expires.Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+
+	// Enforce cap: delete oldest rows if over limit.
+	s.enforceSessionCap(sessionID, agentID)
+	return nil
+}
+
+// WriteSessionDeny records an explicit deny for a canonical key, preventing
+// session-cache from auto-approving that pattern for the rest of the session.
+// A deny entry overrides any existing allow entry.
+func (s *Store) WriteSessionDeny(sessionID, agentID, canonicalKey string) error {
+	if sessionID == "" || canonicalKey == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	expires := now.Add(sessionApprovalTTL)
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO session_approvals
+			(session_id, agent_id, canonical_key, canonical_form, command, source, verdict, approved_at, expires_at)
+		VALUES (?,?,?,'','','user-deny','deny',?,?)`,
+		sessionID, agentID, canonicalKey,
+		now.Format(time.RFC3339), expires.Format(time.RFC3339))
+	return err
+}
+
+// ReadSessionApproval checks whether a canonical key is approved for this
+// session/agent. Returns "allow", "deny", or "" (miss / expired).
+func (s *Store) ReadSessionApproval(sessionID, agentID, canonicalKey string) string {
+	if sessionID == "" || canonicalKey == "" {
+		return ""
+	}
+	var verdict, expiresStr string
+	err := s.db.QueryRow(`
+		SELECT verdict, expires_at FROM session_approvals
+		WHERE session_id=? AND agent_id=? AND canonical_key=?`,
+		sessionID, agentID, canonicalKey,
+	).Scan(&verdict, &expiresStr)
+	if err != nil {
+		return ""
+	}
+	if exp := textToTime(expiresStr); !exp.IsZero() && time.Now().After(exp) {
+		// Expired — delete on read.
+		_, _ = s.db.Exec(
+			`DELETE FROM session_approvals WHERE session_id=? AND agent_id=? AND canonical_key=?`,
+			sessionID, agentID, canonicalKey)
+		return ""
+	}
+	return verdict
+}
+
+// GetSessionContext returns up to limit recently-approved canonical forms for
+// the session/agent, ordered newest-first. Used by the LLM tier for context
+// injection. Only returns "allow" entries; deny entries are excluded.
+func (s *Store) GetSessionContext(sessionID, agentID string, limit int) []string {
+	if sessionID == "" || limit <= 0 {
+		return nil
+	}
+	rows, err := s.db.Query(`
+		SELECT canonical_form FROM session_approvals
+		WHERE session_id=? AND agent_id=? AND verdict='allow'
+		  AND (expires_at='' OR expires_at > ?)
+		ORDER BY approved_at DESC LIMIT ?`,
+		sessionID, agentID, time.Now().UTC().Format(time.RFC3339), limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var form string
+		if err := rows.Scan(&form); err == nil && form != "" {
+			out = append(out, form)
+		}
+	}
+	return out
+}
+
+// CleanStaleSessionApprovals deletes expired session_approvals rows.
+// Call periodically (e.g. at process start) to prevent unbounded growth.
+func (s *Store) CleanStaleSessionApprovals() error {
+	_, err := s.db.Exec(
+		`DELETE FROM session_approvals WHERE expires_at != '' AND expires_at < ?`,
+		time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// enforceSessionCap evicts the oldest session_approvals rows when the count
+// for a (session_id, agent_id) pair exceeds sessionApprovalCap. Best-effort.
+func (s *Store) enforceSessionCap(sessionID, agentID string) {
+	var count int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM session_approvals WHERE session_id=? AND agent_id=?`,
+		sessionID, agentID,
+	).Scan(&count); err != nil || count <= sessionApprovalCap {
+		return
+	}
+	excess := count - sessionApprovalCap
+	_, _ = s.db.Exec(`
+		DELETE FROM session_approvals WHERE id IN (
+			SELECT id FROM session_approvals
+			WHERE session_id=? AND agent_id=?
+			ORDER BY approved_at ASC LIMIT ?
+		)`, sessionID, agentID, excess)
+}
+
+// ---------------------------------------------------------------------------
+// Session sequence progress
+// ---------------------------------------------------------------------------
+
+// WriteSequenceProgress upserts progress for a workflow sequence within a session.
+func (s *Store) WriteSequenceProgress(sessionID, agentID string, sequenceIdx, stepIdx int) error {
+	if sessionID == "" {
+		return nil
+	}
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO session_sequence_progress
+			(session_id, agent_id, sequence_idx, step_idx, last_updated)
+		VALUES (?,?,?,?,?)`,
+		sessionID, agentID, sequenceIdx, stepIdx,
+		time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+
+// ReadSequenceProgress returns (stepIdx, lastUpdated, found) for a sequence.
+func (s *Store) ReadSequenceProgress(sessionID, agentID string, sequenceIdx int) (stepIdx int, lastUpdated time.Time, found bool) {
+	var updStr string
+	err := s.db.QueryRow(`
+		SELECT step_idx, last_updated FROM session_sequence_progress
+		WHERE session_id=? AND agent_id=? AND sequence_idx=?`,
+		sessionID, agentID, sequenceIdx,
+	).Scan(&stepIdx, &updStr)
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	return stepIdx, textToTime(updStr), true
+}
+
+// DeleteSequenceProgress removes progress for a sequence (e.g. after timeout).
+func (s *Store) DeleteSequenceProgress(sessionID, agentID string, sequenceIdx int) error {
+	_, err := s.db.Exec(`
+		DELETE FROM session_sequence_progress
+		WHERE session_id=? AND agent_id=? AND sequence_idx=?`,
+		sessionID, agentID, sequenceIdx)
+	return err
+}
+
+// CleanStaleSequences removes sequence progress records older than maxAge.
+func (s *Store) CleanStaleSequences(maxAge time.Duration) error {
+	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`DELETE FROM session_sequence_progress WHERE last_updated < ?`, cutoff)
+	return err
 }

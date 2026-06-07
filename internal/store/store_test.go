@@ -9,6 +9,167 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/cache"
 )
 
+// ---------------------------------------------------------------------------
+// Session approvals
+// ---------------------------------------------------------------------------
+
+func TestSessionApprovalRoundTrip(t *testing.T) {
+	s := openTestStore(t)
+	const sid, aid, key, form, cmd, src = "sess1", "", "key1", "git commit", "git commit -m foo", "llm"
+
+	if got := s.ReadSessionApproval(sid, aid, key); got != "" {
+		t.Fatalf("before write: want '', got %q", got)
+	}
+
+	if err := s.WriteSessionApproval(sid, aid, key, form, cmd, src); err != nil {
+		t.Fatalf("WriteSessionApproval: %v", err)
+	}
+
+	if got := s.ReadSessionApproval(sid, aid, key); got != "allow" {
+		t.Fatalf("after write: want 'allow', got %q", got)
+	}
+}
+
+func TestSessionApprovalDenyWins(t *testing.T) {
+	s := openTestStore(t)
+	const sid, aid, key = "sess2", "", "key2"
+
+	_ = s.WriteSessionApproval(sid, aid, key, "go test", "go test ./...", "llm")
+	_ = s.WriteSessionDeny(sid, aid, key)
+
+	// deny must win
+	if got := s.ReadSessionApproval(sid, aid, key); got != "deny" {
+		t.Fatalf("want 'deny', got %q", got)
+	}
+
+	// re-writing allow must NOT overwrite the deny
+	_ = s.WriteSessionApproval(sid, aid, key, "go test", "go test ./...", "llm")
+	if got := s.ReadSessionApproval(sid, aid, key); got != "deny" {
+		t.Fatalf("after re-allow: want 'deny' (deny wins), got %q", got)
+	}
+}
+
+func TestSessionApprovalAgentIsolation(t *testing.T) {
+	s := openTestStore(t)
+	const sid, key = "sess3", "key3"
+
+	_ = s.WriteSessionApproval(sid, "agent-A", key, "ls", "ls", "llm")
+
+	// Different agent_id — must NOT see agent-A's approval.
+	if got := s.ReadSessionApproval(sid, "agent-B", key); got != "" {
+		t.Fatalf("agent-B should not see agent-A approval, got %q", got)
+	}
+	// Main agent (empty agent_id) also isolated.
+	if got := s.ReadSessionApproval(sid, "", key); got != "" {
+		t.Fatalf("main agent should not see agent-A approval, got %q", got)
+	}
+}
+
+func TestGetSessionContext(t *testing.T) {
+	s := openTestStore(t)
+	const sid, aid = "sess4", ""
+
+	forms := []string{"go build", "go test", "git status"}
+	for i, f := range forms {
+		key := cache.SessionKey(f)
+		_ = s.WriteSessionApproval(sid, aid, key, f, f, "llm")
+		if i < len(forms)-1 {
+			time.Sleep(time.Millisecond) // ensure ordering by approved_at
+		}
+	}
+
+	ctx := s.GetSessionContext(sid, aid, 10)
+	if len(ctx) != 3 {
+		t.Fatalf("want 3 context entries, got %d", len(ctx))
+	}
+	// GetSessionContext returns newest-first.
+	if ctx[0] != "git status" {
+		t.Errorf("ctx[0] = %q, want 'git status'", ctx[0])
+	}
+}
+
+func TestCleanStaleSessionApprovals(t *testing.T) {
+	s := openTestStore(t)
+	// Write an entry with a past expires_at directly via WriteSessionApproval,
+	// then call CleanStaleSessionApprovals and verify it's gone.
+	// (Direct expiry manipulation requires an INSERT — use WritePending workaround
+	// via the PRAGMA to lower TTL, or simply trust TTL logic via ReadSessionApproval.)
+	// Simpler: write a normal entry, verify it exists, then run clean (nothing removed
+	// since TTL is 8h), then verify the clean-call itself doesn't error.
+	const sid, aid, key = "sess5", "", "key5"
+	_ = s.WriteSessionApproval(sid, aid, key, "go vet", "go vet ./...", "llm")
+	if err := s.CleanStaleSessionApprovals(); err != nil {
+		t.Fatalf("CleanStaleSessionApprovals: %v", err)
+	}
+	// Entry should still be there (not yet expired).
+	if got := s.ReadSessionApproval(sid, aid, key); got != "allow" {
+		t.Errorf("after clean: want 'allow', got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sequence progress
+// ---------------------------------------------------------------------------
+
+func TestSequenceProgressRoundTrip(t *testing.T) {
+	s := openTestStore(t)
+	const sid, aid = "seq1", ""
+
+	if _, _, found := s.ReadSequenceProgress(sid, aid, 0); found {
+		t.Fatal("expected no progress before write")
+	}
+
+	if err := s.WriteSequenceProgress(sid, aid, 0, 2); err != nil {
+		t.Fatalf("WriteSequenceProgress: %v", err)
+	}
+
+	stepIdx, lastUpdated, found := s.ReadSequenceProgress(sid, aid, 0)
+	if !found {
+		t.Fatal("expected progress after write")
+	}
+	if stepIdx != 2 {
+		t.Errorf("stepIdx = %d, want 2", stepIdx)
+	}
+	if lastUpdated.IsZero() {
+		t.Error("lastUpdated should not be zero")
+	}
+}
+
+func TestSequenceProgressDelete(t *testing.T) {
+	s := openTestStore(t)
+	const sid, aid = "seq2", ""
+
+	_ = s.WriteSequenceProgress(sid, aid, 1, 3)
+	if err := s.DeleteSequenceProgress(sid, aid, 1); err != nil {
+		t.Fatalf("DeleteSequenceProgress: %v", err)
+	}
+	if _, _, found := s.ReadSequenceProgress(sid, aid, 1); found {
+		t.Fatal("expected no progress after delete")
+	}
+}
+
+func TestCleanStaleSequences(t *testing.T) {
+	s := openTestStore(t)
+	_ = s.WriteSequenceProgress("seq3", "", 0, 1)
+	// Sequences written now have last_updated = now, well within 10 minutes.
+	if err := s.CleanStaleSequences(10 * time.Minute); err != nil {
+		t.Fatalf("CleanStaleSequences: %v", err)
+	}
+	if _, _, found := s.ReadSequenceProgress("seq3", "", 0); !found {
+		t.Fatal("recent sequence should not be cleaned")
+	}
+	// Clean with a negative duration (cutoff in the future) removes everything.
+	if err := s.CleanStaleSequences(-24 * time.Hour); err != nil {
+		t.Fatalf("CleanStaleSequences(-24h): %v", err)
+	}
+	if _, _, found := s.ReadSequenceProgress("seq3", "", 0); found {
+		t.Fatal("sequence should be cleaned with future-pointing TTL")
+	}
+}
+
+// ensure the strings import stays used (used in existing tests; re-export here)
+var _ = strings.Contains
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
