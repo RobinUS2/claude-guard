@@ -87,9 +87,17 @@ func cmdLearnWithIO(r io.Reader, w io.Writer) int {
 	}
 
 	// User approved this command. Cache it as a learned entry.
+	// Canonical form preference order:
+	//   1. pending.CanonicalForm — set by engine if LLM returned variable slots
+	//   2. normalize.Normalize   — works for simple commands with no slots
+	//   3. cache.SessionCanonical — fallback for compound commands (&&, pipes, heredocs)
+	//      that normalize.Normalize returns "" for; gives program+subcommand pair
 	canonical := pending.CanonicalForm
 	if canonical == "" {
 		canonical, _, _ = normalize.Normalize(bash.Command, nil)
+	}
+	if canonical == "" {
+		canonical = cache.SessionCanonical(bash.Command)
 	}
 
 	// Check if we already have a learned entry for this canonical.

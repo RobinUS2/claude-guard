@@ -153,8 +153,10 @@ cd -P /tmp && git status
 # match innerReadRules). This is exercised in bash_allow.txt instead.
 # cd + pipe to unsafe target
 cd /tmp && git log | sh
-# cd + git push (not in readonly list)
-cd /tmp && git push origin main
+# cd + git push origin main: CdPrefixed would allow cd, git push would allow push,
+# but pushing main requires LLM context (which project? production impact?)
+# so these fall through the deterministic tiers appropriately.
+cd /Users/robin/Documents/code/ai-site-gen && git push origin main
 
 # --- blocker 3 fix: ssh-add family no longer denies (falls to LLM) ---
 ssh-add ~/.ssh/id_rsa

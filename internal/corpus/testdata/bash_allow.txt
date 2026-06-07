@@ -363,3 +363,12 @@ curl -s -X PUT -H "Content-Type: application/json" "http://localhost:8090/api/si
 curl -s "http://localhost:8090/api/sites" | jq '.[] | .name'
 # localhost https (self-signed cert scenarios)
 curl -s "https://localhost:8443/api/health"
+
+# git push (non-force, non-main) — auto-allowed by git-push-nonforce rule
+# --force-with-lease: ForbidFlags matches as --force prefix, falls to LLM (correct)
+# git push origin main: goes to LLM (warm cache handles it fast; not corpus allow)
+# git -C /path push: AnchoredCommand can't see through -C arg, falls to LLM (acceptable)
+git push
+git push origin feature-branch
+git push origin v1.2.3
+# cd + push: goes to LLM for project-context judgment (removed from allow corpus)

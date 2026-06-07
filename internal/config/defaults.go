@@ -437,6 +437,18 @@ func DefaultAllowRules() []rules.Rule {
 	// for the exact restrictions.
 	sedReadonly := &rules.SedReadonly{RuleName: "sed-readonly"}
 
+	// git push (non-force) — auto-allow for standard pushes.
+	// Tier 1 already blocks force-push to protected branches (git-force-push-protected).
+	// This rule covers the remaining 95% of git push usage: feature branches, main
+	// after review, version tags. ForbidFlags ensures --force and -f still hit the LLM.
+	// --force-with-lease is intentionally NOT forbidden (safe: won't overwrite unseen commits).
+	gitPushNonforce := &rules.AnchoredCommand{
+		RuleName:         "git-push-nonforce",
+		Programs:         []string{"git"},
+		RequireSubcmdAny: []string{"push"},
+		ForbidFlags:      []string{"--force", "-f"},
+	}
+
 	// git read-only subcommands
 	gitReadonly := &rules.AnchoredCommand{
 		RuleName: "git-readonly",
@@ -448,9 +460,7 @@ func DefaultAllowRules() []rules.Rule {
 			// Workflow commands (safe — local operations)
 			"worktree", "add", "commit", "fetch", "pull", "merge",
 			"stash", "tag", "switch", "restore", "checkout",
-			// NOTE: `push` is intentionally NOT here — push to
-			// protected branches (main/master) should go through
-			// LLM or per-project config, not auto-approve.
+			// push moved to git-push-nonforce rule above
 		},
 	}
 
@@ -806,6 +816,9 @@ func DefaultAllowRules() []rules.Rule {
 		findReadonly,
 		gofmtReadonly,
 		sedReadonly,
+		// gitPushNonforce intentionally NOT here: compound `cd && git push` commands
+		// should go through LLM to get project-context (production vs test repo).
+		// Top-level git-push-nonforce handles the simple `git push` case.
 		gitReadonly,
 		gcloudReadonly,
 		gcloudLoggingReadonly,
@@ -839,6 +852,7 @@ func DefaultAllowRules() []rules.Rule {
 		findReadonly,
 		gofmtReadonly,
 		sedReadonly,
+		gitPushNonforce,
 		gitReadonly,
 		gcloudReadonly,
 		gcloudLoggingReadonly,

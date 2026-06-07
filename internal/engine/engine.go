@@ -346,17 +346,17 @@ func gitBranchOf(cwd string) string {
 	return ""
 }
 
-// computeRulesHash returns a stable hash of the active rule set. Cached
-// LLM verdicts are invalidated when this changes — a rule update means
-// the engine's behavior for the same command may differ.
+// computeRulesHash returns a stable hash of the BLOCK rule set only.
+// Only block-rule changes should invalidate cached LLM verdicts — allow-rule
+// additions are purely additive (they can only add more auto-approvals, never
+// flip a safe command to unsafe). Excluding allow rules prevents every
+// `make install` from busting the entire project-scoped LLM cache.
 func computeRulesHash(cfg *config.Config) string {
 	var names []string
 	for _, r := range cfg.InstantBlock {
 		names = append(names, "block:"+r.Name())
 	}
-	for _, r := range cfg.InstantAllow {
-		names = append(names, "allow:"+r.Name())
-	}
+	// Allow rules intentionally excluded — additive, do not invalidate verdicts.
 	return cache.HashStrings(names)
 }
 
