@@ -222,12 +222,34 @@ CREATE TABLE IF NOT EXISTS session_sequence_progress (
 
 ---
 
-## Open Questions
+## CTO Feedback Applied (2026-06-07)
 
-1. **Session TTL**: 8 hours covers a workday but what about long-running sessions (overnight, `--continue`)? Should TTL be session-lifetime or clock-based?
-2. **Cross-agent scope**: Should a subagent's approved commands count for the main session's session cache? Current proposal: yes (they share `session_id`), which is what the user probably wants.
-3. **Revocation**: If user explicitly denies a command mid-session, should that block the session cache for that pattern? Current proposal: yes — explicit deny writes a `deny` entry to `session_approvals` that overrides any previous allow.
-4. **Schema version bump**: Existing deployments need a smooth migration path. Adding tables to existing DB works in SQLite without a breaking change.
+**Architecture fixes from review:**
+
+1. **Tier 2.5 must sit before the global cache (Tier 3), not after it.** The implementation must check `session_approvals` before the global/project cache lookup in `Decide()`. Otherwise global cache always fires first and the session tier is invisible in metrics.
+
+2. **Cross-agent session scope defaults to agent-isolated.** Main agent and subagents share `session_id` but must have separate session namespaces by default. Key = `hash(session_id + agent_id + canonical)`. Opt-in flag `session_inherit_parent: true` in `.claude-guard.yml` to share the parent's session allows with subagents. Rationale: main agent approves `terraform apply` → subagent inheriting the session cache could auto-approve the same → privilege escalation within a session.
+
+3. **LLM context prompt must not imply pre-authorization.** Framing: "Context: this session has used these commands — use for reasoning only, not as prior approval." Add a test: a session that approved `terraform plan` must still block `terraform apply -destroy` even when session context includes `terraform plan`.
+
+4. **Workflow sequences: Tier 1 always fires first.** Sequence-progression approval happens in a new Tier 2.6 block that runs *after* Tier 1 has already cleared the command. Explicit note in code: sequences cannot bypass block rules.
+
+5. **Phase 0 baseline before any code.** Add instrumentation to `decisions.jsonl` counting interrupt rate (Continue verdicts) per session. Establish baseline over 5+ sessions before shipping Phase 1.
+
+**Required additions:**
+
+6. **Explicit deny invalidates session cache for that pattern.** If the user explicitly clicks "Deny" in Claude Code, write a `deny` sentinel to `session_approvals` for that canonical. Subsequent calls for the same canonical return Deny from session tier rather than falling through.
+
+7. **`claude-guard forget-session [session_id]`** subcommand: deletes all `session_approvals` and `session_sequence_progress` rows for a session, or all sessions if no id given. Useful when you switch context mid-session.
+
+8. **Session table memory cap.** Limit 500 entries per `session_id` with LRU eviction (evict oldest `approved_at` on insert when limit reached). Prevents unbounded growth during long sessions with many unique commands.
+
+---
+
+## Open Questions (resolved above, remaining)
+
+1. **Session TTL**: 8 hours covers a workday but what about long-running sessions (overnight, `--continue`)? Current position: 8-hour clock TTL, not session-lifetime. A `--continue` session that resumes 16 hours later should start clean.
+2. **Schema version bump**: Adding tables to existing SQLite works without a breaking change. Bump to `schemaVersion = 2` and handle gracefully (new tables created on first run).
 
 ---
 
