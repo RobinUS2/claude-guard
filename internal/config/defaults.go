@@ -442,13 +442,6 @@ func DefaultAllowRules() []rules.Rule {
 	// This rule covers the remaining 95% of git push usage: feature branches, main
 	// after review, version tags. ForbidFlags ensures --force and -f still hit the LLM.
 	// --force-with-lease is intentionally NOT forbidden (safe: won't overwrite unseen commits).
-	gitPushNonforce := &rules.AnchoredCommand{
-		RuleName:         "git-push-nonforce",
-		Programs:         []string{"git"},
-		RequireSubcmdAny: []string{"push"},
-		ForbidFlags:      []string{"--force", "-f"},
-	}
-
 	// git read-only subcommands
 	gitReadonly := &rules.AnchoredCommand{
 		RuleName: "git-readonly",
@@ -460,7 +453,9 @@ func DefaultAllowRules() []rules.Rule {
 			// Workflow commands (safe — local operations)
 			"worktree", "add", "commit", "fetch", "pull", "merge",
 			"stash", "tag", "switch", "restore", "checkout",
-			// push moved to git-push-nonforce rule above
+			// NOTE: push is intentionally NOT here — all `git push` commands
+			// go through Tier 2.7 (gitPushScore) for repo-aware risk scoring.
+			// Low-risk pushes auto-allow there; high-risk go to LLM.
 		},
 	}
 
@@ -852,7 +847,7 @@ func DefaultAllowRules() []rules.Rule {
 		findReadonly,
 		gofmtReadonly,
 		sedReadonly,
-		gitPushNonforce,
+		// gitPushNonforce removed — all git push handled by Tier 2.7 risk scorer
 		gitReadonly,
 		gcloudReadonly,
 		gcloudLoggingReadonly,

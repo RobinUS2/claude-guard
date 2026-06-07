@@ -364,10 +364,9 @@ curl -s "http://localhost:8090/api/sites" | jq '.[] | .name'
 # localhost https (self-signed cert scenarios)
 curl -s "https://localhost:8443/api/health"
 
-# git push (non-force, non-main) — auto-allowed by git-push-nonforce rule
-# --force-with-lease: ForbidFlags matches as --force prefix, falls to LLM (correct)
-# git push origin main: goes to LLM (warm cache handles it fast; not corpus allow)
-# git -C /path push: AnchoredCommand can't see through -C arg, falls to LLM (acceptable)
+# git push (non-force) — now handled by Tier 2.7 (push-safe) not instant_allow
+# In tests: shell commands fail gracefully → score=0 → push-safe auto-allow
+# git push --force: Tier 1 deny (in bash_deny.txt); git push --force-with-lease: LLM
 git push
 git push origin feature-branch
 git push origin v1.2.3
