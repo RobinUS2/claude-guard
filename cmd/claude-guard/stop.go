@@ -54,12 +54,20 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 	tr := parseTranscript(in.Transcript)
 	timeout := time.Duration(stopShellTimeoutMs) * time.Millisecond
 
+	// Build rule list: deterministic rules first, LLM semantic review last.
+	// LLM rule only fires after all deterministic rules return false,
+	// and at most once per session (MaxContinues=1 enforced by EvaluateResult).
+	rules := stop.DefaultRules()
+	if llmRule := stop.NewLLMStopRule(); llmRule != nil {
+		rules = append(rules, llmRule)
+	}
+
 	res := stop.EvaluateResult(
 		in.SessionID,
 		os.TempDir(),
 		in.StopHookActive,
 		tr,
-		stop.DefaultRules(),
+		rules,
 		timeout,
 	)
 
