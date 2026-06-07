@@ -361,6 +361,8 @@ func (r *contextMonitorRule) Eval(t Transcript, _ ShellContext) (bool, string) {
 
 // DefaultRules returns the built-in rule set in evaluation order.
 // Transcript-only rules (no shell cost) run first, then shell-based.
+// completionQualityRule is intentionally LAST: it fires only when every
+// other rule returned false, meaning the session looks complete.
 func DefaultRules() []StopRule {
 	return []StopRule{
 		// Transcript-only (no shell cost).
@@ -377,5 +379,33 @@ func DefaultRules() []StopRule {
 		&committedNotPushedRule{},
 		&featureBranchLeftRule{},
 		&worktreeLeftOpenRule{},
+		// Quality gate — fires ONLY when all other rules pass (task looks complete).
+		// Asks the "did we do enough?" questions. Zero cost, once per session.
+		&completionQualityRule{},
 	}
+}
+
+// completionQualityRule fires when no other rule detected an issue — the session
+// looks complete. It asks backward-looking (did we cover everything?) and
+// forward-looking (can we make this better?) questions. These are "always winners":
+// they almost always surface something useful when real work was done.
+//
+// Only fires when:
+//   - ≥2 turns (not a trivial Q&A)
+//   - ≥1 bash call (actual work happened, not just a conversation)
+//   - First time this session (MaxContinues = 1)
+type completionQualityRule struct{}
+
+func (r *completionQualityRule) Name() string         { return "completion-quality" }
+func (r *completionQualityRule) HighConfidence() bool { return true }
+func (r *completionQualityRule) MaxContinues() int    { return 1 }
+func (r *completionQualityRule) TextPreFilter() string { return "" }
+
+func (r *completionQualityRule) Eval(t Transcript, _ ShellContext) (bool, string) {
+	// Only fire when real work happened this session.
+	if t.TurnCount < 2 || len(t.BashCalls) == 0 {
+		return false, ""
+	}
+	return true, "Before we close out: did we execute all planned steps? " +
+		"And is there anything we can do to make this better or more complete?"
 }
