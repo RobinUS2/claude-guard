@@ -38,6 +38,27 @@ install: build
 			echo "  fix: cp $$installed_bin $$active_bin  (or remove the stale copy)"; \
 		fi; \
 	fi
+	@# Regenerate the claude-guard hints section in ~/.claude/CLAUDE.md.
+	@# Keeps Claude's auto-approval context fresh after every install.
+	@CLAUDE_MD="$(HOME)/.claude/CLAUDE.md"; \
+	if [ -f "$$CLAUDE_MD" ]; then \
+		HINTS=$$($(BIN_DIR)/$(BIN) hints --no-history 2>/dev/null) || true; \
+		if [ -n "$$HINTS" ]; then \
+			START='<!-- claude-guard-hints-start -->'; \
+			END='<!-- claude-guard-hints-end -->'; \
+			if grep -q 'claude-guard-hints-start' "$$CLAUDE_MD" 2>/dev/null; then \
+				awk -v s="$$START" -v e="$$END" -v h="$$HINTS" \
+					'/<!--.*claude-guard-hints-start.*-->/{print s; print h; print e; skip=1; next} \
+					 /<!--.*claude-guard-hints-end.*-->/{skip=0; next} \
+					 !skip{print}' "$$CLAUDE_MD" > /tmp/cg_claude_md_tmp && \
+				mv /tmp/cg_claude_md_tmp "$$CLAUDE_MD" && \
+				echo "  updated CLAUDE.md hints section"; \
+			else \
+				printf "\n\n$$START\n$$HINTS\n$$END\n" >> "$$CLAUDE_MD" && \
+				echo "  appended CLAUDE.md hints section"; \
+			fi; \
+		fi; \
+	fi
 
 install-local: build
 	@mkdir -p $(BIN_DIR)

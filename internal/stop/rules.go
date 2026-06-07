@@ -406,6 +406,8 @@ func (r *completionQualityRule) Eval(t Transcript, _ ShellContext) (bool, string
 	if t.TurnCount < 2 || len(t.BashCalls) == 0 {
 		return false, ""
 	}
-	return true, "Before we close out: did we execute all planned steps? " +
-		"And is there anything we can do to make this better or more complete?"
+	return true, "Before we close out: " +
+		"(1) Did we execute all planned steps? " +
+		"(2) Is everything wired up, integrated correctly, and verified as much as possible — did we actually test the golden path? " +
+		"(3) Anything we can do to make this better or more complete?"
 }
