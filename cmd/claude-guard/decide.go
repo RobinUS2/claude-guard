@@ -17,6 +17,7 @@ import (
 	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 	"github.com/RobinUS2/claude-guard/internal/redact"
+	"github.com/RobinUS2/claude-guard/internal/reporisk"
 	"github.com/RobinUS2/claude-guard/internal/store"
 )
 
@@ -94,6 +95,9 @@ func cmdDecide(_ []string) int {
 
 	// Session store (Tier 2.5 + 2.6). Open best-effort — nil disables session tiers.
 	sessionStore, _ := store.Open(defaultStorePath())
+
+	// Repo risk registry (Tier 2.7). Missing file = heuristic scoring only.
+	repoReg, _ := reporisk.Load(reporisk.DefaultRegistryPath())
 
 	// Parse the PreToolUse payload from stdin.
 	req, err := hook.ReadRequest(os.Stdin)
@@ -196,6 +200,7 @@ func cmdDecide(_ []string) int {
 		ProjectConfigLoader: projectconfig.Load,
 		BQBudget:            bqBudget,
 		Store:               sessionStore,
+		RepoRisk:            repoReg,
 	})
 	if sessionStore != nil {
 		defer sessionStore.Close()

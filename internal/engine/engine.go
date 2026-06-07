@@ -25,6 +25,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/budget"
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/reporisk"
 	"github.com/RobinUS2/claude-guard/internal/filectx"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
@@ -97,6 +98,9 @@ type Input struct {
 	// commands. Not set by external callers (decide.go).
 	FileContent    string // file contents for LLM context
 	RunnerFilePath string // path of the referenced file (distinct from FilePath used by Read/Write/Edit)
+	// GitPushContext is populated by Tier 2.7 for git push commands.
+	// Injected into the LLM prompt to provide repo risk context.
+	GitPushContext string
 }
 
 // Output is the engine's decision plus metadata for logging/debugging.
@@ -148,9 +152,10 @@ type Engine struct {
 	breaker  *breaker.Breaker
 	budget   *budget.Budget
 	cache    *cache.Cache
-	legacy   *legacy.AllowList // tier 5: migrated allow list from settings.json
-	bqBudget *budget.BQBudget  // BQ pre-flight budget tracker (nil = disabled)
-	store    *store.Store      // session-aware state (nil = session tier disabled)
+	legacy   *legacy.AllowList    // tier 5: migrated allow list from settings.json
+	bqBudget *budget.BQBudget     // BQ pre-flight budget tracker (nil = disabled)
+	store    *store.Store         // session-aware state (nil = session tier disabled)
+	repoRisk *reporisk.Registry   // git push risk scoring (nil = heuristics only)
 
 	// ProjectConfigLoader is called per-decide to look up a
 	// per-project .claude-guard.yml. Can be nil (feature disabled).
@@ -212,6 +217,10 @@ type Options struct {
 	// the session-cache tier (Tier 2.5) and workflow-sequence tier (Tier 2.6).
 	// Nil disables both session tiers (engine falls back to Tier 3 global cache).
 	Store *store.Store
+
+	// RepoRisk is the loaded repo risk registry for smart git push scoring (Tier 2.7).
+	// Nil disables registry-based scoring; heuristics still run.
+	RepoRisk *reporisk.Registry
 }
 
 // New creates an engine with the given config and logger.
@@ -237,6 +246,7 @@ func NewWithOptions(opts Options) *Engine {
 		projectConfigLoader: opts.ProjectConfigLoader,
 		bqBudget:            opts.BQBudget,
 		store:               opts.Store,
+		repoRisk:            opts.RepoRisk,
 	}
 	if e.cfg == nil {
 		e.cfg = config.Default()
@@ -524,6 +534,31 @@ func (e *Engine) Decide(in Input) Output {
 				_ = e.store.WriteSessionApproval(in.SessionID, in.AgentID, sessKey, canonical, in.Command, "sequence")
 				return out
 			}
+		}
+	}
+
+	// Tier 2.7: smart git push risk scoring.
+	// Fires only for `git push` commands. Scores 0–10 using repo registry +
+	// heuristics (branch, CI/CD, diff size). Low score → instant allow.
+	// Medium score → LLM with push context injected. High score → LLM with
+	// strong conservative framing (user approval dialog still shown).
+	// Note: this tier only fires when git-push-nonforce (Tier 2) did NOT match,
+	// meaning the command is ambiguous enough to have reached this point.
+	if isGitPush(in.Command) && in.ToolName == "Bash" && out.Shadow.Tier1Rule == "" {
+		pushScore, pushExplanation, _ := e.evaluateGitPush(in)
+		if !e.cfg.ShadowMode {
+			if pushScore <= PushScoreAutoAllow {
+				out.Verdict = Allow
+				out.Tier = "push-safe"
+				out.Rule = "git-push-risk-low"
+				out.Reason = "push risk score " + itoa(pushScore) + "/10 — auto-allowed"
+				out.Latency = time.Since(start)
+				e.record(in, out)
+				return out
+			}
+			// Medium or high score: inject context into LLM prompt, continue pipeline.
+			// The LLM will use pushExplanation to make a smarter decision.
+			in.GitPushContext = pushExplanation
 		}
 	}
 
@@ -894,6 +929,7 @@ func (e *Engine) runLLMTier(
 		TrustedPrograms: trusted,
 		TrustedDomains:  trustedDomains,
 		SessionContext:  sessionCtx,
+		GitPushContext:  in.GitPushContext,
 	}
 
 	type outcome struct {

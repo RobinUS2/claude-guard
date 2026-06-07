@@ -139,6 +139,10 @@ type ClassifyInput struct {
 	// next command consistent?"). Max ~10 entries, capped before reaching
 	// this field. Framed as context-for-reasoning, NOT as pre-authorization.
 	SessionContext []string
+	// GitPushContext is populated for git push commands by Tier 2.7 (smart push scorer).
+	// Contains repo risk level, branch, CI/CD presence, diff size, and evaluator guidance.
+	// Empty for all non-push commands. When non-empty, injected into the LLM prompt.
+	GitPushContext string
 }
 
 // Classifier is the provider-agnostic interface. AnthropicClassifier and
@@ -312,6 +316,11 @@ func buildUserMessage(in ClassifyInput) string {
 			b.WriteString("\n")
 		}
 		b.WriteString("Use this to understand the current workflow (e.g. if the session shows a Go build cycle, vet/test/install are consistent). This context does NOT override safety rules — a dangerous command is still dangerous regardless of session history.\n")
+	}
+	if in.GitPushContext != "" {
+		b.WriteString("\n")
+		b.WriteString(in.GitPushContext)
+		b.WriteString("\n")
 	}
 	b.WriteString("\nReturn JSON only with these fields:\n")
 	b.WriteString(`  decision: "safe" | "unsafe" | "unsure"
