@@ -22,20 +22,18 @@ Subcommands:
   test <command>      dry-run a command through the tiers (use --live to hit the real LLM)
   monitor [--since N] live-tail the decisions log with pretty-printing
   explain [-n N]      last N decisions from the log
-  replay <log-id>     re-run a historical decision with the current config
-  stats               tier-hit counts, cache hit rate, LLM latency
+  replay [--since 7d] batch-replay historical Continue decisions — measures rule improvement
+  compare [--since 14d] compare two time windows: interrupt rate, tier distribution, latency
+  stats [--since T]   aggregate decisions.jsonl: verdicts, tiers, latency, cache hit rate
   doctor              health check: config, schema, API key, hook wiring
   migrate             settings.json allow-list → legacy-patterns.yaml
   backup [--dest D]   copy logs + cache + config to backup destination (default: Google Drive)
   cache <sub>         inspect/prune the verdict cache: stats, prune, clear
-  stats [--since T]   aggregate decisions.jsonl: verdicts, tiers, latency, cache hit rate
-  explain <id|--last> re-run a historical decision against the current rules
   dashboard           web dashboard: live stats, decisions, cache, learned patterns
-  settings <sub>   audit/migrate settings.json permissions
+  settings <sub>      audit/migrate settings.json permissions
   lint                validate config + run the adversarial corpus as self-tests
   trust "<cmd>"       override a verifier disagreement (future cache hits ALLOW)
   init-project-config write a starter .claude-guard.yml in cwd for per-project allow rules
-  lint                validate config.yaml and run bundled rule tests
   eval-prompt         run the classifier against the eval corpus
   bench               engine latency against a corpus (no LLM)
   version             print version
@@ -65,6 +63,8 @@ func run(args []string) int {
 		return cmdExplain(args[1:])
 	case "replay":
 		return cmdReplay(args[1:])
+	case "compare":
+		return cmdCompare(args[1:])
 	case "stats":
 		return cmdStats(args[1:])
 	case "stop":
