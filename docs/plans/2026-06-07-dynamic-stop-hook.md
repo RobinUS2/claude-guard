@@ -58,11 +58,11 @@ Deterministic rules → all pass? → LLM semantic review → inject? → contin
 }
 ```
 
-**Inject rules:**
-- `complete=false` AND `confidence=high` → inject `inject` message
-- `complete=false` AND `confidence=medium` → inject if no prior LLM continues this session
-- `complete=true` OR `confidence=low` → skip injection
-- LLM error → fall back to deterministic-only (no injection)
+**Inject rules (CTO feedback: conservative — only HIGH confidence):**
+- `complete=false` AND `confidence=high` ONLY → inject `inject` message
+- `complete=false` AND `confidence=medium/low` → skip (too uncertain, Claude likely done)
+- `complete=true` → skip injection
+- LLM error/timeout → fallback to deterministic-only, no injection
 
 ---
 
@@ -70,8 +70,8 @@ Deterministic rules → all pass? → LLM semantic review → inject? → contin
 
 **Critical:** the stop hook runs after EVERY Claude turn. LLM calls must be rate-limited.
 
-- Max **1 LLM stop call per session** (tracked in session state file)
-- Max **2 LLM stop calls per hour** across all sessions (token-bucket rate limiter)
+- Max **1 LLM stop call per session** (tracked in session state file) — sufficient cap
+- No global hourly limit (removed — session cap is the right boundary; hourly cap would exhaust across 2 back-to-back long sessions)
 - Use **Haiku/Flash only** (cheapest models, ~$0.001 per call)
 - Prompt hard-capped at 500 tokens (last assistant text trimmed to 200 chars, bash calls to 100 chars each)
 - Timeout: **2 seconds** (stop hook must not block Claude meaningfully)

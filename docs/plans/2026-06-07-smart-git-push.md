@@ -37,7 +37,7 @@ The answer is a risk score computed from context, not a binary rule.
 | Diff size > 100 files | +3 | same |
 | Feature branch (`feature/*`, `fix/*`) | −1 | branch name pattern |
 | Worktree push (path includes `.worktrees`) | −1 | CWD path |
-| Tag push (`git push origin v*`) | −1 | command arg: `origin v*` |
+| ~~Tag push (`git push origin v*`)~~ | removed — tags can trigger release pipelines | |
 
 **Score table:**
 - 0–3: Auto-allow (Tier 2.5 "push-safe")
@@ -105,7 +105,9 @@ Instead of a rule, add a `gitPushRisk` evaluator that runs between Tier 2 (insta
 and the LLM tier. If the command is a git push, score it:
 - Low score → return Allow immediately (skip LLM, label tier "push-safe")
 - High score → inject score context into the LLM prompt, tag as "high-risk-push"
-- Score >= 7 → return Continue (require user, don't even try LLM)
+- Score >= 7 → LLM with strong framing + inject `requireUserApproval: true` in prompt context
+  (do NOT skip LLM — LLM cache must warm for future identical high-risk pushes;
+   user still sees approval dialog even if LLM approves, matching the intent)
 
 This mirrors how `bqBudget` works: a specialized pre-flight that runs between Tier 2 and Tier 4.
 
