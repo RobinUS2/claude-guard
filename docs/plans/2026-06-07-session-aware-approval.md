@@ -269,6 +269,36 @@ CREATE TABLE IF NOT EXISTS session_sequence_progress (
 
 ---
 
+## Deep Research Findings (2026-06-07)
+
+107-agent web research sweep across 25 sources, 117 claims extracted, 25 adversarially verified (10 confirmed, 15 killed).
+
+**Finding 1 — We are ahead of all production tools (confirmed, high confidence)**
+No shipping tool implements session-scoped trust accumulation or graduated approval-count promotion. Claude Code's in-session permissions are deliberately ephemeral (not persisted to disk, not restored on session resume or fork). Microsoft agent-governance-toolkit uses a static boolean flag. Cursor uses glob-pattern allowlists. We would be the first production implementation.
+
+**Finding 2 — 93% approval rate confirms the problem is real (confirmed, high confidence)**
+Anthropic's own engineering blog documents that Claude Code users approve 93% of prompts. This is the data-backed justification for auto-mode and for this plan. Approval fatigue makes interactive confirmation unreliable as the sole safety mechanism.
+
+**Finding 3 — Our AST approach avoids the Cursor CVE (confirmed, high confidence)**
+CVE-2026-22708 (CVSS 9.8): Cursor's allowlist was bypassed by shell built-ins (`export`, `unset`, `declare`) because it gated at process-spawn level — built-ins never spawn a subprocess. claude-guard intercepts the *shell command string* before execution (PreToolUse hook), so it sees built-ins and evaluates them via AST/string matching before they run. We do not have this structural blind spot.
+
+**Finding 4 — sudo's TTL model validates our 8-hour session window (confirmed, high confidence)**
+sudo's `tty_tickets` + `timestamp_timeout` is the strongest OS-level prior art: one successful authentication → time-bounded trust window, subsequent commands auto-approved until TTL. The sudo -N flag (v1.9.12+) adds read-only cache probing. Our 8-hour TTL approach follows the same model. Validates the design.
+
+**Finding 5 — seccomp is irrelevant (confirmed, high confidence)**
+Seccomp BPF filters are install-only, stack-only — you can only add more restrictive layers, never relax. The notifier requires independent per-call evaluation with no built-in caching. No useful mechanisms for our use case.
+
+**Finding 6 — Risk score as alternative to approval counting (medium confidence, research only)**
+AURA proposes gamma-normalized risk scores (0–30 auto-approve, 30–60 mitigate, 60–100 escalate) as an alternative to approval history. These are illustrative thresholds from an undeployed research system. This framing is interesting: instead of "did the user approve this before?", ask "what is this command's intrinsic risk score?" The LLM tier already does something like this — AURA suggests making the score explicit and routing on it. Future direction, not Phase 1.
+
+**Finding 7 — Trust-poisoning attack surface (open question, important)**
+If a malicious prompt injection causes the user to approve a command, that approval would contribute to session trust the same way a legitimate approval does. No production system has addressed this. Our mitigations: (a) Tier 1 blocks remain unconditional; (b) session approvals are scoped to the session and expire; (c) explicit deny always wins over session cache. Not fully solved — add to threat model.
+
+**Finding 8 — Browser permission model as additional prior art (open question)**
+Site permissions + CORS preflight caching + permission persistence across navigations may be more directly applicable than OS-level mechanisms (already origin-scoped, user-grantable, session- or persistent-scoped). Worth reviewing Chrome's permission model when designing the session TTL and revocation UX.
+
+---
+
 ## References
 
 - Engine pipeline: `internal/engine/engine.go:363` (Decide function)
@@ -276,3 +306,4 @@ CREATE TABLE IF NOT EXISTS session_sequence_progress (
 - Learn hook: `cmd/claude-guard/learn.go`
 - Store schema: `internal/store/store.go:108`
 - Cache key inputs: `internal/cache/cache.go:143`
+- Research: arxiv.org/html/2604.14228v1 (Claude Code analysis), nvd.nist.gov CVE-2026-22708 (Cursor built-in bypass), sudo.ws/posts/2022/10/... (sudo TTL model), arxiv.org/pdf/2510.15739 (AURA risk scores)
