@@ -425,3 +425,52 @@ func TestAppLogger_RedactsCommandAttr(t *testing.T) {
 		t.Errorf("msg field stripped: %s", s)
 	}
 }
+
+func TestDecisionLogger_SessionTokens_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	paths := DefaultPaths(dir)
+	dl, err := OpenDecisionLogger(paths, 10, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dl.Decision(DecisionRecord{
+		GuardVersion:  "test",
+		ToolName:      "Bash",
+		Tier:          "instant_allow",
+		Verdict:       "allow",
+		LatencyUS:     100,
+		SessionTokens: 1234,
+	})
+	dl.Decision(DecisionRecord{
+		GuardVersion: "test",
+		ToolName:     "Bash",
+		Tier:         "instant_allow",
+		Verdict:      "allow",
+		LatencyUS:    100,
+		// SessionTokens = 0 intentionally
+	})
+	dl.Close()
+
+	data, err := os.ReadFile(paths.Decisions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitN(strings.TrimRight(string(data), "\n"), "\n", 2)
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines, got %d:\n%s", len(lines), data)
+	}
+
+	// First line must have session_tokens = 1234.
+	var r1 ReadRecord
+	if err := json.Unmarshal([]byte(lines[0]), &r1); err != nil {
+		t.Fatalf("line 1 decode: %v", err)
+	}
+	if r1.SessionTokens != 1234 {
+		t.Errorf("line 1 SessionTokens: want 1234, got %d", r1.SessionTokens)
+	}
+
+	// Second line must NOT contain the key at all (omitempty when zero).
+	if strings.Contains(lines[1], "session_tokens") {
+		t.Errorf("session_tokens key must be absent when zero, got: %s", lines[1])
+	}
+}

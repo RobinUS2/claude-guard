@@ -78,8 +78,9 @@ type ReadRecord struct {
 	Verdict      string      `json:"verdict,omitempty"`
 	Rule         string      `json:"rule,omitempty"`
 	Reason       string      `json:"reason,omitempty"`
-	LatencyUS    int64       `json:"latency_us,omitempty"`
-	Shadow       *ReadShadow `json:"shadow,omitempty"`
+	LatencyUS     int64       `json:"latency_us,omitempty"`
+	SessionTokens int64       `json:"session_tokens,omitempty"`
+	Shadow        *ReadShadow `json:"shadow,omitempty"`
 }
 
 // ReadShadow mirrors the shadow group written by decisionAttrs.
@@ -109,6 +110,11 @@ type DecisionRecord struct {
 	Reason       string
 	SkipReason   string `json:"skip_reason,omitempty"`
 	LatencyUS    int64
+	// SessionTokens is an approximate count of tokens in the Claude Code
+	// transcript at decision time, derived from transcript file byte length / 5.
+	// Zero means the transcript path was unavailable or the file was empty.
+	// Omitted from the log entry when zero.
+	SessionTokens int64
 
 	// Shadow fields: populated when shadow mode runs a tier it didn't enforce.
 	Shadow *ShadowFields
@@ -324,6 +330,9 @@ func decisionAttrs(rec DecisionRecord) []slog.Attr {
 			reason = reason[:497] + "..."
 		}
 		attrs = append(attrs, slog.String("reason", reason))
+	}
+	if rec.SessionTokens > 0 {
+		attrs = append(attrs, slog.Int64("session_tokens", rec.SessionTokens))
 	}
 	if rec.Shadow != nil {
 		var sub []any

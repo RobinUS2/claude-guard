@@ -37,6 +37,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/redact"
 	"github.com/RobinUS2/claude-guard/internal/review"
 	"github.com/RobinUS2/claude-guard/internal/rules"
+	"github.com/RobinUS2/claude-guard/internal/tokensnapshot"
 	"github.com/RobinUS2/claude-guard/internal/shellparse"
 	"github.com/RobinUS2/claude-guard/internal/store"
 	"github.com/RobinUS2/claude-guard/internal/version"
@@ -101,6 +102,10 @@ type Input struct {
 	// GitPushContext is populated by Tier 2.7 for git push commands.
 	// Injected into the LLM prompt to provide repo risk context.
 	GitPushContext string
+	// TranscriptPath is the path to the Claude Code session transcript file.
+	// Populated from the PreToolUse hook payload. Used to snapshot approximate
+	// session token count at decision time. Empty when hook does not provide it.
+	TranscriptPath string
 }
 
 // Output is the engine's decision plus metadata for logging/debugging.
@@ -1680,6 +1685,7 @@ func (e *Engine) record(in Input, out Output) {
 			Tier4LLM:   out.Shadow.Tier4LLM,
 		}
 	}
+	rec.SessionTokens = tokensnapshot.Count(in.TranscriptPath)
 	e.log.Decision(rec)
 }
 
