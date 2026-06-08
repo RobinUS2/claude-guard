@@ -281,6 +281,12 @@ per session per pattern. Batch them at the end.
 - What's in the commit — size, files changed
 - Whether CI/CD is triggered by this repo's main branch
 
+### Token Budget:
+- Each uninterrupted stretch consumes tokens before the next user-approval.
+- Run 'claude-guard stats' to see your median tokens-between-interrupts.
+- High token stretches = efficient flow. Low = frequent approvals burning budget.
+- Batch approval-gated steps to end to maximise tokens spent on productive work.
+
 ### Quick reference:
   Auto-allow:  git push origin feature-*, go test, make test, find, grep
   LLM+cache:   git push origin main, make provision-diff, gcloud deploy

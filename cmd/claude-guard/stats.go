@@ -222,6 +222,11 @@ func cmdStats(args []string) int {
 			fmt.Printf("    p95:     %d\n", percentileInt(flowQuality, 0.95))
 			fmt.Printf("    max:     %d\n", percentileInt(flowQuality, 1.00))
 		}
+		if len(agg.tokenStretches) >= 3 {
+			fmt.Println("  tokens between interrupts (approx):")
+			fmt.Printf("    median:  %s\n", fmtTokens(percentileInt64(agg.tokenStretches, 0.50)))
+			fmt.Printf("    p95:     %s\n", fmtTokens(percentileInt64(agg.tokenStretches, 0.95)))
+		}
 		userApproved := agg.interruptCount
 		unanswered := 0
 		if learnedPatterns > 0 && userApproved > learnedPatterns {
@@ -360,17 +365,22 @@ type aggregation struct {
 	// session boundaries: first and last event per session
 	sessionFirst map[string]time.Time
 	sessionLast  map[string]time.Time
+
+	// token-based interrupt tracking
+	sessionLastInterruptToken map[string]int64 // token snapshot at last Continue verdict per session
+	tokenStretches            []int64          // delta tokens between consecutive interrupts
 }
 
 func newAggregation() *aggregation {
 	return &aggregation{
-		byVerdict:      map[string]int{},
-		byTier:         map[string]int{},
-		byTier4Shadow:  map[string]int{},
-		stopByRule:     map[string]int{},
-		interruptTimes: map[string][]time.Time{},
-		sessionFirst:   map[string]time.Time{},
-		sessionLast:    map[string]time.Time{},
+		byVerdict:                 map[string]int{},
+		byTier:                    map[string]int{},
+		byTier4Shadow:             map[string]int{},
+		stopByRule:                map[string]int{},
+		interruptTimes:            map[string][]time.Time{},
+		sessionFirst:              map[string]time.Time{},
+		sessionLast:               map[string]time.Time{},
+		sessionLastInterruptToken: map[string]int64{},
 	}
 }
 
@@ -421,6 +431,19 @@ func (a *aggregation) add(rec *clog.ReadRecord) {
 	if strings.EqualFold(rec.Verdict, "continue") {
 		a.interruptCount++
 		a.interruptTimes[sid] = append(a.interruptTimes[sid], ts)
+	}
+
+	// Token-based stretch tracking (sid is always non-empty here).
+	if rec.SessionTokens > 0 && strings.EqualFold(rec.Verdict, "continue") {
+		if last, ok := a.sessionLastInterruptToken[sid]; ok {
+			if rec.SessionTokens > last {
+				a.tokenStretches = append(a.tokenStretches, rec.SessionTokens-last)
+			}
+		} else {
+			// First interrupt in this session — delta from transcript start.
+			a.tokenStretches = append(a.tokenStretches, rec.SessionTokens)
+		}
+		a.sessionLastInterruptToken[sid] = rec.SessionTokens
 	}
 }
 
@@ -514,6 +537,31 @@ func percentileInt(values []int, p float64) int {
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
+}
+
+// percentileInt64 returns the p-th percentile from a sorted int64 slice.
+func percentileInt64(values []int64, p float64) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]int64(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	idx := int(float64(len(sorted)-1) * p)
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+// fmtTokens formats an approximate token count as "1.2k" or "850".
+func fmtTokens(n int64) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // computeStretches calculates uninterrupted time stretches from the

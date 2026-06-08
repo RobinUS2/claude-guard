@@ -109,12 +109,13 @@ func cmdDecide(_ []string) int {
 
 	// Build the engine input from the parsed tool_input.
 	in := engine.Input{
-		ToolName:  req.ToolName,
-		CWD:       req.CWD,
-		SessionID: req.SessionID,
-		ToolUseID: req.ToolUseID,
-		AgentID:   req.AgentID,
-		AgentType: req.AgentType,
+		ToolName:       req.ToolName,
+		CWD:            req.CWD,
+		SessionID:      req.SessionID,
+		ToolUseID:      req.ToolUseID,
+		AgentID:        req.AgentID,
+		AgentType:      req.AgentType,
+		TranscriptPath: req.TranscriptPath,
 	}
 	switch req.ToolName {
 	case "Bash":
