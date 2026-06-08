@@ -70,4 +70,18 @@ func TestTokenStretches_MultiSession(t *testing.T) {
 	if len(agg.tokenStretches) != 3 {
 		t.Fatalf("want 3 stretches, got %d: %v", len(agg.tokenStretches), agg.tokenStretches)
 	}
+	var has1000, has2000, has3000 bool
+	for _, s := range agg.tokenStretches {
+		switch s {
+		case 1000:
+			has1000 = true
+		case 2000:
+			has2000 = true
+		case 3000:
+			has3000 = true
+		}
+	}
+	if !has1000 || !has2000 || !has3000 {
+		t.Fatalf("want stretches [1000, 2000, 3000] in any order, got %v", agg.tokenStretches)
+	}
 }
