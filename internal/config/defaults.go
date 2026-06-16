@@ -359,7 +359,8 @@ func DefaultBlockRules() []rules.Rule {
 				"state/push",
 				"state/replace-provider",
 				"state/rename",
-				"import", // any `terraform import` args = deny
+				// "import" removed: terraform import is recoverable (undo with
+				// `terraform state rm`) — prompt the user instead of hard-blocking.
 			},
 			Reason: "terraform state mutation requires user approval",
 		},
