@@ -54,6 +54,7 @@ type Parsed struct {
 type Features struct {
 	HasRedirect            bool // any >, >>, <, <&, >&, <<, <<<
 	HasFdOnlyRedirects     bool // true when HasRedirect and ALL redirects are fd-to-fd (>&N or <&N)
+	HasNullDevRedirects    bool // true when HasRedirect and ALL redirects target /dev/null (2>/dev/null etc.)
 	HasSingleQuotedHeredoc bool // at least one <<'MARKER' heredoc (no expansion in body)
 	HasPipe                bool // any |
 	HasSubshell            bool // (...) group or explicit subshell
@@ -367,6 +368,38 @@ func (p *Parsed) extract() {
 			return allFd // stop walking once we find a non-fd redirect
 		})
 		p.Features.HasFdOnlyRedirects = allFd
+	}
+
+	// HasNullDevRedirects: true when HasRedirect and every redirect in the
+	// script is an output redirect to /dev/null (2>/dev/null, >/dev/null, etc.).
+	// These are harmless output suppressors — no file read, no write to real paths.
+	if p.Features.HasRedirect && !p.Features.HasFdOnlyRedirects {
+		allNull := true
+		sawRedir := false
+		syntax.Walk(p.File, func(node syntax.Node) bool {
+			r, ok := node.(*syntax.Redirect)
+			if !ok {
+				return true
+			}
+			sawRedir = true
+			// Only output redirects (> and >>); < / << / <& are not null-safe patterns.
+			if r.Op != syntax.RdrOut && r.Op != syntax.AppOut {
+				allNull = false
+				return false
+			}
+			// Word must be exactly "/dev/null".
+			if r.Word == nil {
+				allNull = false
+				return false
+			}
+			lit, litOK := resolveWord(r.Word)
+			if !litOK || lit != "/dev/null" {
+				allNull = false
+				return false
+			}
+			return true
+		})
+		p.Features.HasNullDevRedirects = allNull && sawRedir
 	}
 
 	// Post-pass: attach Stmt.Redirs to each Call via CallExpr pointer

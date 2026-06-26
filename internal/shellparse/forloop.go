@@ -68,7 +68,7 @@ func ExpandForLoop(p *Parsed, maxIterations int) (*ForLoopExpansion, bool) {
 	if f.HasSubshell || f.HasCmdSub || f.HasProcSub || f.HasBackground {
 		return nil, false
 	}
-	if f.HasRedirect && !f.HasFdOnlyRedirects {
+	if f.HasRedirect && !f.HasFdOnlyRedirects && !f.HasNullDevRedirects {
 		return nil, false
 	}
 	if f.HasPipe {

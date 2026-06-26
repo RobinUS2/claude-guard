@@ -1152,11 +1152,12 @@ func (r *PipelineReadonly) Kind() string { return "pipeline_readonly" }
 func (r *PipelineReadonly) Eval(p *shellparse.Parsed) (Verdict, string) {
 	f := p.Features
 	// Reject shell features that can hide side effects or change program
-	// semantics. fd-to-fd redirects (2>&1) are harmless and allowed.
+	// semantics. fd-to-fd redirects (2>&1) and /dev/null output suppression
+	// (2>/dev/null) are harmless and allowed.
 	if f.HasSubshell || f.HasCmdSub || f.HasProcSub || f.HasBackground {
 		return NoMatch, ""
 	}
-	if f.HasRedirect && !f.HasFdOnlyRedirects {
+	if f.HasRedirect && !f.HasFdOnlyRedirects && !f.HasNullDevRedirects {
 		return NoMatch, ""
 	}
 	if len(p.Pipelines) == 0 {

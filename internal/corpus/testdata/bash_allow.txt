@@ -299,6 +299,15 @@ git log --oneline origin/main..HEAD && git status
 claude-guard explain --last-n 50 2>&1 | head -200
 claude-guard stats | head -20
 
+# --- pipeline-readonly: 2>/dev/null output suppression (devops walkthrough) ---
+gcloud scheduler jobs list --project=content-gen-484211 --format="table(name,state,lastAttemptTime)" 2>/dev/null | head -30
+gcloud pubsub subscriptions list --project=content-gen-484211 --filter="deadLetterPolicy:*" --format="value(name)" 2>/dev/null | head -10
+gcloud logging read "severity>=ERROR" --project=content-gen-484211 --limit=20 2>/dev/null | tail -50
+gcloud sql instances list --project=content-gen-484211 --format="table(name,state,region)" 2>/dev/null | head -20
+gh search prs --owner taufinity --merged --limit 10 --json number,title,author,repository,mergedAt,url 2>/dev/null
+gcloud run services list --project=content-gen-484211 --format="table(name,region)" 2>/dev/null | head -20
+git log --oneline -10 2>/dev/null | head -10
+
 # --- sed-readonly: -n + print-only script, no side-effecting commands ---
 sed -n '60,100p' /tmp/file
 sed -n '10p' /tmp/file
