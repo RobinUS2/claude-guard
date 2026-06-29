@@ -93,6 +93,11 @@ type AnchoredCommand struct {
 	// Mirrors BlockedCommand.RequireFlagsAny so allow rules can express
 	// "either --flag or its short form".
 	RequireFlagsAny [][]string
+	// RequireFirstPositionalPrefix, if non-empty, requires that the first
+	// positional argument starts with one of the listed prefixes. Used to
+	// restrict interpreter programs (python3, node) to trusted paths such as
+	// Claude's session-isolated scratchpad without needing the LLM tier.
+	RequireFirstPositionalPrefix []string
 }
 
 func (r *AnchoredCommand) Name() string { return r.RuleName }
@@ -137,6 +142,26 @@ func (r *AnchoredCommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 	}
 	if len(r.RequireFlagsAny) > 0 && !flagsMatchAllGroups(c.Flags, r.RequireFlagsAny) {
 		return NoMatch, ""
+	}
+	if len(r.RequireFirstPositionalPrefix) > 0 {
+		if len(c.Positional) == 0 {
+			return NoMatch, ""
+		}
+		// Reject paths with .. traversal before prefix check — prevents
+		// /private/tmp/claude-501/../../../etc/evil.py bypass.
+		if strings.Contains(c.Positional[0], "..") {
+			return NoMatch, ""
+		}
+		matched := false
+		for _, pfx := range r.RequireFirstPositionalPrefix {
+			if strings.HasPrefix(c.Positional[0], pfx) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return NoMatch, ""
+		}
 	}
 	return Match, r.RuleName
 }
@@ -456,6 +481,39 @@ func (r *ScriptInterpreterExec) Eval(p *shellparse.Parsed) (Verdict, string) {
 		}
 		if hasExecFlag && len(c.Positional) > 0 {
 			return Match, r.Reason
+		}
+	}
+	return NoMatch, ""
+}
+
+// --- ScriptInterpreterPathTraversal: block rule that denies script interpreter
+// invocations where the script file path contains `..` components. Prevents
+// escaping a trusted directory prefix (e.g. scratchpad) via path traversal.
+
+// ScriptInterpreterPathTraversal blocks `python3 /trusted/path/../../../evil.py` shapes.
+type ScriptInterpreterPathTraversal struct {
+	RuleName     string
+	Interpreters []string // python, python3, node, ruby, etc.
+	Reason       string
+}
+
+func (r *ScriptInterpreterPathTraversal) Name() string { return r.RuleName }
+func (r *ScriptInterpreterPathTraversal) Kind() string {
+	return "script_interpreter_path_traversal"
+}
+
+func (r *ScriptInterpreterPathTraversal) Eval(p *shellparse.Parsed) (Verdict, string) {
+	for _, c := range p.Calls {
+		if c.Nesting != shellparse.NestTopLevel {
+			continue
+		}
+		if !stringIn(baseProgram(c.Program), r.Interpreters) && !stringIn(c.Program, r.Interpreters) {
+			continue
+		}
+		for _, pos := range c.Positional {
+			if strings.Contains(pos, "..") {
+				return Match, r.Reason
+			}
 		}
 	}
 	return NoMatch, ""
@@ -1052,11 +1110,11 @@ func (r *CdPrefixed) Eval(p *shellparse.Parsed) (Verdict, string) {
 		return NoMatch, ""
 	}
 	// Reject shell features that change semantics beyond directory context.
-	// fd-to-fd redirects (2>&1) are harmless rewirings; allow them through.
+	// fd-to-fd redirects (2>&1) and /dev/null suppression are harmless; allow them through.
 	if f.HasSubshell || f.HasCmdSub || f.HasProcSub || f.HasBackground {
 		return NoMatch, ""
 	}
-	if f.HasRedirect && !f.HasFdOnlyRedirects {
+	if f.HasRedirect && !f.HasFdOnlyRedirects && !f.HasNullDevRedirects {
 		return NoMatch, ""
 	}
 	// Need at least 2 pipelines (cd + at least one command).
@@ -1143,7 +1201,12 @@ func (r *CdPrefixed) matchesInnerRule(c *shellparse.Call) bool {
 type PipelineReadonly struct {
 	RuleName        string
 	InnerRules      []Rule
-	SafePipeTargets []string // read-only programs allowed in pipe tails
+	SafePipeTargets []string // read-only programs allowed in pipe tails (no arg restrictions)
+	// SafePipeTargetPaths allows programs in pipe tails when ALL their
+	// positional args start with one of the given path prefixes.
+	// Use for interpreters (python3, node) that are safe only when the
+	// script being run lives in a trusted directory (e.g. Claude's scratchpad).
+	SafePipeTargetPaths map[string][]string // program basename → allowed path prefixes
 }
 
 func (r *PipelineReadonly) Name() string { return r.RuleName }
@@ -1184,12 +1247,46 @@ func (r *PipelineReadonly) Eval(p *shellparse.Parsed) (Verdict, string) {
 			if tailCall.HasUnresolved {
 				return NoMatch, ""
 			}
-			if !stringIn(baseProgram(tailCall.Program), r.SafePipeTargets) {
-				return NoMatch, ""
+			prog := baseProgram(tailCall.Program)
+			if stringIn(prog, r.SafePipeTargets) {
+				continue
 			}
+			// Path-restricted interpreter targets (e.g. python3 in scratchpad).
+			if prefixes, ok := r.SafePipeTargetPaths[prog]; ok {
+				if tailPipeProgramPathOK(tailCall.Positional, prefixes) {
+					continue
+				}
+			}
+			return NoMatch, ""
 		}
 	}
 	return Match, r.RuleName
+}
+
+// tailPipeProgramPathOK returns true when every positional arg of a pipe-tail
+// call starts with at least one of the allowed path prefixes. Empty positional
+// list returns false (no script = nothing to allow).
+func tailPipeProgramPathOK(positionals []string, prefixes []string) bool {
+	if len(positionals) == 0 {
+		return false
+	}
+	for _, pos := range positionals {
+		// Reject path traversal before prefix check.
+		if strings.Contains(pos, "..") {
+			return false
+		}
+		matched := false
+		for _, pfx := range prefixes {
+			if strings.HasPrefix(pos, pfx) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *PipelineReadonly) matchesInnerRule(c *shellparse.Call) bool {

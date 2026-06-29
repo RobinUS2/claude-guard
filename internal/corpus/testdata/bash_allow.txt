@@ -272,6 +272,14 @@ cd /tmp && ls -la | grep foo
 cd /tmp && git log --oneline | wc -l
 cd /Users/robin/Documents/code/ai-site-gen && git log --oneline -5 && echo "---" && git show e48ecd1 --stat | head -10
 cd /tmp && gh pr list
+cd /Users/robin/Documents/code/cto-as-a-service && git log --oneline --since="2026-06-20" 2>/dev/null | head -20
+cd /Users/robin/Documents/code/ai-site-gen && gcloud builds list --project=content-gen-484211 --limit=5 2>/dev/null | head -20
+
+# --- gcloud config readonly ---
+gcloud config get-value project 2>/dev/null
+gcloud config get-value account 2>/dev/null
+gcloud config list
+gcloud config get-value project 2>/dev/null; gcloud config get-value account 2>/dev/null; gcloud auth list 2>/dev/null | head -5
 
 # --- pipeline-readonly: pipe tails to safe sinks ---
 git log | head
@@ -307,6 +315,7 @@ gcloud sql instances list --project=content-gen-484211 --format="table(name,stat
 gh search prs --owner taufinity --merged --limit 10 --json number,title,author,repository,mergedAt,url 2>/dev/null
 gcloud run services list --project=content-gen-484211 --format="table(name,region)" 2>/dev/null | head -20
 git log --oneline -10 2>/dev/null | head -10
+gh search prs --owner taufinity --merged --limit=10 --json number,title,author,mergedAt,url,repository 2>/dev/null | python3 /private/tmp/claude-501/scratchpad/check-team-prs.py
 
 # --- sed-readonly: -n + print-only script, no side-effecting commands ---
 sed -n '60,100p' /tmp/file
@@ -380,3 +389,10 @@ git push
 git push origin feature-branch
 git push origin v1.2.3
 # cd + push: goes to LLM for project-context judgment (removed from allow corpus)
+
+# --- scratchpad-interpreter: python3/python/node/ruby from Claude's scratchpad ---
+python3 /private/tmp/claude-501/-Users-robin-Documents-code-cto-as-a-service/36eec791-35c0-49be-a681-6e8f04bd1ba7/scratchpad/parse-runs.py
+python3 /private/tmp/claude-501/scratchpad/analysis.py
+python /private/tmp/claude-501/scratchpad/compute.py
+node /private/tmp/claude-501/scratchpad/process.js
+ruby /private/tmp/claude-501/scratchpad/transform.rb

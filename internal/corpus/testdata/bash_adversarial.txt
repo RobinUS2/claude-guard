@@ -100,7 +100,6 @@ terraform state mv a b
 terraform state push ./state.tfstate
 terraform state replace-provider hashicorp/aws evil/aws
 terraform state rename a b
-terraform import aws_s3_bucket.foo bar
 
 # --- step 13: shell -c '<opaque>' ---
 bash -c 'rm -rf /etc'
@@ -244,3 +243,4 @@ node --eval 'require("fs").readFileSync("/etc/passwd")'
 # auto-allow), which still represents the correct safety floor:
 # LoopReadonly is the only new auto-approve path, and it rejects
 # these.
+

@@ -260,6 +260,16 @@ func DefaultBlockRules() []rules.Rule {
 			Reason:       "script interpreter with inline code (-c / -e) wraps opaque code",
 		},
 
+		// Script interpreter path traversal — blocks `python3 /private/tmp/claude-501/../../../etc/evil.py`
+		// and similar attempts to escape a trusted directory prefix via `..` components.
+		// The tier-2 scratchpad-interpreter rule rejects these with NoMatch (the `..` guard),
+		// but that only causes a fall-through; this tier-1 rule turns it into a hard deny.
+		&rules.ScriptInterpreterPathTraversal{
+			RuleName:     "script-interpreter-path-traversal",
+			Interpreters: []string{"python", "python3", "perl", "ruby", "node"},
+			Reason:       "path traversal (..) in interpreter script arg can escape trusted directory",
+		},
+
 		// git config writes — tier-2 `git-readonly` allows `git config`
 		// for the common read shapes (`git config user.name`,
 		// `git config --list`), but `git config user.signingkey EVIL`
@@ -628,6 +638,31 @@ func DefaultAllowRules() []rules.Rule {
 		},
 	}
 
+	// gcloud config read — `gcloud config get-value <key>` and
+	// `gcloud config list`. NestedSubcommandAllow can't match
+	// `gcloud config get-value project` because the last positional
+	// is `project` (a noun key), not the verb `get-value`.
+	// AnchoredCommand with RequireSubcmd2Any handles the shape:
+	//   gcloud config get-value project
+	//   gcloud config get-value account
+	//   gcloud config list
+	gcloudConfigReadonly := &rules.AnchoredCommand{
+		RuleName:          "gcloud-config-readonly",
+		Programs:          []string{"gcloud"},
+		RequireSubcmdAny:  []string{"config"},
+		RequireSubcmd2Any: []string{"get-value", "list"},
+		ForbidFlags: []string{
+			"--impersonate-service-account",
+			"--account",
+			"--configuration",
+			"--credential-file-override",
+			"--billing-project",
+			"--access-token-file",
+			"--quota-project",
+			"--log-http",
+		},
+	}
+
 	// terraform read-only
 	//
 	// `state` is intentionally NOT in this list — the subcommand
@@ -700,6 +735,17 @@ func DefaultAllowRules() []rules.Rule {
 		RuleName:         "go-readonly",
 		Programs:         []string{"go"},
 		RequireSubcmdAny: []string{"version", "env", "list", "vet", "fmt", "doc", "help", "build", "test", "run"},
+	}
+
+	// Script interpreters running files from Claude's session scratchpad.
+	// The scratchpad (/private/tmp/claude-<uid>/) is session-isolated and
+	// only Claude writes there — running a script from it is equivalent to
+	// running it via pipe (already allowed by pipeline-readonly). No LLM
+	// needed: the trust level is structurally determined by the path prefix.
+	scratchpadInterpreter := &rules.AnchoredCommand{
+		RuleName:                    "scratchpad-interpreter",
+		Programs:                    []string{"python3", "python", "node", "ruby"},
+		RequireFirstPositionalPrefix: []string{"/private/tmp/claude-", "/tmp/claude-"},
 	}
 
 	// npm/yarn/pnpm read-only
@@ -818,6 +864,7 @@ func DefaultAllowRules() []rules.Rule {
 		gitReadonly,
 		gcloudReadonly,
 		gcloudLoggingReadonly,
+		gcloudConfigReadonly,
 		gsutilReadonly,
 		bqReadonly,
 		bqDryRunUnderscore,
@@ -833,6 +880,7 @@ func DefaultAllowRules() []rules.Rule {
 		ghNounVerbReadonly,
 		ghPrApprove,
 		claudeGuardReadonly,
+		scratchpadInterpreter,
 	}
 	safePipeTargets := []string{
 		"head", "tail", "wc", "sort", "uniq",
@@ -852,6 +900,7 @@ func DefaultAllowRules() []rules.Rule {
 		gitReadonly,
 		gcloudReadonly,
 		gcloudLoggingReadonly,
+		gcloudConfigReadonly,
 		gsutilReadonly,
 		bqReadonly,
 		bqDryRunUnderscore,
@@ -868,6 +917,7 @@ func DefaultAllowRules() []rules.Rule {
 		ghPrApprove,
 		claudeGuardReadonly,
 		catHeredocWrite,
+		scratchpadInterpreter,
 
 		// curl to trusted domains — allows all methods except DELETE.
 		// Mutations (PUT/POST/PATCH) are normal operational work.
@@ -919,6 +969,15 @@ func DefaultAllowRules() []rules.Rule {
 			RuleName:        "pipeline-readonly",
 			InnerRules:      innerReadRules,
 			SafePipeTargets: safePipeTargets,
+			// Allow piping into python3/python when the script lives in
+			// Claude's own scratchpad (/private/tmp/claude-<uid>/). The
+			// scratchpad is session-isolated and only Claude writes there,
+			// so running a script from it carries the same risk as running
+			// it directly (already permitted).
+			SafePipeTargetPaths: map[string][]string{
+				"python3": {"/private/tmp/claude-"},
+				"python":  {"/private/tmp/claude-"},
+			},
 		},
 
 		// Bounded for-loops over literal tokens whose body only

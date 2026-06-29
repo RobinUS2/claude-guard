@@ -213,6 +213,11 @@ func tier2Programs() map[string]string {
 		var programs []string
 		switch v := r.(type) {
 		case *rules.AnchoredCommand:
+			// Skip rules that only allow specific path prefixes — they don't
+			// cover arbitrary settings.json patterns for those programs.
+			if len(v.RequireFirstPositionalPrefix) > 0 {
+				continue
+			}
 			programs = v.Programs
 		case *rules.NestedSubcommandAllow:
 			programs = v.Programs

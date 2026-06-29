@@ -110,6 +110,10 @@ R=rm; $R -rf /
 # --- terraform state reads now instant-allow via terraform-readonly.
 # state-mutating verbs (rm/mv/push) still fall through via the
 # SafeVerbs check AND are denied by tier-1 `terraform-state-mutation`.
+#
+# terraform import is recoverable (undo with `terraform state rm`) so
+# it prompts the user rather than hard-blocking via tier-1.
+terraform import aws_s3_bucket.foo bar
 
 # --- step 13: shell without -c still falls through to LLM ---
 bash script.sh
@@ -269,3 +273,11 @@ gcloud logging views delete foo
 gcloud logging sinks delete read
 gcloud --quiet logging sinks delete foo
 gcloud --quiet logging buckets delete foo
+
+# scratchpad-interpreter: scripts outside Claude's scratchpad must NOT auto-allow
+# (fall through to LLM / user prompt — not a hard deny, not an auto-allow)
+python3 /tmp/evil.py
+python3 /Users/robin/Documents/evil.py
+python /home/user/script.py
+node /var/www/html/exploit.js
+# NOTE: path-traversal cases (/../) are tier-1 DENY — see bash_adversarial.txt
