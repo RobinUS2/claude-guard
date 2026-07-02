@@ -57,6 +57,10 @@ func run(args []string) int {
 	switch args[0] {
 	case "decide":
 		return cmdDecide(args[1:])
+	case "webfetch":
+		return cmdWebFetch(args[1:])
+	case "webfetch-test":
+		return cmdWebFetchTest(args[1:])
 	case "test":
 		return cmdTest(args[1:])
 	case "monitor", "tail":
