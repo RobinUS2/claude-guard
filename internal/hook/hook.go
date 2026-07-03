@@ -1,4 +1,4 @@
-// Package hook speaks the Claude Code PreToolUse protocol.
+// Package hook speaks the Claude Code PreToolUse and PermissionRequest protocols.
 //
 // It reads a single JSON object from stdin (the tool-use request) and
 // writes a single JSON object to stdout (the hook response). The response
@@ -209,6 +209,46 @@ func AllowWithMessage(reason, msg string) Response {
 // Use when the engine has no verdict but wants to hint Claude (e.g. budget exhausted, suggest rewrite).
 func ContinueWithMessage(msg string) Response {
 	return Response{UserMessage: msg}
+}
+
+// PermissionResponse is the JSON shape for PermissionRequest hook responses.
+//
+// PermissionRequest hooks use a different wire format than PreToolUse hooks.
+// They expect a simple top-level {"decision":"allow|deny|ask","reason":"..."}
+// rather than the hookSpecificOutput envelope. Using the wrong format causes
+// Claude Code to fall through to the user permission prompt regardless of the
+// hook's intent.
+type PermissionResponse struct {
+	Decision string `json:"decision"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// AllowPermission auto-approves a PermissionRequest event (the dialog that
+// fires before Claude Code would show the user an "allow fetching this URL?"
+// prompt). Always use WritePermissionResponse to emit this.
+func AllowPermission(reason string) PermissionResponse {
+	return PermissionResponse{Decision: "allow", Reason: reason}
+}
+
+// DenyPermission blocks a PermissionRequest event. Reason is surfaced to the
+// user. Always use WritePermissionResponse to emit this.
+func DenyPermission(reason string) PermissionResponse {
+	return PermissionResponse{Decision: "deny", Reason: reason}
+}
+
+// AskPermission falls through to the normal user permission prompt. Used when
+// the inspector flags content as suspicious but not definitively unsafe, so the
+// user sees the prompt with the reason for context.
+func AskPermission(reason string) PermissionResponse {
+	return PermissionResponse{Decision: "ask", Reason: reason}
+}
+
+// WritePermissionResponse serialises a PermissionResponse to w.
+// Use this (not WriteResponse) for PermissionRequest hooks.
+func WritePermissionResponse(w io.Writer, resp PermissionResponse) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(resp)
 }
 
 // ReadRequest parses the PreToolUse JSON payload from r.

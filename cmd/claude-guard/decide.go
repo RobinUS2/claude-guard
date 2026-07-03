@@ -211,28 +211,50 @@ func cmdDecide(_ []string) int {
 	// Translate engine verdict to hook response.
 	// When the engine sets UserMessage, pass it through to the hook so
 	// Claude sees the BQ byte estimate or budget-exhausted hint inline.
-	var resp hook.Response
+	//
+	// PermissionRequest hooks use a completely different wire format from
+	// PreToolUse hooks: top-level {"decision":"allow|deny|ask"} rather than
+	// the hookSpecificOutput envelope. Using the wrong format causes Claude Code
+	// to ignore the hook result and always show the permission prompt.
 	reason := fmt.Sprintf("tier=%s rule=%s", out.Tier, out.Rule)
-	switch out.Verdict {
-	case engine.Allow:
-		if out.UserMessage != "" {
-			resp = hook.AllowWithMessage(reason, out.UserMessage)
-		} else {
-			resp = hook.Allow(reason)
+	if req.HookEventName == "PermissionRequest" {
+		var pResp hook.PermissionResponse
+		switch out.Verdict {
+		case engine.Allow:
+			pResp = hook.AllowPermission(reason)
+		case engine.Deny:
+			denyReason := fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule)
+			pResp = hook.DenyPermission(denyReason)
+		default:
+			pResp = hook.AskPermission("no verdict")
 		}
-	case engine.Deny:
-		resp = hook.Deny(fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule), out.Hint)
-	default:
-		if out.UserMessage != "" {
-			resp = hook.ContinueWithMessage(out.UserMessage)
-		} else {
-			resp = hook.Continue()
+		if err := hook.WritePermissionResponse(os.Stdout, pResp); err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: write response: %v\n", err)
+			return 1
 		}
-	}
-
-	if err := hook.WriteResponse(os.Stdout, resp); err != nil {
-		fmt.Fprintf(os.Stderr, "claude-guard: write response: %v\n", err)
-		return 1
+	} else {
+		var resp hook.Response
+		switch out.Verdict {
+		case engine.Allow:
+			if out.UserMessage != "" {
+				resp = hook.AllowWithMessage(reason, out.UserMessage)
+			} else {
+				resp = hook.Allow(reason)
+			}
+		case engine.Deny:
+			denyReason := fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule)
+			resp = hook.Deny(denyReason, out.Hint)
+		default:
+			if out.UserMessage != "" {
+				resp = hook.ContinueWithMessage(out.UserMessage)
+			} else {
+				resp = hook.Continue()
+			}
+		}
+		if err := hook.WriteResponse(os.Stdout, resp); err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: write response: %v\n", err)
+			return 1
+		}
 	}
 
 	// Close stdout so Claude Code unblocks immediately. After this point

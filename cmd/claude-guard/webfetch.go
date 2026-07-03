@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/RobinUS2/claude-guard/internal/hook"
@@ -18,35 +19,41 @@ import (
 // stdout. Always fails open — any error returns Allow so legitimate work is
 // never blocked by an inspector failure.
 func cmdWebFetch(_ []string) int {
+	return runWebFetch(os.Stdin, os.Stdout, os.Stderr)
+}
+
+// runWebFetch is the testable core of cmdWebFetch. It reads a PermissionRequest
+// JSON from in, inspects the URL, and writes the decision to out.
+func runWebFetch(in io.Reader, out io.Writer, errOut io.Writer) int {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "claude-guard webfetch: panic: %v\n", r)
-			_ = hook.WriteResponse(os.Stdout, hook.Allow("panic recovery"))
+			fmt.Fprintf(errOut, "claude-guard webfetch: panic: %v\n", r)
+			_ = hook.WritePermissionResponse(out, hook.AllowPermission("panic recovery"))
 		}
 	}()
 
-	req, err := hook.ReadRequest(os.Stdin)
+	req, err := hook.ReadRequest(in)
 	if err != nil {
-		_ = hook.WriteResponse(os.Stdout, hook.Allow("stdin parse error"))
+		_ = hook.WritePermissionResponse(out, hook.AllowPermission("stdin parse error"))
 		return 0
 	}
 
 	wf, err := req.WebFetch()
 	if err != nil {
 		// Not a WebFetch call — nothing to inspect, allow immediately.
-		_ = hook.WriteResponse(os.Stdout, hook.Allow("not a webfetch call"))
+		_ = hook.WritePermissionResponse(out, hook.AllowPermission("not a webfetch call"))
 		return 0
 	}
 
 	verdict := webinspect.Inspect(context.Background(), wf.URL, webinspect.Config{})
 
 	if verdict.Allow {
-		_ = hook.WriteResponse(os.Stdout, hook.AllowPermission(verdict.Reason))
+		_ = hook.WritePermissionResponse(out, hook.AllowPermission(verdict.Reason))
 	} else {
-		// Fail to Continue so Claude Code surfaces the normal permission prompt.
-		// Print the reason so it appears above the prompt.
-		fmt.Fprintln(os.Stderr, "claude-guard webfetch:", verdict.Reason)
-		_ = hook.WriteResponse(os.Stdout, hook.Continue())
+		// Surface the normal permission prompt so the user can decide.
+		// Print to errOut so the reason appears above the prompt.
+		fmt.Fprintln(errOut, "claude-guard webfetch:", verdict.Reason)
+		_ = hook.WritePermissionResponse(out, hook.AskPermission(verdict.Reason))
 	}
 
 	return 0
