@@ -213,34 +213,50 @@ func ContinueWithMessage(msg string) Response {
 
 // PermissionResponse is the JSON shape for PermissionRequest hook responses.
 //
-// PermissionRequest hooks use a different wire format than PreToolUse hooks.
-// They expect a simple top-level {"decision":"allow|deny|ask","reason":"..."}
-// rather than the hookSpecificOutput envelope. Using the wrong format causes
-// Claude Code to fall through to the user permission prompt regardless of the
-// hook's intent.
+// Correct wire format (per Claude Code docs):
+//
+//	{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}
+//
+// To fall through to the user prompt, return an empty PermissionResponse{} which
+// serialises as {} — Claude Code shows its normal dialog when no decision is set.
 type PermissionResponse struct {
-	Decision string `json:"decision"`
-	Reason   string `json:"reason,omitempty"`
+	HookSpecificOutput *permissionHookOutput `json:"hookSpecificOutput,omitempty"`
 }
 
-// AllowPermission auto-approves a PermissionRequest event (the dialog that
-// fires before Claude Code would show the user an "allow fetching this URL?"
-// prompt). Always use WritePermissionResponse to emit this.
-func AllowPermission(reason string) PermissionResponse {
-	return PermissionResponse{Decision: "allow", Reason: reason}
+type permissionHookOutput struct {
+	HookEventName string             `json:"hookEventName"`
+	Decision      permissionDecision `json:"decision"`
 }
 
-// DenyPermission blocks a PermissionRequest event. Reason is surfaced to the
-// user. Always use WritePermissionResponse to emit this.
-func DenyPermission(reason string) PermissionResponse {
-	return PermissionResponse{Decision: "deny", Reason: reason}
+type permissionDecision struct {
+	Behavior string `json:"behavior"`
 }
 
-// AskPermission falls through to the normal user permission prompt. Used when
-// the inspector flags content as suspicious but not definitively unsafe, so the
-// user sees the prompt with the reason for context.
-func AskPermission(reason string) PermissionResponse {
-	return PermissionResponse{Decision: "ask", Reason: reason}
+// AllowPermission auto-approves a PermissionRequest event without showing the
+// user a permission dialog.
+func AllowPermission(_ string) PermissionResponse {
+	return PermissionResponse{
+		HookSpecificOutput: &permissionHookOutput{
+			HookEventName: "PermissionRequest",
+			Decision:      permissionDecision{Behavior: "allow"},
+		},
+	}
+}
+
+// DenyPermission blocks a PermissionRequest event.
+func DenyPermission(_ string) PermissionResponse {
+	return PermissionResponse{
+		HookSpecificOutput: &permissionHookOutput{
+			HookEventName: "PermissionRequest",
+			Decision:      permissionDecision{Behavior: "deny"},
+		},
+	}
+}
+
+// AskPermission falls through to the normal user permission dialog by returning
+// an empty response. Claude Code shows its normal prompt when no decision is set.
+func AskPermission(_ string) PermissionResponse {
+	return PermissionResponse{}
 }
 
 // WritePermissionResponse serialises a PermissionResponse to w.
