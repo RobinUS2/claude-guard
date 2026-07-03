@@ -1,6 +1,6 @@
 module github.com/RobinUS2/claude-guard
 
-go 1.25.0
+go 1.25.11
 
 require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1

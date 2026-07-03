@@ -53,7 +53,10 @@ type File struct {
 	Allow          []AllowSpec `yaml:"allow"`
 	PromoteGlobal  []string    `yaml:"promote_global"`
 	Scope          string      `yaml:"scope"`           // project purpose for LLM context
-	TrustedDomains []string    `yaml:"trusted_domains"` // domains safe for curl/wget
+	TrustedDomains []string `yaml:"trusted_domains"` // domains safe for curl/wget
+	// TODO(security): disallow trusted_domains in project-local configs; require
+	// global config opt-in so a malicious .claude-guard.yml in a cloned repo
+	// cannot whitelist attacker-controlled domains. Track in plan item #17.
 }
 
 // AllowSpec is one allow-rule entry in the project config.
@@ -134,6 +137,12 @@ func FindConfigPath(cwd string) (string, error) {
 	}
 	return "", nil
 }
+
+// TODO(security): add a first-use trust gate. On the first load of a
+// .claude-guard.yml from a new repo path (not previously seen in the global
+// allowlist), prompt the user to review and trust it before applying any
+// allow-rules. Prevents a cloned repo from auto-approving arbitrary commands
+// without the user ever reading the config. Track in plan item #16.
 
 // Load walks up from cwd, finds the nearest ConfigFilename, parses
 // and validates it, and returns a *Config. Returns (nil, nil) when
@@ -231,6 +240,16 @@ var forbiddenAllowPrograms = map[string]struct{}{
 	"sh": {}, "bash": {}, "zsh": {}, "fish": {}, "ksh": {}, "dash": {}, "tcsh": {}, "csh": {},
 	"eval": {}, "exec": {}, "source": {}, ".": {},
 	"xargs": {}, // xargs wraps arbitrary commands; too broad for anchored allow
+	// Script interpreters — identical risk to shells: a project config
+	// pre-approving `python3 evil.py` is a direct RCE path from any
+	// .claude-guard.yml the user loads.
+	"python": {}, "python3": {}, "python2": {},
+	"node": {}, "nodejs": {},
+	"ruby": {}, "perl": {}, "php": {},
+	"osascript": {},                  // macOS AppleScript / JXA
+	"deno": {}, "bun": {},            // modern JS runtimes
+	"Rscript": {}, "rscript": {},     // R statistical language
+	"awk": {}, "gawk": {}, "mawk": {}, // awk is Turing-complete
 	// Raw network tools that can exfiltrate or execute remote payloads
 	"nc": {}, "ncat": {}, "socat": {}, "telnet": {},
 	// Process control (kill signals can cascade into destructive outcomes

@@ -598,12 +598,15 @@ func (e *Engine) checkSafeBrowsing(rawURL, toolUseID string) string {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	apiURL := "https://safebrowsing.googleapis.com/v4/threatMatches:find?key=" + apiKey
+	// Pass the API key as a header rather than a URL query parameter so it
+	// does not appear in Cloud Logging request URLs or HTTP access logs.
+	apiURL := "https://safebrowsing.googleapis.com/v4/threatMatches:find"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return ""
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Goog-Api-Key", apiKey)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

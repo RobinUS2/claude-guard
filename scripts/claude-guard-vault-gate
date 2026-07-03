@@ -49,5 +49,34 @@ if ! printf '%s\n' "$status" | grep -qi '\[unlocked'; then
 fi
 
 # Vault unlocked — forward to the real claude-guard.
-[ -f "$HOME/.config/claude-guard/keys.env" ] && . "$HOME/.config/claude-guard/keys.env"
+# Load keys.env if present, but only after verifying it is owner-only
+# (not group- or world-readable) and owned by the current user.
+# Use strict line-by-line parsing instead of `source` to prevent arbitrary
+# code execution from a compromised or world-writable file.
+KEYS_ENV="$HOME/.config/claude-guard/keys.env"
+if [ -f "$KEYS_ENV" ]; then
+  # stat -f on macOS, stat -c on Linux.
+  if stat --version >/dev/null 2>&1; then
+    # GNU stat
+    owner_uid=$(stat -c '%u' "$KEYS_ENV" 2>/dev/null)
+    perms=$(stat -c '%a' "$KEYS_ENV" 2>/dev/null)
+  else
+    # BSD/macOS stat
+    owner_uid=$(stat -f '%u' "$KEYS_ENV" 2>/dev/null)
+    perms=$(stat -f '%Lp' "$KEYS_ENV" 2>/dev/null)
+  fi
+  if [ "$owner_uid" = "$(id -u)" ] && [ "$perms" = "600" ]; then
+    # Safe to parse. Read KEY=VALUE lines; skip comments and blanks.
+    while IFS='=' read -r key val; do
+      case "$key" in
+        ''|\#*) continue ;;
+      esac
+      # Reject keys that are not plain identifiers.
+      case "$key" in
+        *[!A-Za-z0-9_]*) continue ;;
+      esac
+      export "$key=$val"
+    done < "$KEYS_ENV"
+  fi
+fi
 printf '%s' "$input" | exec "$CLAUDE_GUARD_BIN" decide

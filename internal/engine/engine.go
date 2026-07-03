@@ -466,6 +466,11 @@ func (e *Engine) Decide(in Input) Output {
 	// command's first program is in that profile's pre-approved list.
 	// Only fires for subagents (AgentID != ""); main-agent commands always
 	// go through the full pipeline. Tier 1 has already run unconditionally.
+	//
+	// TODO(security): enforce subcommand allowlist per agent trust profile.
+	// E.g. the Explore profile allows `git` but must restrict to read-only
+	// subcommands (status, log, diff, show) and block `git reset --hard`,
+	// `git checkout`, `echo pwned >> ~/.zshrc`, etc. Track in plan item #15.
 	if in.AgentID != "" && in.AgentType != "" && out.Shadow.Tier1Rule == "" {
 		if profile, ok := e.cfg.AgentTrustProfiles[in.AgentType]; ok {
 			program := firstProgram(in.Command)
@@ -501,6 +506,21 @@ func (e *Engine) Decide(in Input) Output {
 		verdict := e.store.ReadSessionApproval(in.SessionID, in.AgentID, sessKey)
 		switch verdict {
 		case "allow":
+			// Before honoring the cache hit, verify the command does not
+			// contain a danger flag that was absent when it was first approved.
+			// A cached "terraform apply" must NOT auto-approve
+			// "terraform apply -destroy". We reuse the same sequenceDangerFlags
+			// slice that Tier 2.6 already checks — no new logic needed.
+			hasDangerFlag := false
+			for _, flag := range sequenceDangerFlags {
+				if strings.Contains(in.Command, flag) {
+					hasDangerFlag = true
+					break
+				}
+			}
+			if hasDangerFlag {
+				break // fall through to LLM tier
+			}
 			if !e.cfg.ShadowMode {
 				out.Verdict = Allow
 				out.Tier = "session"

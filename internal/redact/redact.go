@@ -103,13 +103,22 @@ func New(extraSkip, extraReplace []Pattern) *Redactor {
 // appears in the literal command string.
 func (r *Redactor) Scan(command string) Result {
 	for _, p := range r.skip {
-		loc := p.Regex.FindStringIndex(command)
-		if loc == nil {
+		locs := p.Regex.FindAllStringIndex(command, -1)
+		if len(locs) == 0 {
 			continue
 		}
-		matched := command[loc[0]:loc[1]]
-		if isShellVarReference(matched) {
-			continue // safe — the actual secret isn't in the literal text
+		// Only skip the shell-var demotion when EVERY match in the command is
+		// a shell variable reference. If even one match contains a literal
+		// secret value, the command must be blocked regardless of other matches.
+		allShellVars := true
+		for _, loc := range locs {
+			if !isShellVarReference(command[loc[0]:loc[1]]) {
+				allShellVars = false
+				break
+			}
+		}
+		if allShellVars {
+			continue // every match is a shell var reference — no real secret in literal text
 		}
 		return Result{
 			Decision:   Skip,
@@ -168,11 +177,17 @@ var shellVarRE = regexp.MustCompile(`^\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-
 // variable references. Anything more complex stays conservative.
 func isShellVarReference(matched string) bool {
 	value := matched
-	// 1. Isolate the value portion: after "=" or ":" (whichever is last).
-	for _, sep := range []string{"=", ":"} {
-		if idx := strings.LastIndex(value, sep); idx >= 0 {
-			value = value[idx+1:]
-		}
+	// 1. Isolate the value portion.
+	// Strategy: if "=" is present use it as the key/value separator — the
+	// value is everything after the first "=". If no "=" is present fall
+	// back to the last ":" (covers "Authorization: Bearer $VAR" shapes).
+	// We do NOT apply both separators sequentially because
+	// "aws_secret=REAL:$X" would otherwise yield "$X" — a shell var that
+	// masks the real secret to the left of the colon.
+	if idx := strings.Index(value, "="); idx >= 0 {
+		value = value[idx+1:]
+	} else if idx := strings.LastIndex(value, ":"); idx >= 0 {
+		value = value[idx+1:]
 	}
 	value = strings.TrimSpace(value)
 	// 2. Strip any auth-scheme keyword ("Bearer ", "Basic ", etc.) that
@@ -285,6 +300,21 @@ func DefaultSkipPatterns() []Pattern {
 
 		// Private keys (PEM in command text — unlikely but devastating)
 		{Name: "pem-private-key", Regex: `-----BEGIN [A-Z ]*PRIVATE KEY-----`},
+
+		// Slack tokens (bot, user, app, workspace, refresh, socket)
+		{Name: "slack-token", Regex: `xox[bpars]-[0-9A-Za-z\-]{10,}`},
+
+		// Stripe live secret keys
+		{Name: "stripe-secret-key", Regex: `sk_live_[0-9a-zA-Z]{24,}`},
+
+		// npm access tokens
+		{Name: "npm-token", Regex: `npm_[A-Za-z0-9]{36}`},
+
+		// GCP service-account JSON (private_key_id field is a reliable anchor)
+		{Name: "gcp-sa-json", Regex: `"private_key_id"\s*:\s*"[a-f0-9]{40}"`},
+
+		// Azure Storage connection strings
+		{Name: "azure-storage-key", Regex: `DefaultEndpointsProtocol=https[^;]*;AccountKey=[A-Za-z0-9+/]{40,}[=]*`},
 	})
 }
 
