@@ -149,8 +149,9 @@ var chromeHeaders = [][2]string{
 
 // Verdict is the outcome of an Inspect call.
 type Verdict struct {
-	Allow  bool
-	Reason string
+	Allow    bool
+	Reason   string
+	Warnings []string // non-fatal errors collected during inspection; always log these
 }
 
 // Config controls inspector behaviour. Zero value uses all defaults.
@@ -242,7 +243,11 @@ func (c *Config) httpClient() *http.Client {
 // user sees the permission prompt rather than the inspector auto-approving
 // a request to an internal service.
 func Inspect(ctx context.Context, url string, cfg Config) Verdict {
-	allow := func(reason string) Verdict { return Verdict{Allow: true, Reason: reason} }
+	var warns []string
+	warn := func(msg string) { warns = append(warns, msg) }
+
+	allow := func(reason string) Verdict { return Verdict{Allow: true, Reason: reason, Warnings: warns} }
+	deny := func(reason string) Verdict { return Verdict{Allow: false, Reason: reason, Warnings: warns} }
 
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return allow("non-http url")
@@ -259,7 +264,7 @@ func Inspect(ctx context.Context, url string, cfg Config) Verdict {
 	// making any outbound request.
 	if !cfg.DisableSSRFCheck {
 		if err := checkSSRF(url); err != nil {
-			return Verdict{Allow: false, Reason: "SSRF guard: private/internal URL blocked"}
+			return deny("SSRF guard: " + err.Error())
 		}
 	}
 
@@ -269,45 +274,56 @@ func Inspect(ctx context.Context, url string, cfg Config) Verdict {
 
 	body, contentType, err := fetch(ctx, url, cfg)
 	if errors.Is(err, errSSRF) {
-		// A redirect led to a private IP — surface to user prompt.
-		return Verdict{Allow: false, Reason: "SSRF guard: redirect to private/internal URL blocked"}
+		return deny("SSRF guard: redirect to private/internal URL blocked")
 	}
-	if err != nil || body == "" {
-		return allow("fetch failed or empty")
+	if err != nil {
+		warn("fetch error: " + err.Error())
+		return allow("fetch error")
+	}
+	if body == "" {
+		warn("fetch returned empty body (content-type: " + contentType + ")")
+		return allow("fetch returned empty body")
 	}
 
 	if !isTextContent(contentType) {
-		return allow("binary content-type skipped")
+		warn("skipping inspection: binary content-type " + contentType)
+		return allow("binary content-type")
 	}
 
-	var verdict string
+	var (
+		verdict    string
+		llmErr     error
+	)
 	if anthropicKey != "" {
-		verdict, err = callHaiku(ctx, url, body, anthropicKey, cfg)
-		if err != nil {
+		verdict, llmErr = callHaiku(ctx, url, body, anthropicKey, cfg)
+		if llmErr != nil {
+			warn("haiku error: " + llmErr.Error())
 			verdict = ""
 		}
 	}
 	if verdict == "" && geminiKey != "" {
-		verdict, err = callGemini(ctx, url, body, geminiKey, cfg)
-		if err != nil {
+		verdict, llmErr = callGemini(ctx, url, body, geminiKey, cfg)
+		if llmErr != nil {
+			warn("gemini error: " + llmErr.Error())
 			verdict = ""
 		}
 	}
 	if verdict == "" {
-		return allow("inspection error")
+		return allow("all LLM calls failed")
 	}
 
 	if strings.HasPrefix(verdict, "SAFE") {
-		return Verdict{Allow: true, Reason: "safe"}
+		return Verdict{Allow: true, Reason: "safe", Warnings: warns}
 	}
 	if strings.HasPrefix(verdict, "UNSAFE") {
 		reason := strings.TrimSpace(strings.TrimPrefix(verdict, "UNSAFE:"))
 		if len(reason) > 120 {
 			reason = reason[:120]
 		}
-		return Verdict{Allow: false, Reason: "flagged: " + reason}
+		return deny("flagged: " + reason)
 	}
 
+	warn("inconclusive LLM verdict: " + verdict)
 	return allow("inconclusive verdict")
 }
 
