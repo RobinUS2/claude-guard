@@ -38,21 +38,27 @@ install: build
 			echo "  fix: cp $$installed_bin $$active_bin  (or remove the stale copy)"; \
 		fi; \
 	fi
+	@# TODO(security plan #18): move this CLAUDE.md splice into the Go binary
+	@# (cmd: claude-guard hints --install-claude-md) using os.CreateTemp inside
+	@# ~/.claude/ + atomic rename to prevent TOCTOU. For now, mktemp mitigates
+	@# the fixed-name /tmp race.
+	@#
 	@# Regenerate the claude-guard hints section in ~/.claude/CLAUDE.md.
 	@# Keeps Claude's auto-approval context fresh after every install.
 	@CLAUDE_MD="$(HOME)/.claude/CLAUDE.md"; \
-	HINTS_TMP=/tmp/cg_hints_$$$$.md; \
+	HINTS_TMP=$$(mktemp /tmp/cg_hints_XXXXXX.md); \
 	$(BIN_DIR)/$(BIN) hints --no-history > "$$HINTS_TMP" 2>/dev/null || true; \
 	if [ -f "$$CLAUDE_MD" ] && [ -s "$$HINTS_TMP" ]; then \
 		START='<!-- claude-guard-hints-start -->'; \
 		END='<!-- claude-guard-hints-end -->'; \
 		if grep -q 'claude-guard-hints-start' "$$CLAUDE_MD" 2>/dev/null; then \
+			CG_MD_TMP=$$(mktemp /tmp/cg_claude_md_XXXXXX); \
 			awk -v s="$$START" -v e="$$END" -v f="$$HINTS_TMP" \
 				'/<!--.*claude-guard-hints-start.*-->/{print s; while((getline l < f)>0) print l; print e; skip=1; next} \
 				 /<!--.*claude-guard-hints-end.*-->/{skip=0; next} \
-				 !skip{print}' "$$CLAUDE_MD" > /tmp/cg_claude_md_tmp && \
-			mv /tmp/cg_claude_md_tmp "$$CLAUDE_MD" && \
-			echo "  updated CLAUDE.md hints section"; \
+				 !skip{print}' "$$CLAUDE_MD" > "$$CG_MD_TMP" && \
+			mv "$$CG_MD_TMP" "$$CLAUDE_MD" && \
+			echo "  updated CLAUDE.md hints section" || rm -f "$$CG_MD_TMP"; \
 		else \
 			{ printf '\n\n%s\n' "$$START"; cat "$$HINTS_TMP"; printf '%s\n' "$$END"; } >> "$$CLAUDE_MD" && \
 			echo "  appended CLAUDE.md hints section"; \

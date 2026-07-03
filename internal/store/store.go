@@ -72,9 +72,13 @@ type Store struct {
 // they don't exist, and configures WAL mode with a 5-second busy
 // timeout. The parent directory is created if needed.
 func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("store: mkdir %s: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("store: mkdir %s: %w", dir, err)
 	}
+	// Restrict existing directories that were created with a broader mode
+	// by a prior version of claude-guard.
+	_ = os.Chmod(dir, 0o700)
 
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -97,6 +101,13 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: migrate: %w", err)
+	}
+
+	// Restrict DB files to owner-only. WAL and SHM siblings are created by
+	// SQLite on first write; chmod them here if they already exist. New files
+	// inherit the directory's restrictive mode (0700) set above.
+	for _, ext := range []string{"", "-wal", "-shm"} {
+		_ = os.Chmod(path+ext, 0o600)
 	}
 
 	return s, nil
@@ -839,35 +850,34 @@ const sessionApprovalCap = 500 // max rows per (session_id, agent_id)
 
 // WriteSessionApproval upserts an allow entry into session_approvals.
 // If the table already holds a deny entry for this key, the deny wins and
-// the write is skipped (returns nil). Enforces a cap of sessionApprovalCap
-// rows per session/agent by evicting the oldest on overflow.
+// the write is silently ignored. The check-then-update is performed
+// atomically via ON CONFLICT … WHERE to eliminate the TOCTOU window that
+// existed in the previous SELECT-then-INSERT-OR-REPLACE implementation.
 func (s *Store) WriteSessionApproval(sessionID, agentID, canonicalKey, canonicalForm, command, source string) error {
 	if sessionID == "" || canonicalKey == "" {
 		return nil
 	}
-	// Never overwrite an explicit deny.
-	var existing string
-	err := s.db.QueryRow(
-		`SELECT verdict FROM session_approvals WHERE session_id=? AND agent_id=? AND canonical_key=?`,
-		sessionID, agentID, canonicalKey,
-	).Scan(&existing)
-	if err == nil && existing == "deny" {
-		return nil // deny wins
-	}
-
 	now := time.Now().UTC()
 	expires := now.Add(sessionApprovalTTL)
-	_, err = s.db.Exec(`
-		INSERT OR REPLACE INTO session_approvals
+	// The WHERE clause on DO UPDATE prevents overwriting a deny verdict.
+	// If the row is a deny, the UPDATE is skipped and the row is unchanged.
+	_, err := s.db.Exec(`
+		INSERT INTO session_approvals
 			(session_id, agent_id, canonical_key, canonical_form, command, source, verdict, approved_at, expires_at)
-		VALUES (?,?,?,?,?,?,'allow',?,?)`,
+		VALUES (?,?,?,?,?,?,'allow',?,?)
+		ON CONFLICT(session_id, agent_id, canonical_key)
+		DO UPDATE SET
+			canonical_form = excluded.canonical_form,
+			command        = excluded.command,
+			source         = excluded.source,
+			approved_at    = excluded.approved_at,
+			expires_at     = excluded.expires_at
+		WHERE session_approvals.verdict != 'deny'`,
 		sessionID, agentID, canonicalKey, canonicalForm, command, source,
 		now.Format(time.RFC3339), expires.Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
-
-	// Enforce cap: delete oldest rows if over limit.
 	s.enforceSessionCap(sessionID, agentID)
 	return nil
 }
@@ -951,21 +961,23 @@ func (s *Store) CleanStaleSessionApprovals() error {
 	return err
 }
 
-// enforceSessionCap evicts the oldest session_approvals rows when the count
-// for a (session_id, agent_id) pair exceeds sessionApprovalCap. Best-effort.
+// enforceSessionCap evicts the oldest allow rows when the allow-only count
+// for a (session_id, agent_id) pair exceeds sessionApprovalCap. Deny rows
+// are never evicted — an attacker must not be able to push a deny out of
+// the cache by flooding the approval table with allows. Best-effort.
 func (s *Store) enforceSessionCap(sessionID, agentID string) {
 	var count int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM session_approvals WHERE session_id=? AND agent_id=?`,
+		`SELECT COUNT(*) FROM session_approvals WHERE session_id=? AND agent_id=? AND verdict='allow'`,
 		sessionID, agentID,
-	).Scan(&count); err != nil || count <= sessionApprovalCap {
+	).Scan(&count); err != nil || count < sessionApprovalCap {
 		return
 	}
 	excess := count - sessionApprovalCap
 	_, _ = s.db.Exec(`
 		DELETE FROM session_approvals WHERE id IN (
 			SELECT id FROM session_approvals
-			WHERE session_id=? AND agent_id=?
+			WHERE session_id=? AND agent_id=? AND verdict='allow'
 			ORDER BY approved_at ASC LIMIT ?
 		)`, sessionID, agentID, excess)
 }

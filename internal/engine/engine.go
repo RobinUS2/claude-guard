@@ -466,6 +466,11 @@ func (e *Engine) Decide(in Input) Output {
 	// command's first program is in that profile's pre-approved list.
 	// Only fires for subagents (AgentID != ""); main-agent commands always
 	// go through the full pipeline. Tier 1 has already run unconditionally.
+	//
+	// TODO(security): enforce subcommand allowlist per agent trust profile.
+	// E.g. the Explore profile allows `git` but must restrict to read-only
+	// subcommands (status, log, diff, show) and block `git reset --hard`,
+	// `git checkout`, `echo pwned >> ~/.zshrc`, etc. Track in plan item #15.
 	if in.AgentID != "" && in.AgentType != "" && out.Shadow.Tier1Rule == "" {
 		if profile, ok := e.cfg.AgentTrustProfiles[in.AgentType]; ok {
 			program := firstProgram(in.Command)
@@ -501,6 +506,13 @@ func (e *Engine) Decide(in Input) Output {
 		verdict := e.store.ReadSessionApproval(in.SessionID, in.AgentID, sessKey)
 		switch verdict {
 		case "allow":
+			// Before honoring the cache hit, verify the command does not
+			// contain a danger flag that was absent when it was first approved.
+			// A cached "terraform apply" must NOT auto-approve
+			// "terraform apply -destroy" or "terraform apply --replace=...".
+			if commandHasDangerFlag(in.Command) {
+				break // fall through to LLM tier
+			}
 			if !e.cfg.ShadowMode {
 				out.Verdict = Allow
 				out.Tier = "session"
@@ -1721,8 +1733,23 @@ const sequenceInactivityTimeout = 10 * time.Minute
 var sequenceDangerFlags = []string{
 	"-destroy", "--destroy",   // terraform apply -destroy
 	"-force", "--force",       // various force operations
+	"--replace",               // terraform apply --replace=
+	"--recreate",              // docker-compose recreate, etc.
+	"--hard",                  // git reset --hard
 	"--purge",                 // apt/dpkg --purge
 	"--delete", "-D",          // git branch -D, etc.
+}
+
+// commandHasDangerFlag reports whether cmd contains any sequenceDangerFlag.
+// Used by Tier 2.5 (session cache) and Tier 2.6 (workflow sequence) to reject
+// commands whose blast radius changed since the original approval.
+func commandHasDangerFlag(cmd string) bool {
+	for _, flag := range sequenceDangerFlags {
+		if strings.Contains(cmd, flag) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkWorkflowSequence checks whether cmd is the next step in any
@@ -1735,10 +1762,8 @@ func (e *Engine) checkWorkflowSequence(in Input, canonical string) (bool, string
 	}
 	// Reject any command with a danger flag regardless of sequence position.
 	// Protects against `terraform apply -destroy` matching "terraform apply" step.
-	for _, flag := range sequenceDangerFlags {
-		if strings.Contains(in.Command, flag) {
-			return false, ""
-		}
+	if commandHasDangerFlag(in.Command) {
+		return false, ""
 	}
 	for idx, seq := range e.cfg.WorkflowSequences {
 		stepIdx, lastUpdated, found := e.store.ReadSequenceProgress(in.SessionID, in.AgentID, idx)

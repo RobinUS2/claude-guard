@@ -884,3 +884,44 @@ func TestPutVerdictOverwrites(t *testing.T) {
 		t.Errorf("Reason = %q, want v2", got.Reason)
 	}
 }
+
+// TestSessionCapEviction_DenyNotEvicted verifies that enforceSessionCap never
+// evicts deny rows. A flood of allow entries must not push out an explicit deny.
+func TestSessionCapEviction_DenyNotEvicted(t *testing.T) {
+	s := openTestStore(t)
+	const sid, aid = "sess-cap", "agent-cap"
+
+	// Write one deny entry.
+	denyKey := cache.SessionKey("terraform apply -destroy")
+	if err := s.WriteSessionDeny(sid, aid, denyKey); err != nil {
+		t.Fatalf("WriteSessionDeny: %v", err)
+	}
+
+	// Flood the table with allows beyond the cap.
+	for i := range sessionApprovalCap + 10 {
+		key := cache.SessionKey("git status " + string(rune('a'+i%26)))
+		_ = s.WriteSessionApproval(sid, aid, key, "git status", "git status", "llm")
+	}
+
+	// The deny must still be present.
+	if got := s.ReadSessionApproval(sid, aid, denyKey); got != "deny" {
+		t.Errorf("deny evicted by cap enforcement: got %q, want 'deny'", got)
+	}
+}
+
+// TestWriteSessionApproval_AtomicDenyWins confirms the ON CONFLICT … WHERE
+// atomic upsert prevents an allow from overwriting a deny even without the
+// prior SELECT-then-INSERT race window.
+func TestWriteSessionApproval_AtomicDenyWins(t *testing.T) {
+	s := openTestStore(t)
+	const sid, aid, key = "sess-atomic", "agent-atomic", "canonical-key"
+
+	_ = s.WriteSessionDeny(sid, aid, key)
+	// Multiple concurrent-style allow writes must all fail silently.
+	for range 5 {
+		_ = s.WriteSessionApproval(sid, aid, key, "cmd", "cmd", "llm")
+	}
+	if got := s.ReadSessionApproval(sid, aid, key); got != "deny" {
+		t.Errorf("atomic upsert failed to protect deny: got %q, want 'deny'", got)
+	}
+}

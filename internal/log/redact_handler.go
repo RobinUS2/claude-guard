@@ -75,9 +75,16 @@ func (h *redactingHandler) WithGroup(name string) slog.Handler {
 //	into its reason text. Treating it as a redacted field
 //	is cheap defensive coverage even if today's verifier
 //	implementation does not appear to leak.
+//
+// `description`     — Claude Code's tool_input.description field is passed
+//
+//	through to engine callsites and may echo the literal
+//	command. Redact defensively to prevent double-logging
+//	of a blocked command's text.
 var redactedFields = map[string]bool{
 	"command":         true,
 	"verifier_reason": true,
+	"description":     true,
 }
 
 // redactAttr returns the attr unchanged unless it names a known

@@ -890,3 +890,90 @@ func TestApply_MultiSegmentPrefixApiKey(t *testing.T) {
 		})
 	}
 }
+
+// TestSkip_ShellVarColon_RealSecretNotDemoted covers the ":$VAR bypass" where
+// "aws_secret_access_key=REALSECRET:$X" previously had the real secret demoted
+// to Send because isShellVarReference extracted only the suffix after the last ":".
+// Fixed by using only the "=" separator when present, ignoring any later ":".
+func TestSkip_ShellVarColon_RealSecretNotDemoted(t *testing.T) {
+	r := New(nil, nil)
+	cases := []string{
+		`aws_secret_access_key=REALSECRET:$X`,
+		`AWS_SECRET_ACCESS_KEY=actual_secret:$EXTRA`,
+	}
+	for _, cmd := range cases {
+		t.Run(cmd, func(t *testing.T) {
+			res := r.Scan(cmd)
+			if res.Decision != Skip {
+				t.Errorf("Decision = %v, want Skip — real secret must not be demoted by colon-suffix shell var; redacted=%q", res.Decision, res.Redacted)
+			}
+		})
+	}
+	// Shell var only (no real secret) should still be demoted to Send.
+	safeCmd := `aws_secret_access_key=$MY_SECRET_VAR`
+	if res := r.Scan(safeCmd); res.Decision != Send {
+		t.Errorf("Decision = %v, want Send for pure shell var reference %q", res.Decision, safeCmd)
+	}
+}
+
+// TestSkip_SamePatternTwoMatches_OneRealSecretBlocks covers the "same-pattern demotion"
+// bypass where a second occurrence of the same pattern carrying a real secret was
+// missed because FindStringIndex returned only the first match.
+// Fixed by using FindAllStringIndex and blocking unless ALL matches are shell vars.
+func TestSkip_SamePatternTwoMatches_OneRealSecretBlocks(t *testing.T) {
+	r := New(nil, nil)
+	// First match is a shell var (safe), second match contains the real secret.
+	cmd := `aws_secret_access_key=$OLD && echo "aws_secret_access_key: AKIAREALSECRET1234567"`
+	res := r.Scan(cmd)
+	if res.Decision != Skip {
+		t.Errorf("Decision = %v, want Skip — second real-secret match must block even when first match is shell var", res.Decision)
+	}
+}
+
+// TestSkip_BothMatchesShellVars_Demoted verifies that two shell-var matches
+// are both demoted: the command is safe to send.
+func TestSkip_BothMatchesShellVars_Demoted(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `aws_secret_access_key=$VAR1 && aws_secret_access_key=$VAR2`
+	res := r.Scan(cmd)
+	if res.Decision != Send {
+		t.Errorf("Decision = %v, want Send when all skip-pattern matches are shell vars", res.Decision)
+	}
+}
+
+// TestSkip_SlackToken verifies new Slack token pattern.
+func TestSkip_SlackToken(t *testing.T) {
+	r := New(nil, nil)
+	cases := []string{
+		`SLACK_TOKEN=xoxb-12345678901-ABCDEFGHIJK`,
+		`curl -H "Authorization: Bearer xoxp-9999999999-abcdefgh"`,
+		`xoxs-1234567890-abcdef`,
+	}
+	for _, cmd := range cases {
+		t.Run(cmd, func(t *testing.T) {
+			if r.Scan(cmd).Decision != Skip {
+				t.Errorf("expected Skip for Slack token: %s", cmd)
+			}
+		})
+	}
+}
+
+// TestSkip_StripeKey verifies new Stripe live key pattern.
+func TestSkip_StripeKey(t *testing.T) {
+	r := New(nil, nil)
+	// Construct at runtime to avoid triggering static secret scanners on the
+	// source file (the value is deliberately fake — 24 alphanum chars).
+	cmd := "STRIPE_SECRET=" + "sk_live_" + "AbCdEfGhIjKlMnOpQrSt" + "UvWx"
+	if r.Scan(cmd).Decision != Skip {
+		t.Error("expected Skip for Stripe live key")
+	}
+}
+
+// TestSkip_NpmToken verifies new npm token pattern.
+func TestSkip_NpmToken(t *testing.T) {
+	r := New(nil, nil)
+	cmd := `npm publish --token npm_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij`
+	if r.Scan(cmd).Decision != Skip {
+		t.Error("expected Skip for npm token")
+	}
+}

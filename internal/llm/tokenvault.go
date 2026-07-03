@@ -37,9 +37,10 @@ var TokenVaultAnthropicCandidates = []struct {
 const tokenVaultTimeout = 300 * time.Millisecond
 
 // tokenVaultBinary is the path we invoke. Set as a package-level var
-// for testability (tests stub it with a mock script). Default is to
-// rely on PATH lookup.
-var tokenVaultBinary = "token-vault"
+// for testability (tests stub it with a mock script).
+// Default resolves ~/bin/token-vault at first use (absoluteTokenVaultBinary).
+// Tests may override this to a known-good path without PATH manipulation.
+var tokenVaultBinary = ""
 
 // tokenVaultNegativeCacheTTL is how long we remember "no vault candidate
 // returned a secret" before trying again. The full candidate sweep takes
@@ -83,6 +84,33 @@ var inProcessCache struct {
 // behavior — the hook should not log a warning every invocation just
 // because the user hasn't set up an Anthropic key. doctor handles the
 // user-facing "hey, no LLM configured" message.
+// absoluteTokenVaultBinary resolves the token-vault binary to an absolute
+// path. Preference order:
+//  1. tokenVaultBinary if already set to an absolute path (test override or
+//     explicit configuration).
+//  2. ~/bin/token-vault (conventional personal install location).
+//  3. PATH lookup as a last resort.
+//
+// Returning "" means "not found"; the caller treats that as "no vault".
+func absoluteTokenVaultBinary() string {
+	if tokenVaultBinary != "" {
+		// Test or explicit override — trust it as-is.
+		return tokenVaultBinary
+	}
+	// Prefer the personal bin path to avoid PATH hijacking.
+	if home, err := os.UserHomeDir(); err == nil {
+		candidate := filepath.Join(home, "bin", "token-vault")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	// Fall back to PATH resolution when the personal path doesn't exist.
+	if resolved, err := exec.LookPath("token-vault"); err == nil {
+		return resolved
+	}
+	return ""
+}
+
 func LookupTokenVaultAnthropic() string {
 	inProcessCache.Lock()
 	defer inProcessCache.Unlock()
@@ -92,7 +120,8 @@ func LookupTokenVaultAnthropic() string {
 	defer func() { inProcessCache.checked = true }()
 
 	// Bail out cheaply if token-vault isn't installed.
-	if _, err := exec.LookPath(tokenVaultBinary); err != nil {
+	bin := absoluteTokenVaultBinary()
+	if bin == "" {
 		return ""
 	}
 
@@ -107,7 +136,7 @@ func LookupTokenVaultAnthropic() string {
 	}
 
 	for _, c := range TokenVaultAnthropicCandidates {
-		if v := lookupOne(c.Vault, c.Secret); v != "" {
+		if v := lookupOne(bin, c.Vault, c.Secret); v != "" {
 			inProcessCache.value = v
 			return v
 		}
@@ -122,10 +151,10 @@ func LookupTokenVaultAnthropic() string {
 	return ""
 }
 
-func lookupOne(vault, secret string) string {
+func lookupOne(bin, vault, secret string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), tokenVaultTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, tokenVaultBinary, "get", vault, secret)
+	cmd := exec.CommandContext(ctx, bin, "get", vault, secret)
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
