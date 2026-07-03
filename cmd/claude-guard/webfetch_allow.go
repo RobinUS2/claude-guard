@@ -76,6 +76,7 @@ func runWebFetchAllow(in io.Reader, errOut io.Writer) int {
 		return 0
 	}
 
+	appendWebfetchEvent(webfetchEvent{Event: "domain_learned", Domain: domain})
 	return 0
 }
 

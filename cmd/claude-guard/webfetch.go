@@ -48,8 +48,10 @@ func runWebFetch(in io.Reader, out io.Writer, errOut io.Writer) int {
 	verdict := webinspect.Inspect(context.Background(), wf.URL, webinspect.Config{})
 
 	if verdict.Allow {
+		appendWebfetchEvent(webfetchEvent{Event: "inspected", Decision: "allow", Domain: wf.URL})
 		_ = hook.WritePermissionResponse(out, hook.AllowPermission(verdict.Reason))
 	} else {
+		appendWebfetchEvent(webfetchEvent{Event: "inspected", Decision: "ask", Domain: wf.URL})
 		// Surface the normal permission prompt so the user can decide.
 		// Print to errOut so the reason appears above the prompt.
 		fmt.Fprintln(errOut, "claude-guard webfetch:", verdict.Reason)
