@@ -59,6 +59,8 @@ func run(args []string) int {
 		return cmdDecide(args[1:])
 	case "webfetch":
 		return cmdWebFetch(args[1:])
+	case "webfetch-allow":
+		return cmdWebFetchAllow(args[1:])
 	case "webfetch-test":
 		return cmdWebFetchTest(args[1:])
 	case "test":
