@@ -509,16 +509,8 @@ func (e *Engine) Decide(in Input) Output {
 			// Before honoring the cache hit, verify the command does not
 			// contain a danger flag that was absent when it was first approved.
 			// A cached "terraform apply" must NOT auto-approve
-			// "terraform apply -destroy". We reuse the same sequenceDangerFlags
-			// slice that Tier 2.6 already checks — no new logic needed.
-			hasDangerFlag := false
-			for _, flag := range sequenceDangerFlags {
-				if strings.Contains(in.Command, flag) {
-					hasDangerFlag = true
-					break
-				}
-			}
-			if hasDangerFlag {
+			// "terraform apply -destroy" or "terraform apply --replace=...".
+			if commandHasDangerFlag(in.Command) {
 				break // fall through to LLM tier
 			}
 			if !e.cfg.ShadowMode {
@@ -1741,8 +1733,23 @@ const sequenceInactivityTimeout = 10 * time.Minute
 var sequenceDangerFlags = []string{
 	"-destroy", "--destroy",   // terraform apply -destroy
 	"-force", "--force",       // various force operations
+	"--replace",               // terraform apply --replace=
+	"--recreate",              // docker-compose recreate, etc.
+	"--hard",                  // git reset --hard
 	"--purge",                 // apt/dpkg --purge
 	"--delete", "-D",          // git branch -D, etc.
+}
+
+// commandHasDangerFlag reports whether cmd contains any sequenceDangerFlag.
+// Used by Tier 2.5 (session cache) and Tier 2.6 (workflow sequence) to reject
+// commands whose blast radius changed since the original approval.
+func commandHasDangerFlag(cmd string) bool {
+	for _, flag := range sequenceDangerFlags {
+		if strings.Contains(cmd, flag) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkWorkflowSequence checks whether cmd is the next step in any
@@ -1755,10 +1762,8 @@ func (e *Engine) checkWorkflowSequence(in Input, canonical string) (bool, string
 	}
 	// Reject any command with a danger flag regardless of sequence position.
 	// Protects against `terraform apply -destroy` matching "terraform apply" step.
-	for _, flag := range sequenceDangerFlags {
-		if strings.Contains(in.Command, flag) {
-			return false, ""
-		}
+	if commandHasDangerFlag(in.Command) {
+		return false, ""
 	}
 	for idx, seq := range e.cfg.WorkflowSequences {
 		stepIdx, lastUpdated, found := e.store.ReadSequenceProgress(in.SessionID, in.AgentID, idx)

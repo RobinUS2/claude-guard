@@ -72,9 +72,13 @@ type Store struct {
 // they don't exist, and configures WAL mode with a 5-second busy
 // timeout. The parent directory is created if needed.
 func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("store: mkdir %s: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("store: mkdir %s: %w", dir, err)
 	}
+	// Restrict existing directories that were created with a broader mode
+	// by a prior version of claude-guard.
+	_ = os.Chmod(dir, 0o700)
 
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -99,13 +103,12 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("store: migrate: %w", err)
 	}
 
-	// Restrict DB files to owner-only. WAL and SHM siblings are created
-	// by SQLite on first write; chmod them if they already exist, and rely
-	// on the directory mode (0700) to protect them until they are created.
+	// Restrict DB files to owner-only. WAL and SHM siblings are created by
+	// SQLite on first write; chmod them here if they already exist. New files
+	// inherit the directory's restrictive mode (0700) set above.
 	for _, ext := range []string{"", "-wal", "-shm"} {
 		_ = os.Chmod(path+ext, 0o600)
 	}
-	_ = os.Chmod(filepath.Dir(path), 0o700)
 
 	return s, nil
 }
@@ -967,7 +970,7 @@ func (s *Store) enforceSessionCap(sessionID, agentID string) {
 	if err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM session_approvals WHERE session_id=? AND agent_id=? AND verdict='allow'`,
 		sessionID, agentID,
-	).Scan(&count); err != nil || count <= sessionApprovalCap {
+	).Scan(&count); err != nil || count < sessionApprovalCap {
 		return
 	}
 	excess := count - sessionApprovalCap
