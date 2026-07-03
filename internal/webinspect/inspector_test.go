@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -47,7 +48,7 @@ func TestFetch_Success(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, ct, err := fetch(context.Background(), srv.URL, Config{HTTP: srv.Client()})
+	body, ct, err := fetch(context.Background(), srv.URL, Config{HTTP: srv.Client(), DisableSSRFCheck: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestFetch_Non2xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, _, err := fetch(context.Background(), srv.URL, Config{HTTP: srv.Client()})
+	body, _, err := fetch(context.Background(), srv.URL, Config{HTTP: srv.Client(), DisableSSRFCheck: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,8 +93,9 @@ func TestFetch_BodyCap(t *testing.T) {
 	defer srv.Close()
 
 	body, _, err := fetch(context.Background(), srv.URL, Config{
-		HTTP:         srv.Client(),
-		MaxBodyBytes: 100,
+		HTTP:             srv.Client(),
+		MaxBodyBytes:     100,
+		DisableSSRFCheck: true,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -177,9 +179,10 @@ func TestInspect_FullPipeline_Safe(t *testing.T) {
 	defer pageSrv.Close()
 
 	v := Inspect(context.Background(), pageSrv.URL, Config{
-		APIKey:       "fake-key",
-		AnthropicURL: haikuSrv.URL,
-		HTTP:         pageSrv.Client(),
+		APIKey:           "fake-key",
+		AnthropicURL:     haikuSrv.URL,
+		HTTP:             pageSrv.Client(),
+		DisableSSRFCheck: true,
 	})
 	if !v.Allow {
 		t.Errorf("expected allow, got deny: %s", v.Reason)
@@ -200,9 +203,10 @@ func TestInspect_FullPipeline_Unsafe(t *testing.T) {
 	defer pageSrv.Close()
 
 	v := Inspect(context.Background(), pageSrv.URL, Config{
-		APIKey:       "fake-key",
-		AnthropicURL: haikuSrv.URL,
-		HTTP:         pageSrv.Client(),
+		APIKey:           "fake-key",
+		AnthropicURL:     haikuSrv.URL,
+		HTTP:             pageSrv.Client(),
+		DisableSSRFCheck: true,
 	})
 	if v.Allow {
 		t.Errorf("expected deny, got allow: %s", v.Reason)
@@ -220,8 +224,9 @@ func TestInspect_FailOpen_NoAPIKey(t *testing.T) {
 	defer pageSrv.Close()
 
 	v := Inspect(context.Background(), pageSrv.URL, Config{
-		APIKey: "", // no key → fail open
-		HTTP:   pageSrv.Client(),
+		APIKey:           "", // no key → fail open
+		HTTP:             pageSrv.Client(),
+		DisableSSRFCheck: true,
 	})
 	if !v.Allow {
 		t.Errorf("expected fail-open allow with no API key, got: %s", v.Reason)
@@ -236,10 +241,70 @@ func TestInspect_FailOpen_BinaryContent(t *testing.T) {
 	defer pageSrv.Close()
 
 	v := Inspect(context.Background(), pageSrv.URL, Config{
-		APIKey: "fake-key",
-		HTTP:   pageSrv.Client(),
+		APIKey:           "fake-key",
+		HTTP:             pageSrv.Client(),
+		DisableSSRFCheck: true,
 	})
 	if !v.Allow {
 		t.Errorf("expected allow for binary content-type, got: %s", v.Reason)
+	}
+}
+
+// --- SSRF guard -----------------------------------------------------------
+
+func TestCheckSSRF_BlocksPrivateIPs(t *testing.T) {
+	blocked := []string{
+		"http://127.0.0.1/",
+		"http://127.0.0.1:8080/path",
+		"http://10.0.0.1/",
+		"http://10.255.255.255/",
+		"http://192.168.1.100/",
+		"http://172.16.0.1/",
+		"http://172.31.255.254/",
+		"http://169.254.169.254/latest/meta-data/",    // AWS metadata
+		"http://169.254.169.254/computeMetadata/v1/",  // GCP metadata
+		"http://[::1]/",
+		"http://100.64.0.1/", // CGN
+	}
+	for _, u := range blocked {
+		if err := checkSSRF(u); err == nil {
+			t.Errorf("checkSSRF(%q) = nil, want error (private IP should be blocked)", u)
+		}
+	}
+}
+
+func TestCheckSSRF_AllowsPublicIPs(t *testing.T) {
+	// Use literal IPs to avoid flaky DNS lookups in tests.
+	allowed := []string{
+		"http://1.1.1.1/",
+		"http://8.8.8.8/",
+		"https://1.0.0.1/",
+		"https://104.21.0.1/", // Cloudflare range
+	}
+	for _, u := range allowed {
+		if err := checkSSRF(u); err != nil {
+			t.Errorf("checkSSRF(%q) = %v, want nil (public IP should be allowed)", u, err)
+		}
+	}
+}
+
+func TestInspect_BlocksPrivateURL(t *testing.T) {
+	// Loopback URL must return Allow=false so the user sees the permission
+	// prompt rather than the inspector silently pre-fetching an internal service.
+	for _, u := range []string{
+		"http://127.0.0.1:12345/page",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://10.0.0.1/internal",
+	} {
+		v := Inspect(context.Background(), u, Config{
+			APIKey: "fake-key",
+			// DisableSSRFCheck intentionally NOT set
+		})
+		if v.Allow {
+			t.Errorf("Inspect(%q).Allow = true, want false (SSRF guard should block)", u)
+		}
+		if !strings.Contains(v.Reason, "SSRF") {
+			t.Errorf("Inspect(%q).Reason = %q, want SSRF mention", u, v.Reason)
+		}
 	}
 }

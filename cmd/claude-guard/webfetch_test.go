@@ -56,11 +56,20 @@ func TestWebFetch_WireFormat_NonWebFetchTool(t *testing.T) {
 	}
 }
 
-func TestWebFetch_WireFormat_UnreachableURL(t *testing.T) {
-	// 127.0.0.1:1 will fail connection → fetch error → fail-open → allow
+func TestWebFetch_WireFormat_PrivateURL_BlockedAsAsk(t *testing.T) {
+	// Private/loopback URLs are blocked by the SSRF guard and surface as
+	// "ask" (user prompt) — never auto-approved, even via fail-open.
 	resp := invokeWebFetch(t, `{"tool_name":"WebFetch","hook_event_name":"PermissionRequest","tool_input":{"url":"http://127.0.0.1:1/page"}}`)
-	if resp.Decision != "allow" {
-		t.Errorf("decision = %q, want allow (fail-open on unreachable)", resp.Decision)
+	if resp.Decision != "ask" {
+		t.Errorf("decision = %q, want ask for private URL (SSRF guard)", resp.Decision)
+	}
+}
+
+func TestWebFetch_WireFormat_MetadataURL_BlockedAsAsk(t *testing.T) {
+	// Cloud metadata endpoints must not be silently pre-fetched.
+	resp := invokeWebFetch(t, `{"tool_name":"WebFetch","hook_event_name":"PermissionRequest","tool_input":{"url":"http://169.254.169.254/latest/meta-data/"}}`)
+	if resp.Decision != "ask" {
+		t.Errorf("decision = %q, want ask for metadata URL (SSRF guard)", resp.Decision)
 	}
 }
 

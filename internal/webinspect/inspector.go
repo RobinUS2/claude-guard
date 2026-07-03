@@ -17,9 +17,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -45,6 +48,80 @@ const (
 	// DefaultAnthropicBase is the Anthropic Messages API base URL.
 	DefaultAnthropicBase = "https://api.anthropic.com"
 )
+
+// errSSRF is returned by checkSSRF when a URL resolves to a private,
+// loopback, link-local, or cloud-metadata IP. It is treated distinctly from
+// ordinary fetch errors: Inspect returns Allow=false (user prompt) rather
+// than failing open (auto-allow).
+var errSSRF = errors.New("ssrf: private or internal IP")
+
+// privateRanges holds the CIDR blocks that must never be pre-fetched.
+// Compiled once at init to avoid per-call allocation.
+var privateRanges []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{
+		"0.0.0.0/8",
+		"10.0.0.0/8",
+		"100.64.0.0/10",  // CGN
+		"127.0.0.0/8",    // loopback
+		"169.254.0.0/16", // link-local + AWS/GCP/Azure/DO metadata endpoints
+		"172.16.0.0/12",  // private
+		"192.168.0.0/16", // private
+		"::1/128",        // IPv6 loopback
+		"fc00::/7",       // IPv6 ULA
+		"fe80::/10",      // IPv6 link-local
+	} {
+		_, block, _ := net.ParseCIDR(cidr)
+		if block != nil {
+			privateRanges = append(privateRanges, block)
+		}
+	}
+}
+
+func isPrivateIP(ip net.IP) bool {
+	for _, block := range privateRanges {
+		if block.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkSSRF parses rawURL, resolves the hostname, and returns errSSRF if any
+// resolved IP falls in a private/loopback/link-local/metadata range.
+// DNS failures return nil so the inspector fails open; the fetch will fail
+// anyway and Inspect will allow through to the user prompt.
+func checkSSRF(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil // unparseable URL — the fetch will also fail
+	}
+	host := u.Hostname()
+	if host == "" {
+		return nil
+	}
+
+	// Fast path: host is already a numeric IP, no DNS needed.
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateIP(ip) {
+			return fmt.Errorf("%w: %s", errSSRF, ip)
+		}
+		return nil
+	}
+
+	// Resolve and check every returned address.
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil // DNS failure — treat as safe (fetch will fail)
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			return fmt.Errorf("%w: %s resolves to %s", errSSRF, host, ip)
+		}
+	}
+	return nil
+}
 
 // chromeHeaders are sent with every pre-fetch request to pass common
 // bot-detection walls. Ordered to match a real Chrome 131 macOS request.
@@ -72,12 +149,13 @@ type Verdict struct {
 
 // Config controls inspector behaviour. Zero value uses all defaults.
 type Config struct {
-	APIKey       string        // Anthropic API key; falls back to ANTHROPIC_API_KEY env var
-	AnthropicURL string        // override for testing; default: DefaultAnthropicBase
-	MaxBodyBytes int64         // default: DefaultMaxBodyBytes
-	FetchTimeout time.Duration // default: DefaultFetchTimeout
-	InspectModel string        // default: DefaultModel
-	HTTP         *http.Client  // shared client; a new one is created if nil
+	APIKey           string        // Anthropic API key; falls back to ANTHROPIC_API_KEY env var
+	AnthropicURL     string        // override for testing; default: DefaultAnthropicBase
+	MaxBodyBytes     int64         // default: DefaultMaxBodyBytes
+	FetchTimeout     time.Duration // default: DefaultFetchTimeout
+	InspectModel     string        // default: DefaultModel
+	HTTP             *http.Client  // shared client; a new one is created if nil
+	DisableSSRFCheck bool          // test-only: bypass private-IP guard; never set in production
 }
 
 func (c *Config) apiKey() string {
@@ -124,7 +202,10 @@ func (c *Config) httpClient() *http.Client {
 
 // Inspect pre-fetches url with Chrome headers, then asks Haiku whether
 // the content is safe. Returns a Verdict with Allow=true and a reason.
-// All errors fail open (Allow=true) per the package contract.
+// All errors fail open (Allow=true) per the package contract, with one
+// exception: private/loopback/metadata URLs return Allow=false so the
+// user sees the permission prompt rather than the inspector auto-approving
+// a request to an internal service.
 func Inspect(ctx context.Context, url string, cfg Config) Verdict {
 	allow := func(reason string) Verdict { return Verdict{Allow: true, Reason: reason} }
 
@@ -132,7 +213,20 @@ func Inspect(ctx context.Context, url string, cfg Config) Verdict {
 		return allow("non-http url")
 	}
 
+	// SSRF guard: reject private/loopback/link-local/metadata URLs before
+	// making any outbound request. We check here (not only in fetch) so that
+	// the inspector never initiates a connection to an internal service.
+	if !cfg.DisableSSRFCheck {
+		if err := checkSSRF(url); err != nil {
+			return Verdict{Allow: false, Reason: "SSRF guard: private/internal URL blocked"}
+		}
+	}
+
 	body, contentType, err := fetch(ctx, url, cfg)
+	if errors.Is(err, errSSRF) {
+		// A redirect led to a private IP — surface to user prompt.
+		return Verdict{Allow: false, Reason: "SSRF guard: redirect to private/internal URL blocked"}
+	}
 	if err != nil || body == "" {
 		return allow("fetch failed or empty")
 	}
@@ -182,9 +276,15 @@ func fetch(ctx context.Context, url string, cfg Config) (body string, contentTyp
 	}
 
 	// Limit redirects — follow enough to handle common CDN hops.
-	client.CheckRedirect = func(_ *http.Request, via []*http.Request) error {
+	// Also re-check SSRF on each hop so a public→private redirect is caught.
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 3 {
 			return http.ErrUseLastResponse
+		}
+		if !cfg.DisableSSRFCheck {
+			if ssrfErr := checkSSRF(req.URL.String()); ssrfErr != nil {
+				return errSSRF // propagated to Inspect via errors.Is
+			}
 		}
 		return nil
 	}
