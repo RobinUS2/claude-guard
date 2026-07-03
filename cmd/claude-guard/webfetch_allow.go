@@ -101,12 +101,22 @@ func runWebFetchAllow(in io.Reader, errOut io.Writer) int {
 // baseDomain returns the registrable domain (eTLD+1) for a hostname using a
 // simple two-part heuristic: the last two dot-separated labels.
 //
+// Precondition: host must be a DNS name, not a numeric IP. Callers should
+// return early for IPs (net.ParseIP(host) != nil) before calling this.
+//
 // This handles the vast majority of real-world TLDs (.com, .io, .dev, .nl,
 // .org, .net, etc.). Multi-part country TLDs like .co.uk are a known
 // limitation — they resolve to "co.uk" rather than the intended base.
 // We accept this in exchange for zero external dependencies.
 func baseDomain(host string) string {
-	// Strip port if present.
+	// Numeric IPs (including IPv6) are returned unchanged — splitting on "."
+	// or ":" would corrupt them. The caller's IP guard should have returned
+	// before we get here; this is a defensive backstop.
+	if net.ParseIP(host) != nil {
+		return host
+	}
+	// Strip port from hostnames using the last colon heuristic — valid only
+	// for DNS names (IPv6 addrs are already handled above).
 	if idx := strings.LastIndex(host, ":"); idx != -1 {
 		host = host[:idx]
 	}

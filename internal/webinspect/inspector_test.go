@@ -20,6 +20,8 @@ func TestIsTextContent(t *testing.T) {
 		{"application/json", true},
 		{"application/xml", true},
 		{"application/xhtml+xml", true},
+		{"application/rss+xml", true},
+		{"application/atom+xml", true},
 		{"image/png", false},
 		{"application/zip", false},
 		{"application/octet-stream", false},

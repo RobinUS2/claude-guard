@@ -10,6 +10,7 @@ package webinspect
 import (
 	"compress/gzip"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -122,6 +123,11 @@ func TestDomains_RSSFeed_Safe(t *testing.T) {
 	})
 	if !v.Allow {
 		t.Errorf("RSS feed should be allowed; reason=%q", v.Reason)
+	}
+	// application/rss+xml must be recognised as text so LLM inspection runs,
+	// not skipped as binary (which would emit a warning).
+	if len(v.Warnings) > 0 {
+		t.Errorf("RSS feed should be inspected via LLM, not skipped; warnings=%v", v.Warnings)
 	}
 }
 
@@ -437,23 +443,41 @@ func TestDomains_Warnings_InconclusiveLLMVerdict(t *testing.T) {
 // --- SSRF redirect --------------------------------------------------------
 
 func TestDomains_SSRFViaRedirect_Blocked(t *testing.T) {
-	// Public-looking server that redirects to a private IP.
+	// The test server listens on 127.0.0.1. With the SSRF guard enabled,
+	// Inspect rejects the initial URL (loopback) before any redirect is followed.
 	redirectSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		http.Redirect(w, req, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
 	}))
 	defer redirectSrv.Close()
 
 	v := Inspect(context.Background(), redirectSrv.URL, Config{
-		APIKey:           "fake-key",
-		HTTP:             redirectSrv.Client(),
+		APIKey: "fake-key",
+		HTTP:   redirectSrv.Client(),
 		// SSRF check enabled (default)
 	})
-	// The redirect check may not fire if the test client doesn't follow redirects
-	// to real IPs, but the SSRF guard on the initial URL should pass (it's loopback
-	// from the test client's perspective). Document the actual behaviour.
-	_ = v // allow either outcome — the SSRF-via-redirect path is covered by the
-	// DisableSSRFCheck=false redirect check in fetch(). This test documents that
-	// Inspect is called without DisableSSRFCheck for production paths.
+	if v.Allow {
+		t.Errorf("loopback URL should be blocked by SSRF guard; reason=%q", v.Reason)
+	}
+	if !strings.Contains(v.Reason, "SSRF") {
+		t.Errorf("reason should mention SSRF; got %q", v.Reason)
+	}
+}
+
+func TestFetch_SSRFViaRedirect_Blocked(t *testing.T) {
+	// Server redirects to the AWS metadata endpoint. checkSSRF fires inside
+	// CheckRedirect before any real connection attempt to 169.254.169.254.
+	redirectSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
+	}))
+	defer redirectSrv.Close()
+
+	_, _, err := fetch(context.Background(), redirectSrv.URL, Config{
+		HTTP:             redirectSrv.Client(),
+		DisableSSRFCheck: false, // SSRF guard active on redirects
+	})
+	if !errors.Is(err, errSSRF) {
+		t.Errorf("redirect to private IP should return errSSRF; got %v", err)
+	}
 }
 
 // --- callGemini -----------------------------------------------------------
