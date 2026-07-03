@@ -485,11 +485,11 @@ func TestFetch_SSRFViaRedirect_Blocked(t *testing.T) {
 func TestCallGemini_Safe(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"SAFE"}]}}]}`))
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"SAFE"}]}}],"usageMetadata":{"promptTokenCount":95,"candidatesTokenCount":1}}`))
 	}))
 	defer srv.Close()
 
-	verdict, err := callGemini(context.Background(), "https://example.com", "article text", "fake-key", Config{
+	verdict, usage, err := callGemini(context.Background(), "https://example.com", "article text", "fake-key", Config{
 		GeminiURL: srv.URL,
 		HTTP:      srv.Client(),
 	})
@@ -499,16 +499,22 @@ func TestCallGemini_Safe(t *testing.T) {
 	if verdict != "SAFE" {
 		t.Errorf("verdict = %q, want SAFE", verdict)
 	}
+	if usage.Model != DefaultGeminiModel {
+		t.Errorf("usage.Model = %q, want %q", usage.Model, DefaultGeminiModel)
+	}
+	if usage.In != 95 || usage.Out != 1 {
+		t.Errorf("usage tokens = %d in / %d out, want 95/1", usage.In, usage.Out)
+	}
 }
 
 func TestCallGemini_Unsafe(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"UNSAFE: phishing form"}]}}]}`))
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"UNSAFE: phishing form"}]}}],"usageMetadata":{"promptTokenCount":90,"candidatesTokenCount":4}}`))
 	}))
 	defer srv.Close()
 
-	verdict, err := callGemini(context.Background(), "https://evil.example", "steal creds", "fake-key", Config{
+	verdict, _, err := callGemini(context.Background(), "https://evil.example", "steal creds", "fake-key", Config{
 		GeminiURL: srv.URL,
 		HTTP:      srv.Client(),
 	})
@@ -527,7 +533,7 @@ func TestCallGemini_APIError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := callGemini(context.Background(), "https://example.com", "content", "fake-key", Config{
+	_, _, err := callGemini(context.Background(), "https://example.com", "content", "fake-key", Config{
 		GeminiURL: srv.URL,
 		HTTP:      srv.Client(),
 	})
@@ -543,7 +549,7 @@ func TestCallGemini_EmptyResponse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := callGemini(context.Background(), "https://example.com", "content", "fake-key", Config{
+	_, _, err := callGemini(context.Background(), "https://example.com", "content", "fake-key", Config{
 		GeminiURL: srv.URL,
 		HTTP:      srv.Client(),
 	})

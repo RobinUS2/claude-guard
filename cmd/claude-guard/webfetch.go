@@ -55,11 +55,21 @@ func runWebFetch(in io.Reader, out io.Writer, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "claude-guard webfetch [warn]:", w)
 	}
 
+	ev := webfetchEvent{Event: "inspected", Domain: wf.URL}
+	if verdict.Usage != nil {
+		ev.Model = verdict.Usage.Model
+		ev.TokensIn = verdict.Usage.In
+		ev.TokensOut = verdict.Usage.Out
+		ev.CostUSD = verdict.Usage.CostUSD
+	}
+
 	if verdict.Allow {
-		appendWebfetchEvent(webfetchEvent{Event: "inspected", Decision: "allow", Domain: wf.URL})
+		ev.Decision = "allow"
+		appendWebfetchEvent(ev)
 		_ = hook.WritePermissionResponse(out, hook.AllowPermission(verdict.Reason))
 	} else {
-		appendWebfetchEvent(webfetchEvent{Event: "inspected", Decision: "ask", Domain: wf.URL})
+		ev.Decision = "ask"
+		appendWebfetchEvent(ev)
 		fmt.Fprintln(errOut, "claude-guard webfetch [deny]:", verdict.Reason)
 		_ = hook.WritePermissionResponse(out, hook.AskPermission(verdict.Reason))
 	}
