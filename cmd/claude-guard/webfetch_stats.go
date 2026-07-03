@@ -141,8 +141,12 @@ func cmdWebFetchStats(args []string) int {
 				formatInt(c.tokensIn), formatInt(c.tokensOut))
 			fmt.Printf("  Est. cost:       $%.5f\n", c.costUSD)
 			for model, mc := range c.byModel {
-				fmt.Printf("    %-36s %3d calls  %s in  %s out  $%.5f\n",
-					model, mc.calls, formatInt(mc.tokensIn), formatInt(mc.tokensOut), mc.costUSD)
+				costNote := ""
+				if mc.costUSD == 0 && mc.tokensIn > 0 {
+					costNote = "  (no pricing data)"
+				}
+				fmt.Printf("    %-36s %3d calls  %s in  %s out  $%.5f%s\n",
+					model, mc.calls, formatInt(mc.tokensIn), formatInt(mc.tokensOut), mc.costUSD, costNote)
 			}
 		}
 	}
@@ -162,8 +166,15 @@ func formatInt(n int) string {
 	if n == 0 {
 		return "0"
 	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
 	s := fmt.Sprintf("%d", n)
-	result := make([]byte, 0, len(s)+len(s)/3)
+	result := make([]byte, 0, len(s)+len(s)/3+1)
+	if neg {
+		result = append(result, '-')
+	}
 	for i, c := range s {
 		if i > 0 && (len(s)-i)%3 == 0 {
 			result = append(result, ',')
