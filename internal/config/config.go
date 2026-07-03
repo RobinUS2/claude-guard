@@ -90,8 +90,9 @@ type Legacy struct {
 
 // DailyBudget caps daily LLM calls to control cost.
 type DailyBudget struct {
-	LLMCalls          int `yaml:"llm_calls"`
-	FileAnalysisCalls int `yaml:"file_analysis_calls"`
+	LLMCalls             int     `yaml:"llm_calls"`
+	FileAnalysisCalls    int     `yaml:"file_analysis_calls"`
+	WebFetchDailyCostUSD float64 `yaml:"webfetch_daily_cost_usd"` // default: 10.00
 }
 
 // Default returns the compiled-in default Config. This is the fallback
@@ -143,8 +144,9 @@ func Default() *Config {
 			Path: legacyPath,
 		},
 		DailyBudget: DailyBudget{
-			LLMCalls:          1000,
-			FileAnalysisCalls: 50,
+			LLMCalls:             1000,
+			FileAnalysisCalls:    50,
+			WebFetchDailyCostUSD: 10.00,
 		},
 		InstantBlock:       DefaultBlockRules(),
 		InstantAllow:       DefaultAllowRules(),

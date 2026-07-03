@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/RobinUS2/claude-guard/internal/config"
 )
 
 // webfetchEvent is one line in ~/.cache/claude-guard/webfetch-events.log.
@@ -27,6 +29,30 @@ type webfetchEvent struct {
 func webfetchLogPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cache", "claude-guard", "webfetch-events.log")
+}
+
+// todayWebFetchCost returns the sum of cost_usd for all "inspected" events
+// logged today. Returns 0 if the log is missing or unreadable (fail-open).
+func todayWebFetchCost() float64 {
+	today := time.Now().UTC().Format("2006-01-02")
+	f, err := os.Open(webfetchLogPath())
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	var total float64
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var ev webfetchEvent
+		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+			continue
+		}
+		if ev.Event == "inspected" && strings.HasPrefix(ev.Time, today) {
+			total += ev.CostUSD
+		}
+	}
+	return total
 }
 
 // appendWebfetchEvent writes a single event line. Fails silently — never
@@ -151,10 +177,21 @@ func cmdWebFetchStats(args []string) int {
 		}
 	}
 
+	guardCfg := config.Load("").Config
+	costCap := guardCfg.DailyBudget.WebFetchDailyCostUSD
+	if costCap <= 0 {
+		costCap = 10.00
+	}
+	todayCost := day.costUSD
+	remaining := costCap - todayCost
+	capLine := fmt.Sprintf("  Daily LLM cap:   $%.2f  (spent $%.5f, $%.5f remaining)\n", costCap, todayCost, remaining)
+
 	if todayOnly {
 		printCounts("WebFetch stats — today ("+today+"):", day)
+		fmt.Print(capLine)
 	} else {
 		printCounts("WebFetch stats — today ("+today+"):", day)
+		fmt.Print(capLine)
 		fmt.Println()
 		printCounts("WebFetch stats — all time:", all)
 	}
