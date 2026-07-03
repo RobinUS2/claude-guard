@@ -54,7 +54,15 @@ func runWebFetchAllow(in io.Reader, errOut io.Writer) int {
 	}
 
 	domain := baseDomain(host)
-	rule := "WebFetch(domain:" + domain + ")"
+
+	// Add both the exact hostname (e.g. www.nu.nl) AND the base domain
+	// (e.g. nu.nl) because Claude Code's domain matching is exact — a rule
+	// for nu.nl does NOT match www.nu.nl.
+	var rulesToAdd []string
+	rulesToAdd = append(rulesToAdd, "WebFetch(domain:"+domain+")")
+	if host != domain {
+		rulesToAdd = append(rulesToAdd, "WebFetch(domain:"+host+")")
+	}
 
 	path := settingsPathFn()
 	s, err := readSettings(path)
@@ -63,14 +71,24 @@ func runWebFetchAllow(in io.Reader, errOut io.Writer) int {
 		return 0
 	}
 
-	// Already allowed — nothing to do.
-	for _, existing := range s.Permissions.Allow {
-		if existing == rule {
-			return 0
+	existingSet := make(map[string]bool, len(s.Permissions.Allow))
+	for _, r := range s.Permissions.Allow {
+		existingSet[r] = true
+	}
+
+	var added []string
+	newAllow := s.Permissions.Allow
+	for _, rule := range rulesToAdd {
+		if !existingSet[rule] {
+			newAllow = append(newAllow, rule)
+			added = append(added, rule)
 		}
 	}
 
-	newAllow := append(s.Permissions.Allow, rule)
+	if len(added) == 0 {
+		return 0 // all rules already present
+	}
+
 	if err := writeSettings(path, s, newAllow); err != nil {
 		fmt.Fprintf(errOut, "claude-guard webfetch-allow: write settings: %v\n", err)
 		return 0

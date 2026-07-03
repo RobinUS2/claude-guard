@@ -45,7 +45,11 @@ func runWebFetch(in io.Reader, out io.Writer, errOut io.Writer) int {
 		return 0
 	}
 
-	verdict := webinspect.Inspect(context.Background(), wf.URL, webinspect.Config{})
+	cfg := webinspect.Config{}
+	if cfg.AnyAPIKey() == "" {
+		fmt.Fprintln(errOut, "claude-guard: no ANTHROPIC_API_KEY or GEMINI_API_KEY — URL inspection disabled (set one to enable Haiku/Gemini triage)")
+	}
+	verdict := webinspect.Inspect(context.Background(), wf.URL, cfg)
 
 	if verdict.Allow {
 		appendWebfetchEvent(webfetchEvent{Event: "inspected", Decision: "allow", Domain: wf.URL})

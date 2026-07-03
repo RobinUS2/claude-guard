@@ -47,6 +47,12 @@ const (
 
 	// DefaultAnthropicBase is the Anthropic Messages API base URL.
 	DefaultAnthropicBase = "https://api.anthropic.com"
+
+	// DefaultGeminiBase is the Gemini generateContent API base URL.
+	DefaultGeminiBase = "https://generativelanguage.googleapis.com"
+
+	// DefaultGeminiModel is the cheapest Gemini model for triage.
+	DefaultGeminiModel = "gemini-2.0-flash-lite"
 )
 
 // errSSRF is returned by checkSSRF when a URL resolves to a private,
@@ -150,7 +156,9 @@ type Verdict struct {
 // Config controls inspector behaviour. Zero value uses all defaults.
 type Config struct {
 	APIKey           string        // Anthropic API key; falls back to ANTHROPIC_API_KEY env var
+	GeminiKey        string        // Gemini API key; falls back to GEMINI_API_KEY / GOOGLE_API_KEY
 	AnthropicURL     string        // override for testing; default: DefaultAnthropicBase
+	GeminiURL        string        // override for testing; default: DefaultGeminiBase
 	MaxBodyBytes     int64         // default: DefaultMaxBodyBytes
 	FetchTimeout     time.Duration // default: DefaultFetchTimeout
 	InspectModel     string        // default: DefaultModel
@@ -163,6 +171,33 @@ func (c *Config) apiKey() string {
 		return c.APIKey
 	}
 	return os.Getenv("ANTHROPIC_API_KEY")
+}
+
+// geminiKey returns the Gemini API key from config or env (GEMINI_API_KEY, then GOOGLE_API_KEY).
+func (c *Config) geminiKey() string {
+	if c.GeminiKey != "" {
+		return c.GeminiKey
+	}
+	if k := os.Getenv("GEMINI_API_KEY"); k != "" {
+		return k
+	}
+	return os.Getenv("GOOGLE_API_KEY")
+}
+
+// AnyAPIKey returns the first available API key (Anthropic, then Gemini) or "".
+// Useful for callers that want to warn when no inspection can happen.
+func (c *Config) AnyAPIKey() string {
+	if k := c.apiKey(); k != "" {
+		return k
+	}
+	return c.geminiKey()
+}
+
+func (c *Config) geminiURL() string {
+	if c.GeminiURL != "" {
+		return c.GeminiURL
+	}
+	return DefaultGeminiBase
 }
 
 func (c *Config) maxBodyBytes() int64 {
@@ -213,13 +248,23 @@ func Inspect(ctx context.Context, url string, cfg Config) Verdict {
 		return allow("non-http url")
 	}
 
+	// Fast path: determine which API key (if any) we can use BEFORE making
+	// any network request. Without a key we can't call an LLM, so skip the
+	// fetch entirely and fail open immediately. The SSRF guard still runs
+	// because we must never auto-approve requests to internal services.
+	anthropicKey := cfg.apiKey()
+	geminiKey := cfg.geminiKey()
+
 	// SSRF guard: reject private/loopback/link-local/metadata URLs before
-	// making any outbound request. We check here (not only in fetch) so that
-	// the inspector never initiates a connection to an internal service.
+	// making any outbound request.
 	if !cfg.DisableSSRFCheck {
 		if err := checkSSRF(url); err != nil {
 			return Verdict{Allow: false, Reason: "SSRF guard: private/internal URL blocked"}
 		}
+	}
+
+	if anthropicKey == "" && geminiKey == "" {
+		return allow("no API key configured")
 	}
 
 	body, contentType, err := fetch(ctx, url, cfg)
@@ -235,25 +280,32 @@ func Inspect(ctx context.Context, url string, cfg Config) Verdict {
 		return allow("binary content-type skipped")
 	}
 
-	apiKey := cfg.apiKey()
-	if apiKey == "" {
-		return allow("no ANTHROPIC_API_KEY")
+	var verdict string
+	if anthropicKey != "" {
+		verdict, err = callHaiku(ctx, url, body, anthropicKey, cfg)
+		if err != nil {
+			verdict = ""
+		}
 	}
-
-	verdict, err := callHaiku(ctx, url, body, apiKey, cfg)
-	if err != nil {
-		return allow("haiku error")
+	if verdict == "" && geminiKey != "" {
+		verdict, err = callGemini(ctx, url, body, geminiKey, cfg)
+		if err != nil {
+			verdict = ""
+		}
+	}
+	if verdict == "" {
+		return allow("inspection error")
 	}
 
 	if strings.HasPrefix(verdict, "SAFE") {
-		return Verdict{Allow: true, Reason: "Haiku: safe"}
+		return Verdict{Allow: true, Reason: "safe"}
 	}
 	if strings.HasPrefix(verdict, "UNSAFE") {
 		reason := strings.TrimSpace(strings.TrimPrefix(verdict, "UNSAFE:"))
 		if len(reason) > 120 {
 			reason = reason[:120]
 		}
-		return Verdict{Allow: false, Reason: "Haiku flagged: " + reason}
+		return Verdict{Allow: false, Reason: "flagged: " + reason}
 	}
 
 	return allow("inconclusive verdict")
@@ -406,6 +458,83 @@ func callHaiku(ctx context.Context, url, body, apiKey string, cfg Config) (strin
 		}
 	}
 	return "", fmt.Errorf("no text block in response")
+}
+
+// --- Gemini API call -------------------------------------------------------
+
+type geminiRequest struct {
+	Contents []geminiContent `json:"contents"`
+}
+
+type geminiContent struct {
+	Role  string       `json:"role"`
+	Parts []geminiPart `json:"parts"`
+}
+
+type geminiPart struct {
+	Text string `json:"text"`
+}
+
+type geminiResponse struct {
+	Candidates []struct {
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
+	} `json:"candidates"`
+}
+
+func callGemini(ctx context.Context, url, body, apiKey string, cfg Config) (string, error) {
+	prompt := fmt.Sprintf(inspectPrompt, url, body)
+	reqBody, err := json.Marshal(geminiRequest{
+		Contents: []geminiContent{
+			{Role: "user", Parts: []geminiPart{{Text: prompt}}},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal: %w", err)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, DefaultInspectTimeout)
+	defer cancel()
+
+	endpoint := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s",
+		cfg.geminiURL(), DefaultGeminiModel, apiKey)
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := cfg.HTTP
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: DefaultInspectTimeout}
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("gemini %d: %s", resp.StatusCode, truncate(string(raw), 100))
+	}
+
+	var gr geminiResponse
+	if err := json.Unmarshal(raw, &gr); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+	for _, candidate := range gr.Candidates {
+		for _, part := range candidate.Content.Parts {
+			if t := strings.TrimSpace(part.Text); t != "" {
+				return t, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("no text in gemini response")
 }
 
 func truncate(s string, n int) string {
