@@ -52,7 +52,7 @@ const (
 	DefaultGeminiBase = "https://generativelanguage.googleapis.com"
 
 	// DefaultGeminiModel is the cheapest Gemini model for triage.
-	DefaultGeminiModel = "gemini-2.0-flash-lite"
+	DefaultGeminiModel = "gemini-2.5-flash-lite"
 )
 
 // errSSRF is returned by checkSSRF when a URL resolves to a private,
