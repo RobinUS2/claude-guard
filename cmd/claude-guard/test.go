@@ -41,6 +41,17 @@ func cmdTest(args []string) int {
 	}
 	command := strings.Join(rest, " ")
 
+	// Default --cwd to the real working directory so cwd-dependent tiers
+	// (project-scoped freeze, smart git-push, per-project config) evaluate the
+	// same way the live hook would. Without this, `claude-guard test` in a repo
+	// can't resolve the git remote and a project-scoped freeze silently reads
+	// as "not frozen" — misleading when verifying a freeze.
+	if cwd == "" {
+		if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		}
+	}
+
 	result := config.Load("")
 	if result.Warning != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", result.Warning)
