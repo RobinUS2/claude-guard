@@ -22,10 +22,11 @@ freeze state file  ~/.config/claude-guard/freeze.yaml   (absent = not frozen)
         ▼
 Tier 1 (BLOCK) ── FIRST checks: is a freeze active for an env this command targets?
         │              │
-        │              ├─ yes → DENY with a freeze-specific reason (how to lift)
-        │              └─ no  → fall through to the normal tier-1 deny rules
+        │              ├─ high confidence  → DENY  (freeze reason + how to lift)
+        │              ├─ ambiguous        → ASK   (user dialog names the freeze)
+        │              └─ not a frozen env → fall through to normal tier-1 rules
         ▼
-Tier 2..6 (unchanged)
+Tier 2..6 (unchanged)   ← staging deploys & dry-runs land here as usual
 ```
 
 Freeze is a **conditional tier-1 rule**: same "always wins, can't be bypassed"
@@ -60,12 +61,43 @@ Three orthogonal concepts:
 - `claude-guard freeze on` with no `--env` freezes **`prod` only** (the common case).
 - `--env prod,staging` freezes both. `--env all` freezes every catalog entry
   regardless of its env tag.
-- Every catalog entry declares the env(s) it affects. **Ambiguous commands default
-  to the most conservative env (`prod`).** e.g. `terraform apply` with no
-  workspace signal is treated as prod-affecting, so a prod freeze catches it.
+- Every catalog entry declares the env(s) it affects. **Env-ambiguous commands are
+  routed to ASK, not a silent prod hard-block** — see D8. e.g. `terraform apply`
+  with no workspace signal, during a prod freeze, prompts the user (surfacing the
+  freeze) rather than denying outright.
 - Rationale: Robin's whole rule is "prod is careful, staging is relaxed." Freezing
   prod while still shipping to staging is the primary workflow, so env scoping is
   a first-class dimension, not an afterthought.
+
+### D8. Hard block, or ask? → **3-way confidence model: confident=DENY, doubt=ASK, clear-other=pass**
+Robin's rule: "in case of doubt ask, else hard block when a freeze is going on."
+When a freeze is active for the relevant env, the freeze evaluator classifies the
+command by confidence and emits one of three outcomes:
+
+| Confidence | Trigger | Outcome | Hook mechanism |
+|---|---|---|---|
+| **High** | exact catalog match, env confidently frozen (`make release`, `gcloud run deploy`, `make provision-prod`, `git push origin main` in a known deploy-on-push repo) | **DENY** (hard block) | `hook.Deny(freezeReason, "")` — reason shown to Claude + human |
+| **Ambiguous** | plausibly a frozen-env deploy but guard can't confirm env/target (`terraform apply` in an unrecognized workspace; `git push origin main` in an *unknown* repo; a `--include`'d wrapper the guard can't introspect) | **ASK** — normal permission dialog, reason names the active freeze | `permissionDecision:"ask"` on PreToolUse; fallback `hook.ContinueWithMessage(freezeNote)` (see mechanism note) |
+| **Low / none** | clearly not a frozen-env deploy (staging deploy during a prod freeze, any dry-run, feature-branch push) | **no freeze action** — normal flow | `hook.Continue()` |
+
+- **Default posture on a genuine catalog match is DENY.** ASK is reserved for the
+  narrow ambiguous band — it is not the default, so a real prod deploy can't be
+  click-through'd by an over-eager agent. The agent *can* click an ASK, but ASK
+  only fires where the guard genuinely can't tell, and the human sees the freeze.
+- Staging is not "doubt" — a command confidently tagged `staging` during a
+  prod-only freeze is **Low/none → passes through**. Staging still ships.
+
+**Hook mechanism note (verify empirically in Phase 1, like the original Phase-0
+protocol probe):** PreToolUse is documented to accept `permissionDecision: "ask"`
+with the reason surfaced in the dialog — that's the ideal ASK path and needs a
+one-line `hook.Ask(reason)` helper (the package today only has `Allow`/`Deny`/
+`Continue`). If the `"ask"` decision proves unreliable on the installed Claude Code
+build, the **guaranteed fallback** is `hook.ContinueWithMessage(freezeNote)`:
+returns an empty verdict (so Claude Code shows its normal confirm dialog) while
+injecting a "⚠️ release freeze active (prod)…" note into the conversation so both
+the agent and the human know a freeze is on. Either way the ASK outcome surfaces
+the freeze; the difference is only whether the warning rides in the dialog or as a
+conversation note.
 
 ### D3. Does freeze honor shadow mode? → **No — freeze always enforces**
 - Normal tier-1 rules respect `shadow_mode` (log-only bake-in). A freeze is a
@@ -123,14 +155,19 @@ Compiled-in defaults, each an AST matcher (not a regex on raw text), tagged with
 | `studio-merge-prod-pr`     | `make merge-production-pr`                            | prod    |
 | `studio-provision-prod`    | `make provision-prod`                                | prod    |
 | `make-deploy-prod`         | `make deploy`, `make deploy-prod`, `make release-prod` | prod   |
-| `terraform-apply`          | `terraform apply` (+ `-auto-approve`)                | prod\*  |
+| `terraform-apply`          | `terraform apply` (+ `-auto-approve`)                | prod\*  |  ‡
 | `gcloud-run-deploy`        | `gcloud run deploy`, `gcloud run services replace`   | prod    |
 | `gcloud-builds-submit`     | `gcloud builds submit`                               | prod    |
-| `git-push-deploy-branch`   | `git push <remote> main\|master\|production`         | prod    |
+| `git-push-deploy-branch`   | `git push <remote> main\|master\|production`         | prod    |  ‡
 | `make-deploy-staging`      | `make deploy-staging`, `make provision-staging`      | staging |
 | `git-push-staging`         | `git push <remote> staging`                          | staging |
 
-\* env-ambiguous → defaults to prod (D2). A repo's `.claude-guard.yml` can retag.
+\* env-ambiguous → routed to ASK, not silent prod deny (D2/D8). A repo's
+  `.claude-guard.yml` can retag to make it a confident block.
+‡ **ASK-band by default** (D8): high confidence only when the env/repo is
+  positively identified (workspace name, remote on the deploy-on-push allowlist);
+  otherwise the command *asks* and the dialog names the freeze. Confident matches
+  (`make release`, `gcloud run deploy`, known deploy-on-push `main` push) DENY.
 
 > **No `release-*` glob.** An earlier draft armed `make release-*`, which would
 > over-block innocent targets like `make release-notes`/`make release-docs`. The
@@ -239,8 +276,26 @@ When a catalog command is denied by an active freeze, the tier-1 deny reason is:
   (This is an explicit operator lock — no agent can bypass it.)
 ```
 
+**ASK variant** (ambiguous band — the dialog/reason is a warning, not a wall):
+
+```
+⚠️ RELEASE FREEZE ACTIVE (prod) — confirm before proceeding.
+
+  Command : terraform apply
+  Note    : claude-guard can't confirm which environment this targets. A prod
+            release freeze is in effect ("Release-train blackout — v2 launch prep",
+            lifts 2026-07-14 18:00 CEST).
+
+  If this deploys to PROD, cancel and wait — or lift the freeze first:
+    claude-guard freeze off --env prod
+  If this is staging/dev, it's fine to proceed.
+```
+
 Design points:
 - Names the exact catalog rule and env so it's debuggable.
+- **DENY vs ASK is chosen by confidence (D8)**, so a real prod deploy hits the
+  wall while a genuinely-ambiguous command gets a freeze-aware confirmation instead
+  of a false block. Staging never reaches either — it passes through.
 - States what is *still allowed* (staging) so the agent can route around it
   productively instead of stalling.
 - Gives the literal unfreeze commands — the human reading the transcript can act in
@@ -280,8 +335,14 @@ Design points:
        Each entry: `{name, matcher, envs}`. No raw regex.
 6. [ ] Engine: at the TOP of the Tier-1 block loop (before existing deny rules),
        evaluate freeze — if state says an env is frozen and a catalog entry for that
-       env matches, return `Deny` with the freeze reason. Honor `exclude`. Respect
-       repo-scoping for `git-push-deploy-branch` (D4) via existing git-push context.
+       env matches, classify by confidence (D8) and return **`Deny`** (high) or a
+       new **`Ask`** verdict (ambiguous). Honor `exclude`. Respect repo-scoping for
+       `git-push-deploy-branch` (D4) via existing git-push context — a *known*
+       deploy-on-push repo → high/DENY; unknown repo → ambiguous/ASK.
+   6a. [ ] Add `Ask` to the engine `Verdict` enum and a `hook.Ask(reason)` helper
+       (PreToolUse `permissionDecision:"ask"`); verify empirically, else wire the
+       `ContinueWithMessage` fallback (D8 mechanism note). This is the first
+       non-deny/allow verdict the engine emits — thread it through decide.go + log.
 7. [ ] Freeze enforces regardless of `shadow_mode` (D3); still records a shadow trace
        entry `freeze:<rule>` for observability.
 8. [ ] Fold freeze file mtime+hash into `computeRulesHash` so replay/shadow stay honest.
@@ -316,8 +377,11 @@ Design points:
 ## Safety invariants (non-negotiable — carry into implementation)
 - Freeze **cannot** weaken tier 1. It only ADDS denies. A malformed freeze file
   fails toward "not frozen" but logs a WARN (never a panic, never a broken guard).
-- Freeze deny is **unbypassable by agents** — it's tier 1; the LLM tier is
-  approve-only and runs later.
+- A high-confidence freeze **DENY is unbypassable by agents** — it's tier 1; the
+  LLM tier is approve-only and runs later. An **ASK is intentionally answerable**
+  (that's its purpose: the guard is unsure, so a human decides) — but ASK only
+  fires in the narrow ambiguous band, never on a confident catalog match, so a real
+  prod deploy can't be downgraded from DENY to a click-through.
 - Read-only / dry-run commands are never in the catalog.
 - Single global state → every agent in every session is subject to the same freeze.
 - **Freeze denies are never written to the verdict cache.** The deny is
@@ -356,6 +420,14 @@ Critical pass over the first draft surfaced six fixes, now folded in:
    were stopped.
 6. **`--until` tz disambiguation** (Phase 1.2) — bare timestamp = local tz, stored
    with explicit offset.
+
+### 2026-07-06 — Refinement: 3-way confidence (deny / ask / pass), not pure hard-block
+Robin: "will this allow staging? ask or hard block? in doubt ask, else hard block."
+Answer baked in as D8: staging passes through under a prod freeze; confident
+prod-deploy matches hard-DENY; the ambiguous band (env/repo the guard can't
+positively identify) ASKs with a freeze-aware dialog instead of silently blocking.
+Requires a new `Ask` engine verdict + `hook.Ask` helper (PreToolUse `"ask"`), with
+`ContinueWithMessage` as the guaranteed fallback. Revised D2 accordingly.
 
 ## Files to be created / modified
 - `internal/freeze/freeze.go` (new) — state model
