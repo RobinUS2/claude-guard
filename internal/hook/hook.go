@@ -197,6 +197,22 @@ func Deny(reason, hint string) Response {
 	}
 }
 
+// Ask surfaces Claude Code's normal permission dialog for the tool use, with
+// reason shown to the user. Used by the release-freeze tier for ambiguous
+// deploy commands ("in doubt, ask"): the user decides, and the dialog names the
+// active freeze. PreToolUse accepts permissionDecision "ask"; if a given Claude
+// Code build ignores it, the effect degrades to the normal prompt — still safe,
+// and the freeze note also rides in the reason text.
+func Ask(reason string) Response {
+	return Response{
+		HookSpecificOutput: &hookSpecificOutput{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "ask",
+			PermissionDecisionReason: reason,
+		},
+	}
+}
+
 // AllowWithMessage auto-approves the tool use and injects msg into Claude's conversation.
 // Use for contextual hints (e.g. "will process 3.1 GB — 17.4 GB of 100 GB daily budget used").
 func AllowWithMessage(reason, msg string) Response {

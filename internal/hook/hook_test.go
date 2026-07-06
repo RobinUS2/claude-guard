@@ -125,6 +125,32 @@ func TestWriteResponse_Allow(t *testing.T) {
 	}
 }
 
+func TestWriteResponse_Ask(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, Ask("🧊 freeze active — confirm")); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+	var decoded struct {
+		HSO struct {
+			HookEventName            string `json:"hookEventName"`
+			PermissionDecision       string `json:"permissionDecision"`
+			PermissionDecisionReason string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	if decoded.HSO.PermissionDecision != "ask" {
+		t.Errorf("PermissionDecision = %q, want ask", decoded.HSO.PermissionDecision)
+	}
+	if decoded.HSO.HookEventName != "PreToolUse" {
+		t.Errorf("HookEventName = %q", decoded.HSO.HookEventName)
+	}
+	if decoded.HSO.PermissionDecisionReason != "🧊 freeze active — confirm" {
+		t.Errorf("Reason = %q", decoded.HSO.PermissionDecisionReason)
+	}
+}
+
 func TestWriteResponse_Deny(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WriteResponse(&buf, Deny("rm -rf on system directory", "")); err != nil {

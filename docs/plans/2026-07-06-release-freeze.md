@@ -1,7 +1,7 @@
 # Task: Release Freeze — operator-toggled deploy lock enforced for all agents
 
 **Created:** 2026-07-06
-**Status:** Planning
+**Status:** In Progress — Phases 1–4 implemented + tested on `feat/release-freeze` (project scoping added per D9). Pending: Robin review, `make install`, and cto-as-a-service reference/skill/memory updates.
 **Context:** Robin sometimes needs a (production) release freeze — a window where no
 agent, in any session, may run a deploy/release command. Today this is tribal
 knowledge (see the "Monday deploy freeze" memory) enforced by hoping the agent
@@ -68,6 +68,29 @@ Three orthogonal concepts:
 - Rationale: Robin's whole rule is "prod is careful, staging is relaxed." Freezing
   prod while still shipping to staging is the primary workflow, so env scoping is
   a first-class dimension, not an afterthought.
+
+### D9. Project scope → **freeze is scoped to a project (repo group), not all repos**
+Robin: "make sure we know which project this is — e.g. only ai-site-gen and related,
+not felix." A freeze must be able to lock one product's releases while every other
+repo keeps shipping.
+
+- `claude-guard freeze on --project ai-site-gen --env prod` records a **project
+  scope** in the state. Enforcement resolves the current command's repo identity
+  (`git -C <cwd> remote get-url origin`, reusing the same resolution as the smart
+  git-push tier / `reporisk`) and only evaluates the catalog if that repo is **in
+  scope**.
+- **Scope matching = case-insensitive substring on the normalized remote URL**
+  (same mechanism as `reporisk.RemotePattern`). `--project ai-site-gen` matches any
+  origin containing `ai-site-gen`; a Felix repo (origin contains `felix`) does not
+  match → passes through untouched. "and related" = pass several tokens:
+  `--project ai-site-gen,voorpositiviteit,taufinity`. A config `projects:` map can
+  later name groups, but tokens-as-substrings is the MVP and needs no registry.
+- **No `--project` = all repos (global freeze)** — the whole machine is frozen.
+- **Repo can't be identified** (no git remote / detached scratch dir): a
+  *project-scoped* freeze does **not** apply (fail-open — we can't prove it's the
+  frozen project); a *global* freeze still applies. Logged either way.
+- The resolved project + scope decision is shown in `status`, `doctor`, and the
+  deny/ask reason, so "why did/didn't this fire" is always answerable.
 
 ### D8. Hard block, or ask? → **3-way confidence model: confident=DENY, doubt=ASK, clear-other=pass**
 Robin's rule: "in case of doubt ask, else hard block when a freeze is going on."

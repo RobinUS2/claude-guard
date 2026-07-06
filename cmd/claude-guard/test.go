@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
+	"github.com/RobinUS2/claude-guard/internal/freeze"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 )
@@ -62,6 +64,9 @@ func cmdTest(args []string) int {
 		Config:              cfg,
 		Legacy:              legacyList,
 		ProjectConfigLoader: projectconfig.Load,
+		// Reflect the live release-freeze state so `test` answers "why was
+		// this blocked / asked" for freezes too.
+		Freeze: freeze.Sources(freeze.DefaultPath(), os.Getenv, time.Now()),
 	})
 	out := eng.Decide(engine.Input{
 		ToolName: "Bash",

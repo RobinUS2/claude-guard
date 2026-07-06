@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/budget"
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/freeze"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
@@ -129,6 +131,27 @@ func cmdDoctor(_ []string) int {
 				state.LastError))
 	default:
 		warn("llm:circuit", state.Status)
+	}
+
+	// 6a. Release freeze
+	freezeNow := time.Now()
+	if fs, ferr := freeze.Load(freeze.DefaultPath()); ferr != nil {
+		warn("freeze", fmt.Sprintf("malformed freeze file (%v) — treated as NOT frozen", ferr))
+	} else if fs == nil {
+		if es := freeze.EnvState(os.Getenv); es != nil {
+			warn("freeze", fmt.Sprintf("CLAUDE_GUARD_FREEZE env active (this shell): %s", strings.Join(es.FrozenEnvs, ",")))
+		} else {
+			check("freeze", true, "none active")
+		}
+	} else if fs.Expired(freezeNow) {
+		warn("freeze", fmt.Sprintf("EXPIRED %s (lapsed %s) — run 'claude-guard freeze off' to tidy",
+			strings.Join(fs.FrozenEnvs, ","), fs.ExpiresAt.Format("2006-01-02 15:04 MST")))
+	} else {
+		lifts := "manual"
+		if fs.ExpiresAt != nil {
+			lifts = "lifts " + fs.ExpiresAt.Format("2006-01-02 15:04 MST")
+		}
+		warn("freeze", fmt.Sprintf("ACTIVE %s — scope=%s, %s", strings.Join(fs.FrozenEnvs, ","), fs.ScopeLabel(), lifts))
 	}
 
 	// 6b. Cache stats

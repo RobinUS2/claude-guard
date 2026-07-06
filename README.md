@@ -16,6 +16,33 @@
   6. **Human-in-the-loop**: Falls back to user prompt if no verdict is reached.
 - **SSRF Protection**: Guards for `WebFetch` and `WebSearch` tools.
 - **Cross-Provider Verification**: Optional second-opinion from a different LLM provider to defend against prompt injection.
+- **Release Freeze**: An operator-toggled deploy lock enforced for every agent in every session — hard-blocks confident release commands, asks on ambiguous ones, scoped by environment and project. See below.
+
+## 🧊 Release Freeze
+
+Lock deploy/release commands during a code-freeze window. Enforced in Tier 1 for **all agents, all sessions** — no agent can bypass a freeze.
+
+```bash
+# Freeze prod releases for one project (leaves other repos shipping)
+claude-guard freeze on --project ai-site-gen --reason "v2 launch prep"
+
+# Freeze prod + staging with an auto-expiry
+claude-guard freeze on --env prod,staging --until 2026-07-14T18:00
+
+claude-guard freeze status          # what's frozen, scope, when it lifts
+claude-guard freeze off --env prod  # lift one env
+claude-guard freeze off             # lift everything
+```
+
+Behavior when a freeze is active (**"in doubt, ask; else hard block"**):
+
+| Command | Outcome |
+|---|---|
+| Confident deploy — `make release`, `gcloud run deploy`, `make provision-prod` | **DENY** (hard block) |
+| Ambiguous — `terraform apply`, `git push origin main` | **ASK** (dialog names the freeze) |
+| Staging deploy under a prod freeze, dry-runs (`terraform plan`, `make provision-diff`), feature-branch push | **pass through** |
+
+**Scope** — `--env prod|staging|dev|all` (default `prod`); `--project <substring>` matches the repo's origin remote (omit = all repos). A `CLAUDE_GUARD_FREEZE=prod` env var freezes just the current shell's agents. Genuine security denies (`rm -rf /`) still win over a freeze; a freeze never downgrades them to an ask.
 
 ## 🛠️ Quick Start
 

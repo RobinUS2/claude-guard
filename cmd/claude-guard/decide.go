@@ -11,6 +11,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
+	"github.com/RobinUS2/claude-guard/internal/freeze"
 	"github.com/RobinUS2/claude-guard/internal/hook"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
@@ -207,6 +208,10 @@ func cmdDecide(_ []string) int {
 		Store:               sessionStore,
 		RepoRisk:            repoReg,
 		RequireLLM:          os.Getenv("CLAUDE_GUARD_REQUIRE_LLM") == "1",
+		// Release freeze: file + CLAUDE_GUARD_FREEZE env var, loaded once per
+		// hook process. A malformed file fails open (Sources swallows the
+		// error) — never a broken guard.
+		Freeze: freeze.Sources(freeze.DefaultPath(), os.Getenv, time.Now()),
 	})
 	if sessionStore != nil {
 		defer sessionStore.Close()
@@ -230,6 +235,9 @@ func cmdDecide(_ []string) int {
 		case engine.Deny:
 			denyReason := fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule)
 			pResp = hook.DenyPermission(denyReason)
+		case engine.Ask:
+			// PermissionRequest ask = fall through to the normal dialog.
+			pResp = hook.AskPermission(out.Reason)
 		default:
 			pResp = hook.AskPermission("no verdict")
 		}
@@ -249,6 +257,8 @@ func cmdDecide(_ []string) int {
 		case engine.Deny:
 			denyReason := fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule)
 			resp = hook.Deny(denyReason, out.Hint)
+		case engine.Ask:
+			resp = hook.Ask(out.Reason)
 		default:
 			if out.UserMessage != "" {
 				resp = hook.ContinueWithMessage(out.UserMessage)

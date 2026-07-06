@@ -82,10 +82,14 @@ func (r *Registry) Score(remoteURL string) Level {
 	return LevelMedium
 }
 
-// normalizeRemoteURL converts SSH remote URLs to HTTPS form so substring
-// matching works consistently regardless of how the user's git remotes are configured.
+// NormalizeRemoteURL converts SSH remote URLs to HTTPS form so substring
+// matching works consistently regardless of how the user's git remotes are
+// configured. Exported so the freeze package can scope a release freeze to a
+// project by the same remote-URL matching this registry uses.
 // git@github.com:org/repo.git → github.com/org/repo
 // https://github.com/org/repo.git → github.com/org/repo
+func NormalizeRemoteURL(u string) string { return normalizeRemoteURL(u) }
+
 func normalizeRemoteURL(u string) string {
 	u = strings.TrimSuffix(u, ".git")
 	// SSH: git@host:org/repo
