@@ -90,6 +90,27 @@ Three orthogonal concepts:
 - The freeze file is a single global file; the hook fires for every agent. No
   per-agent carve-out — that's the entire point ("enforce for all agents").
 
+### D6. How does the engine obtain freeze state? → **injected dependency, not a global read**
+- The freeze `State` is passed into the engine at construction (like `store`,
+  `legacy`, `RepoRisk`) via a `FreezeProvider func(now) freeze.State`. The tier-1
+  matcher receives it — it does **not** read the global file path itself.
+- Why it matters: (a) corpus/unit tests inject a fixture state and stay
+  deterministic even when Robin has a real freeze on his machine; (b) `replay`/
+  shadow can reconstruct the historical freeze from a snapshot instead of the
+  current file; (c) one read per decision, not one read per matcher eval.
+- In production the provider is a thin closure that reads+caches `freeze.yaml`
+  (with mtime check) once per `Decide` call.
+
+### D7. Break-glass / emergency hotfix during a freeze? → **lift the freeze, no magic bypass**
+- A genuine Sev1 hotfix that must ship during a prod freeze is handled by the human
+  explicitly lifting the freeze (`freeze off --env prod`, deploy, `freeze on`
+  again) — an auditable, logged action. Consistent with Robin's "no autonomous
+  hotfixes" rule: the human decides to override, not the agent.
+- **No `freeze allow-once` escape hatch in v1.** A one-shot bypass is exactly the
+  hole a prompt-injected agent would aim for, and it muddies the audit trail. If
+  the friction proves real, revisit in a later phase with a TOTP-gated bypass
+  (mirroring the taufinity CLI elevation model), not a bare flag.
+
 ---
 
 ## The default freeze catalog (the "include" list)
@@ -101,7 +122,7 @@ Compiled-in defaults, each an AST matcher (not a regex on raw text), tagged with
 | `studio-prod-release`      | `make release`                                       | prod    |
 | `studio-merge-prod-pr`     | `make merge-production-pr`                            | prod    |
 | `studio-provision-prod`    | `make provision-prod`                                | prod    |
-| `make-deploy-prod`         | `make deploy`, `make deploy-prod`, `make release-*`  | prod    |
+| `make-deploy-prod`         | `make deploy`, `make deploy-prod`, `make release-prod` | prod   |
 | `terraform-apply`          | `terraform apply` (+ `-auto-approve`)                | prod\*  |
 | `gcloud-run-deploy`        | `gcloud run deploy`, `gcloud run services replace`   | prod    |
 | `gcloud-builds-submit`     | `gcloud builds submit`                               | prod    |
@@ -110,6 +131,11 @@ Compiled-in defaults, each an AST matcher (not a regex on raw text), tagged with
 | `git-push-staging`         | `git push <remote> staging`                          | staging |
 
 \* env-ambiguous → defaults to prod (D2). A repo's `.claude-guard.yml` can retag.
+
+> **No `release-*` glob.** An earlier draft armed `make release-*`, which would
+> over-block innocent targets like `make release-notes`/`make release-docs`. The
+> catalog uses **explicit target names only**; anything else Robin wants frozen is
+> added per-freeze via `--include`. Globs over-block and erode trust in the freeze.
 
 **Explicitly NOT in the catalog (read-only / dry-run — never frozen):**
 `make provision-diff`, `terraform plan`, `gcloud ... list|describe`, `bq ... --dry_run`,
@@ -241,6 +267,9 @@ Design points:
        Pure, table-tested. Inject `now` for testability (no `time.Now()` in the pkg).
 2. [ ] `cmd/claude-guard/freeze.go` — `freeze on|off|status|validate` subcommand;
        wire into `main.go` dispatch. `--env --reason --until --include --exclude`.
+       `--until` accepts RFC3339 or a bare `YYYY-MM-DDTHH:MM` interpreted in the
+       host's **local** tz; the stored `expires_at` is always written with an
+       explicit offset so it's unambiguous on read.
 3. [ ] Unit tests: load/save round-trip, env-var union, expiry math, off-one-env,
        malformed-file → clear error (not a panic, fail toward "not frozen" but WARN).
 4. [ ] `make build && make test` green.
@@ -265,8 +294,9 @@ Design points:
 10. [ ] `doctor` freeze row (active / none / expired) as specified above.
 11. [ ] `claude-guard test "<cmd>"` shows `tier: instant_block, rule: freeze:<name>`
         when a freeze is active, so "why blocked" is self-service.
-12. [ ] `monitor --file denies` includes freeze denies with the reason (already flows
-        through the deny log — verify schema fields present).
+12. [ ] `monitor --file denies` includes freeze denies with the reason AND the
+        `agent_id`/`agent_type` of the blocked caller (already in the deny schema —
+        verify populated), so Robin can see *which* agents hit the freeze and when.
 
 ### Phase 4 — Docs
 13. [ ] Update `references/claude_guard.md` (tier list gains the conditional freeze;
@@ -290,6 +320,12 @@ Design points:
   approve-only and runs later.
 - Read-only / dry-run commands are never in the catalog.
 - Single global state → every agent in every session is subject to the same freeze.
+- **Freeze denies are never written to the verdict cache.** The deny is
+  state-dependent (true only while frozen); caching it would leak a stale deny
+  after `freeze off`. Freeze is evaluated live in tier 1 on every call — cheap
+  (one struct check), so there's nothing to cache anyway.
+- **Freeze state is injected, never read from a hardcoded path inside a matcher**
+  (D6) — keeps tests deterministic and `replay` honest.
 
 ## Allowed commands (agent-friendly execution)
 `cd ~/Documents/code/claude-guard && make build`, `make test`, `make install`,
@@ -305,6 +341,21 @@ existing deny plumbing (log schema, shadow trace, `test` output). Lower risk.
 
 ### 2026-07-06 — Decision: state in a file, not sqlite/config
 See D1. Operational, human-editable, presence-based unfreeze. Matches llm-circuit.json.
+
+### 2026-07-06 — Local CTO review applied
+Critical pass over the first draft surfaced six fixes, now folded in:
+1. **Injected freeze state (D6)** — matcher must not read a global path, or tests
+   go non-deterministic and `replay` breaks. Biggest architectural gap.
+2. **Never cache freeze denies** (safety invariants) — a cached deny would outlive
+   `freeze off`.
+3. **Dropped the `make release-*` glob** (catalog) — over-blocked `release-notes`
+   etc.; explicit target names only, `--include` for the rest.
+4. **Break-glass path made explicit (D7)** — lift the freeze (auditable); no
+   one-shot bypass flag, which would be the prompt-injection target.
+5. **Freeze denies carry `agent_id`** (Phase 3.12) — so Robin sees which agents
+   were stopped.
+6. **`--until` tz disambiguation** (Phase 1.2) — bare timestamp = local tz, stored
+   with explicit offset.
 
 ## Files to be created / modified
 - `internal/freeze/freeze.go` (new) — state model
