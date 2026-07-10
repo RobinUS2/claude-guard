@@ -162,37 +162,27 @@ func lookupOne(bin, vault, secret string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// VaultLock describes whether a token-vault binary is present and
-// whether any vault it manages is currently unlocked. Distinguishing
-// "not installed" from "installed but locked" lets callers (decide,
-// doctor) tell a genuinely unconfigured LLM tier apart from a
-// temporarily bypassed one — the two need very different messaging.
-type VaultLock struct {
-	Installed bool
-	Unlocked  bool
-}
-
-// LookupVaultLockState runs `token-vault status` and parses its output
-// for an "[unlocked" marker, the same convention the vault-gate shell
-// script already relies on. Bounded by tokenVaultTimeout like every
-// other vault subprocess call here — a hung or misbehaving token-vault
-// must never stall the hook.
-func LookupVaultLockState() VaultLock {
+// TokenVaultInstalled reports whether a token-vault binary can be
+// resolved at all — a cheap presence check (no subprocess spawn), used
+// only to decide whether a "no LLM key" condition is worth a warning.
+// Deliberately does NOT check lock state: whether some vault somewhere
+// is locked or unlocked says nothing about whether the specific
+// Anthropic/Gemini secret this package looks for is available — that
+// question is already answered precisely by LookupTokenVaultAnthropic
+// itself. An earlier version of this package tried to answer a broader
+// "is anything unlocked" question by parsing `token-vault status`
+// output, which (a) was the wrong question for callers that only care
+// about one specific key, and (b) broke silently when the status output
+// format changed. Presence-only avoids both problems.
+func TokenVaultInstalled() bool {
 	bin := absoluteTokenVaultBinary()
 	if bin == "" {
-		return VaultLock{}
+		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), tokenVaultTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "status")
-	// token-vault prints status to stderr; merge both streams like the
-	// vault-gate script does.
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// Binary didn't run at all (missing, not executable, timed out).
-		// Treat the same as "not installed" — we have no status to report.
-		return VaultLock{}
-	}
-	unlocked := strings.Contains(strings.ToLower(string(out)), "[unlocked")
-	return VaultLock{Installed: true, Unlocked: unlocked}
+	// absoluteTokenVaultBinary trusts a test/explicit override path as-is
+	// without checking it exists (the real ~/bin and PATH fallbacks
+	// already only return existing paths) — stat here so this reports
+	// presence correctly regardless of which fallback resolved bin.
+	_, err := os.Stat(bin)
+	return err == nil
 }

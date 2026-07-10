@@ -76,7 +76,7 @@ func cmdDecide(_ []string) int {
 	// format.
 	classifier, verifier := pickClassifierAndVerifier(os.Getenv)
 	if classifier == nil {
-		warnVaultBypassIfLocked(appLogger)
+		warnNoLLMKey(appLogger)
 	}
 
 	cacheRoot := filepath.Join(os.Getenv("HOME"), ".cache", "claude-guard")
@@ -206,6 +206,7 @@ func cmdDecide(_ []string) int {
 		BQBudget:            bqBudget,
 		Store:               sessionStore,
 		RepoRisk:            repoReg,
+		RequireLLM:          os.Getenv("CLAUDE_GUARD_REQUIRE_LLM") == "1",
 	})
 	if sessionStore != nil {
 		defer sessionStore.Close()
@@ -396,46 +397,49 @@ func pickClassifierAndVerifier(getenv func(string) string) (llm.Classifier, llm.
 	}
 }
 
-// vaultBypassWarnTTL rate-limits the stderr bypass warning. decide runs
-// once per Bash tool call, so without a cooldown a locked vault would
-// print this on every single command — the app log entry below still
-// records every occurrence, uncapped, for anyone checking `explain`/`stats`.
-const vaultBypassWarnTTL = 10 * time.Minute
+// noLLMKeyWarnTTL rate-limits the stderr warning. decide runs once per
+// Bash tool call, so without a cooldown a missing key would print this
+// on every single command — the app log entry below still records
+// every occurrence, uncapped, for anyone checking `explain`/`stats`.
+const noLLMKeyWarnTTL = 10 * time.Minute
 
-func vaultBypassMarkerPath() string {
+func noLLMKeyMarkerPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".cache", "claude-guard", "vault-bypass-warned.marker")
+	return filepath.Join(home, ".cache", "claude-guard", "no-llm-key-warned.marker")
 }
 
-// warnVaultBypassIfLocked is called whenever pickClassifierAndVerifier
-// found no usable API key. Most of the time that just means no LLM
-// tier was ever configured — not worth a warning. But when a
-// token-vault is installed and simply locked, the LLM tier is
-// temporarily bypassed rather than absent, and that's worth surfacing:
-// commands that would otherwise be auto-approved by Tier 4 will fall
-// through to a manual confirmation prompt (Tier 6) until it's unlocked.
-func warnVaultBypassIfLocked(appLogger *slog.Logger) {
-	lock := llm.LookupVaultLockState()
-	if !lock.Installed || lock.Unlocked {
+// warnNoLLMKey is called whenever pickClassifierAndVerifier found no
+// usable API key (env vars and the scoped token-vault candidate lookup
+// both came up empty). If token-vault isn't even installed, this is
+// almost certainly a setup that never configured an LLM tier at all —
+// not worth a warning every time. If it IS installed, a key was
+// presumably expected to be reachable, so it's worth surfacing that
+// Tier 4 is unavailable and commands fall through to a manual
+// confirmation prompt (Tier 6) instead of AI auto-approval. Note this
+// deliberately does not ask "is some vault unlocked" — see
+// llm.TokenVaultInstalled's doc comment for why that's the wrong
+// question.
+func warnNoLLMKey(appLogger *slog.Logger) {
+	if !llm.TokenVaultInstalled() {
 		return
 	}
 	if appLogger != nil {
-		appLogger.Warn("llm_tier_bypassed", "reason", "token_vault_locked")
+		appLogger.Warn("llm_tier_unavailable", "reason", "no_key_resolved")
 	}
-	path := vaultBypassMarkerPath()
+	path := noLLMKeyMarkerPath()
 	if path != "" {
-		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < vaultBypassWarnTTL {
+		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < noLLMKeyWarnTTL {
 			return
 		}
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
 		_ = os.WriteFile(path, []byte(""), 0o640)
 	}
-	fmt.Fprintln(os.Stderr, "claude-guard: WARNING: token-vault is locked — LLM tier bypassed this session. "+
-		"Commands that would normally be auto-approved by the AI classifier fall through to a manual "+
-		"confirmation prompt instead. Run 'token-vault decrypt --all' to restore it.")
+	fmt.Fprintln(os.Stderr, "claude-guard: WARNING: no Anthropic/Gemini key resolved — LLM tier unavailable this "+
+		"session. Commands that would normally be auto-approved by the AI classifier fall through to a manual "+
+		"confirmation prompt instead. If this is unexpected, check that the relevant token-vault secret is unlocked.")
 }
 
 // VerifierAnthropicModel is the strong Anthropic model used as a
