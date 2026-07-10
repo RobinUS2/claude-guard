@@ -80,14 +80,24 @@ func cmdDoctor(_ []string) int {
 
 	home, _ := os.UserHomeDir()
 
-	// 5. LLM provider auto-selection from environment
+	// 5. LLM provider auto-selection from environment (AutoSelect already
+	// tries the token-vault fallback internally, so a nil result here
+	// means both env vars and vault lookup came up empty).
 	classifier := llm.AutoSelect("anthropic", os.Getenv)
 	if classifier == nil {
-		// Under Claude Code (CLAUDECODE=1) this is load-bearing: OAuth
-		// does not expose an API key to subprocesses, so the hook's
-		// LLM tier silently disables. Commands that need LLM review
-		// fall through to a user prompt. Error, not warn.
-		if os.Getenv("CLAUDECODE") != "" {
+		if lock := llm.LookupVaultLockState(); lock.Installed && !lock.Unlocked {
+			// Distinct from "no LLM configured at all": a vault exists but
+			// is locked right now, so the LLM tier is BYPASSED, not absent.
+			// Commands that would be auto-approved by Tier 4 fall through
+			// to a manual confirmation prompt until it's unlocked.
+			warn("llm:provider", "BYPASS MODE: token-vault is installed but locked — no AI key available. "+
+				"Commands needing AI review fall through to a manual prompt instead of auto-approval. "+
+				"Run 'token-vault decrypt --all' to restore it.")
+		} else if os.Getenv("CLAUDECODE") != "" {
+			// Under Claude Code (CLAUDECODE=1) this is load-bearing: OAuth
+			// does not expose an API key to subprocesses, so the hook's
+			// LLM tier silently disables. Commands that need LLM review
+			// fall through to a user prompt. Error, not warn.
 			errf("llm:provider",
 				"no ANTHROPIC_API_KEY / GEMINI_API_KEY in claude-guard subprocess env. Claude Code "+
 					"uses OAuth and does NOT export an API key to subprocesses — LLM tier is disabled. "+
