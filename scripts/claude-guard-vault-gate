@@ -2,12 +2,12 @@
 # claude-guard-vault-gate — PreToolUse Bash hook that opportunistically
 # loads token-vault-sourced API keys before handing off to claude-guard.
 #
-# Behaviour:
+# Behaviour (default — bypass mode):
 #   - If `token-vault status` reports a vault in [unlocked ...] state,
 #     load ~/.config/claude-guard/keys.env (if present) into the
 #     environment, then forward stdin to `claude-guard decide`.
 #   - If no vault is unlocked (or token-vault isn't installed at all),
-#     this NO LONGER blocks the command. It warns on stderr and still
+#     this does NOT block the command. It warns on stderr and still
 #     forwards to `claude-guard decide`. The engine's own LLM tier
 #     already handles a missing API key gracefully — it skips Tier 4
 #     and falls through to a manual confirmation prompt for anything
@@ -19,9 +19,19 @@
 #     it, Claude couldn't even run read-only commands to explain what
 #     was stuck.
 #
+# Behaviour (CLAUDE_GUARD_VAULT_GATE_STRICT=1 — strict mode):
+#   - Same unlocked path as above.
+#   - If no vault is unlocked, emits a PreToolUse deny instead of
+#     warning-and-forwarding, instructing Claude to stop and ask the
+#     user to unlock. This restores the pre-bypass-mode behavior for
+#     anyone who wants the deadlock risk over the AI-tier gap. Off by
+#     default because it reintroduces that exact deadlock — set it
+#     deliberately, in the hook command line, not globally.
+#
 # Environment overrides:
-#   TOKEN_VAULT_BIN   path to the token-vault binary (default: token-vault on PATH)
-#   CLAUDE_GUARD_BIN  path to the claude-guard binary (default: claude-guard on PATH)
+#   TOKEN_VAULT_BIN              path to the token-vault binary (default: token-vault on PATH)
+#   CLAUDE_GUARD_BIN             path to the claude-guard binary (default: claude-guard on PATH)
+#   CLAUDE_GUARD_VAULT_GATE_STRICT  "1" to deny instead of bypass when locked (default: unset/bypass)
 #
 # Wire-up in ~/.claude/settings.json:
 #   {
@@ -80,8 +90,19 @@ if printf '%s\n' "$status" | grep -qi '\[unlocked'; then
     fi
   fi
 else
-  # No vault unlocked — bypass mode. Don't source keys.env (nothing to
-  # read), warn so it's visible in the transcript, and still forward.
+  # No vault unlocked.
+  if [ "${CLAUDE_GUARD_VAULT_GATE_STRICT:-0}" = "1" ]; then
+    /usr/bin/env jq -n '{
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: "claude-guard: token vault is locked (strict mode). Stop here and ask the user to unlock before running any shell command. Suggested: `token-vault decrypt --all` (or `token-vault decrypt <customer> <tier>` for one pair). Do not retry this tool call until the user confirms the vault is unlocked."
+      }
+    }'
+    exit 0
+  fi
+  # Bypass mode (default). Don't source keys.env (nothing to read),
+  # warn so it's visible in the transcript, and still forward.
   # claude-guard decide's own doctor/decide-time warning covers the
   # "installed but locked" case in more detail; this is the earliest
   # possible signal, before decide even runs.

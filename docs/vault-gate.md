@@ -100,9 +100,20 @@ way, so you don't want to run it twice):
   on `PATH`).
 - `CLAUDE_GUARD_BIN` — path to the `claude-guard` binary (default: `claude-guard`
   on `PATH`).
+- `CLAUDE_GUARD_VAULT_GATE_STRICT` — set to `1` to deny instead of warn-and-
+  forward when no vault is unlocked, restoring the pre-bypass-mode behavior.
+  Off by default, since turning it on reintroduces the exact deadlock bypass
+  mode exists to avoid — enable it deliberately, in the hook command itself
+  (see below), not as a global env var:
+  ```json
+  {
+    "type": "command",
+    "command": "CLAUDE_GUARD_VAULT_GATE_STRICT=1 /path/to/claude-guard-vault-gate"
+  }
+  ```
 
-Both are useful for tests (shim with a fake binary) and for non-standard
-install locations.
+`TOKEN_VAULT_BIN`/`CLAUDE_GUARD_BIN` are useful for tests (shim with a fake
+binary) and for non-standard install locations.
 
 ## Choosing the matcher
 
