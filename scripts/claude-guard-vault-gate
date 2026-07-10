@@ -1,13 +1,23 @@
 #!/bin/bash
-# claude-guard-vault-gate — PreToolUse Bash hook that requires an unlocked
-# token-vault before any shell command can run.
+# claude-guard-vault-gate — PreToolUse Bash hook that opportunistically
+# loads token-vault-sourced API keys before handing off to claude-guard.
 #
 # Behaviour:
-#   - If `token-vault status` reports no vault in [unlocked ...] state,
-#     emit a PreToolUse deny decision with a reason that instructs Claude
-#     to stop and ask the user to unlock the vault.
-#   - Otherwise, forward stdin to `claude-guard decide` so the normal
-#     safety classifier still runs.
+#   - If `token-vault status` reports a vault in [unlocked ...] state,
+#     load ~/.config/claude-guard/keys.env (if present) into the
+#     environment, then forward stdin to `claude-guard decide`.
+#   - If no vault is unlocked (or token-vault isn't installed at all),
+#     this NO LONGER blocks the command. It warns on stderr and still
+#     forwards to `claude-guard decide`. The engine's own LLM tier
+#     already handles a missing API key gracefully — it skips Tier 4
+#     and falls through to a manual confirmation prompt for anything
+#     that isn't otherwise recognized as safe by the deterministic
+#     rule tiers. Blocking every Bash command here as well was
+#     redundant with that fallback and created a deadlock: unlocking
+#     the vault requires an interactive passphrase prompt Claude can't
+#     supply through the Bash tool, so if nobody was around to unlock
+#     it, Claude couldn't even run read-only commands to explain what
+#     was stuck.
 #
 # Environment overrides:
 #   TOKEN_VAULT_BIN   path to the token-vault binary (default: token-vault on PATH)
@@ -37,46 +47,45 @@ CLAUDE_GUARD_BIN="${CLAUDE_GUARD_BIN:-claude-guard}"
 # token-vault prints status to stderr, so merge into stdout for grep.
 status="$("$TOKEN_VAULT_BIN" status 2>&1 || true)"
 
-if ! printf '%s\n' "$status" | grep -qi '\[unlocked'; then
-  /usr/bin/env jq -n '{
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: "claude-guard: token vault is locked. Stop here and ask the user to unlock before running any shell command. Suggested: `token-vault decrypt --all` (or `token-vault decrypt <customer>` for a single vault). Do not retry this tool call until the user confirms the vault is unlocked."
-    }
-  }'
-  exit 0
+if printf '%s\n' "$status" | grep -qi '\[unlocked'; then
+  # Vault unlocked — load keys.env, but only after verifying it is
+  # owner-only (not group- or world-readable) and owned by the current
+  # user. Use strict line-by-line parsing instead of `source` to
+  # prevent arbitrary code execution from a compromised or
+  # world-writable file.
+  KEYS_ENV="$HOME/.config/claude-guard/keys.env"
+  if [ -f "$KEYS_ENV" ]; then
+    # stat -f on macOS, stat -c on Linux.
+    if stat --version >/dev/null 2>&1; then
+      # GNU stat
+      owner_uid=$(stat -c '%u' "$KEYS_ENV" 2>/dev/null)
+      perms=$(stat -c '%a' "$KEYS_ENV" 2>/dev/null)
+    else
+      # BSD/macOS stat
+      owner_uid=$(stat -f '%u' "$KEYS_ENV" 2>/dev/null)
+      perms=$(stat -f '%Lp' "$KEYS_ENV" 2>/dev/null)
+    fi
+    if [ "$owner_uid" = "$(id -u)" ] && [ "$perms" = "600" ]; then
+      # Safe to parse. Read KEY=VALUE lines; skip comments and blanks.
+      while IFS='=' read -r key val; do
+        case "$key" in
+          ''|\#*) continue ;;
+        esac
+        # Reject keys that are not plain identifiers.
+        case "$key" in
+          *[!A-Za-z0-9_]*) continue ;;
+        esac
+        export "$key=$val"
+      done < "$KEYS_ENV"
+    fi
+  fi
+else
+  # No vault unlocked — bypass mode. Don't source keys.env (nothing to
+  # read), warn so it's visible in the transcript, and still forward.
+  # claude-guard decide's own doctor/decide-time warning covers the
+  # "installed but locked" case in more detail; this is the earliest
+  # possible signal, before decide even runs.
+  echo "claude-guard-vault-gate: WARNING: no token-vault unlocked — running in BYPASS MODE (no AI classification tier this call). Commands will fall through to a manual confirmation prompt instead of AI auto-approval. Run 'token-vault decrypt --all' to restore it." >&2
 fi
 
-# Vault unlocked — forward to the real claude-guard.
-# Load keys.env if present, but only after verifying it is owner-only
-# (not group- or world-readable) and owned by the current user.
-# Use strict line-by-line parsing instead of `source` to prevent arbitrary
-# code execution from a compromised or world-writable file.
-KEYS_ENV="$HOME/.config/claude-guard/keys.env"
-if [ -f "$KEYS_ENV" ]; then
-  # stat -f on macOS, stat -c on Linux.
-  if stat --version >/dev/null 2>&1; then
-    # GNU stat
-    owner_uid=$(stat -c '%u' "$KEYS_ENV" 2>/dev/null)
-    perms=$(stat -c '%a' "$KEYS_ENV" 2>/dev/null)
-  else
-    # BSD/macOS stat
-    owner_uid=$(stat -f '%u' "$KEYS_ENV" 2>/dev/null)
-    perms=$(stat -f '%Lp' "$KEYS_ENV" 2>/dev/null)
-  fi
-  if [ "$owner_uid" = "$(id -u)" ] && [ "$perms" = "600" ]; then
-    # Safe to parse. Read KEY=VALUE lines; skip comments and blanks.
-    while IFS='=' read -r key val; do
-      case "$key" in
-        ''|\#*) continue ;;
-      esac
-      # Reject keys that are not plain identifiers.
-      case "$key" in
-        *[!A-Za-z0-9_]*) continue ;;
-      esac
-      export "$key=$val"
-    done < "$KEYS_ENV"
-  fi
-fi
 printf '%s' "$input" | exec "$CLAUDE_GUARD_BIN" decide

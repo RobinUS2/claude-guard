@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -74,6 +75,9 @@ func cmdDecide(_ []string) int {
 	// against prompt injection attacks targeted at one provider's prompt
 	// format.
 	classifier, verifier := pickClassifierAndVerifier(os.Getenv)
+	if classifier == nil {
+		warnVaultBypassIfLocked(appLogger)
+	}
 
 	cacheRoot := filepath.Join(os.Getenv("HOME"), ".cache", "claude-guard")
 	var br *breaker.Breaker
@@ -390,6 +394,48 @@ func pickClassifierAndVerifier(getenv func(string) string) (llm.Classifier, llm.
 	default:
 		return nil, nil
 	}
+}
+
+// vaultBypassWarnTTL rate-limits the stderr bypass warning. decide runs
+// once per Bash tool call, so without a cooldown a locked vault would
+// print this on every single command — the app log entry below still
+// records every occurrence, uncapped, for anyone checking `explain`/`stats`.
+const vaultBypassWarnTTL = 10 * time.Minute
+
+func vaultBypassMarkerPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "claude-guard", "vault-bypass-warned.marker")
+}
+
+// warnVaultBypassIfLocked is called whenever pickClassifierAndVerifier
+// found no usable API key. Most of the time that just means no LLM
+// tier was ever configured — not worth a warning. But when a
+// token-vault is installed and simply locked, the LLM tier is
+// temporarily bypassed rather than absent, and that's worth surfacing:
+// commands that would otherwise be auto-approved by Tier 4 will fall
+// through to a manual confirmation prompt (Tier 6) until it's unlocked.
+func warnVaultBypassIfLocked(appLogger *slog.Logger) {
+	lock := llm.LookupVaultLockState()
+	if !lock.Installed || lock.Unlocked {
+		return
+	}
+	if appLogger != nil {
+		appLogger.Warn("llm_tier_bypassed", "reason", "token_vault_locked")
+	}
+	path := vaultBypassMarkerPath()
+	if path != "" {
+		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < vaultBypassWarnTTL {
+			return
+		}
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		_ = os.WriteFile(path, []byte(""), 0o640)
+	}
+	fmt.Fprintln(os.Stderr, "claude-guard: WARNING: token-vault is locked — LLM tier bypassed this session. "+
+		"Commands that would normally be auto-approved by the AI classifier fall through to a manual "+
+		"confirmation prompt instead. Run 'token-vault decrypt --all' to restore it.")
 }
 
 // VerifierAnthropicModel is the strong Anthropic model used as a

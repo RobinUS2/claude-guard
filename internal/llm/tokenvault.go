@@ -161,3 +161,38 @@ func lookupOne(bin, vault, secret string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// VaultLock describes whether a token-vault binary is present and
+// whether any vault it manages is currently unlocked. Distinguishing
+// "not installed" from "installed but locked" lets callers (decide,
+// doctor) tell a genuinely unconfigured LLM tier apart from a
+// temporarily bypassed one — the two need very different messaging.
+type VaultLock struct {
+	Installed bool
+	Unlocked  bool
+}
+
+// LookupVaultLockState runs `token-vault status` and parses its output
+// for an "[unlocked" marker, the same convention the vault-gate shell
+// script already relies on. Bounded by tokenVaultTimeout like every
+// other vault subprocess call here — a hung or misbehaving token-vault
+// must never stall the hook.
+func LookupVaultLockState() VaultLock {
+	bin := absoluteTokenVaultBinary()
+	if bin == "" {
+		return VaultLock{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), tokenVaultTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "status")
+	// token-vault prints status to stderr; merge both streams like the
+	// vault-gate script does.
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// Binary didn't run at all (missing, not executable, timed out).
+		// Treat the same as "not installed" — we have no status to report.
+		return VaultLock{}
+	}
+	unlocked := strings.Contains(strings.ToLower(string(out)), "[unlocked")
+	return VaultLock{Installed: true, Unlocked: unlocked}
+}
