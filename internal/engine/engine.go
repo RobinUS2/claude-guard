@@ -25,7 +25,6 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/budget"
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
-	"github.com/RobinUS2/claude-guard/internal/reporisk"
 	"github.com/RobinUS2/claude-guard/internal/filectx"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
@@ -35,11 +34,12 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 	"github.com/RobinUS2/claude-guard/internal/projectctx"
 	"github.com/RobinUS2/claude-guard/internal/redact"
+	"github.com/RobinUS2/claude-guard/internal/reporisk"
 	"github.com/RobinUS2/claude-guard/internal/review"
 	"github.com/RobinUS2/claude-guard/internal/rules"
-	"github.com/RobinUS2/claude-guard/internal/tokensnapshot"
 	"github.com/RobinUS2/claude-guard/internal/shellparse"
 	"github.com/RobinUS2/claude-guard/internal/store"
+	"github.com/RobinUS2/claude-guard/internal/tokensnapshot"
 	"github.com/RobinUS2/claude-guard/internal/version"
 )
 
@@ -157,10 +157,17 @@ type Engine struct {
 	breaker  *breaker.Breaker
 	budget   *budget.Budget
 	cache    *cache.Cache
-	legacy   *legacy.AllowList    // tier 5: migrated allow list from settings.json
-	bqBudget *budget.BQBudget     // BQ pre-flight budget tracker (nil = disabled)
-	store    *store.Store         // session-aware state (nil = session tier disabled)
-	repoRisk *reporisk.Registry   // git push risk scoring (nil = heuristics only)
+	legacy   *legacy.AllowList  // tier 5: migrated allow list from settings.json
+	bqBudget *budget.BQBudget   // BQ pre-flight budget tracker (nil = disabled)
+	store    *store.Store       // session-aware state (nil = session tier disabled)
+	repoRisk *reporisk.Registry // git push risk scoring (nil = heuristics only)
+
+	// requireLLM, when true, turns "no LLM classifier available" into an
+	// explicit Tier 6 deny instead of a silent fall-through to the user's
+	// own permission prompt. Opt-in (CLAUDE_GUARD_REQUIRE_LLM=1) — off by
+	// default because most setups never configure an LLM key at all, and
+	// denying every unmatched command in that case would be surprising.
+	requireLLM bool
 
 	// ProjectConfigLoader is called per-decide to look up a
 	// per-project .claude-guard.yml. Can be nil (feature disabled).
@@ -226,6 +233,10 @@ type Options struct {
 	// RepoRisk is the loaded repo risk registry for smart git push scoring (Tier 2.7).
 	// Nil disables registry-based scoring; heuristics still run.
 	RepoRisk *reporisk.Registry
+
+	// RequireLLM turns "no LLM classifier available" into an explicit
+	// Tier 6 deny instead of a silent fall-through. See Engine.requireLLM.
+	RequireLLM bool
 }
 
 // New creates an engine with the given config and logger.
@@ -252,6 +263,7 @@ func NewWithOptions(opts Options) *Engine {
 		bqBudget:            opts.BQBudget,
 		store:               opts.Store,
 		repoRisk:            opts.RepoRisk,
+		requireLLM:          opts.RequireLLM,
 	}
 	if e.cfg == nil {
 		e.cfg = config.Default()
@@ -833,7 +845,23 @@ func (e *Engine) Decide(in Input) Output {
 		}
 	}
 
-	// Tier 6: default (no verdict, fall through to user prompt).
+	// Tier 6: default (no verdict, fall through to user prompt) — unless
+	// requireLLM is set and the reason Tier 4 never ran is specifically a
+	// missing classifier (not a budget/circuit-breaker skip, which already
+	// have their own SkipReason set above and shouldn't be conflated with
+	// "no key configured"). e.llm is nil exactly when pickClassifierAndVerifier
+	// found no usable key via env vars or the scoped token-vault lookup —
+	// checking the relevant Anthropic/Gemini candidates specifically, not
+	// any broader "is some vault unlocked" signal.
+	if e.requireLLM && e.llm == nil && out.SkipReason == "" && !e.cfg.ShadowMode {
+		out.Verdict = Deny
+		out.Tier = "require_llm"
+		out.Reason = "no LLM classifier available (CLAUDE_GUARD_REQUIRE_LLM is set) — unlock whichever vault holds your Anthropic/Gemini key, or unset CLAUDE_GUARD_REQUIRE_LLM to fall through to a manual prompt instead"
+		out.Latency = time.Since(start)
+		e.record(in, out)
+		return out
+	}
+
 	out.Latency = time.Since(start)
 	e.record(in, out)
 	writePendingApproval(in.ToolUseID, in.Command, "", in.CWD, in.SessionID, "no rule matched")
@@ -1731,13 +1759,13 @@ const sequenceInactivityTimeout = 10 * time.Minute
 // even when the program+subcommand match a known sequence step. The user must
 // explicitly approve any command containing these flags.
 var sequenceDangerFlags = []string{
-	"-destroy", "--destroy",   // terraform apply -destroy
-	"-force", "--force",       // various force operations
-	"--replace",               // terraform apply --replace=
-	"--recreate",              // docker-compose recreate, etc.
-	"--hard",                  // git reset --hard
-	"--purge",                 // apt/dpkg --purge
-	"--delete", "-D",          // git branch -D, etc.
+	"-destroy", "--destroy", // terraform apply -destroy
+	"-force", "--force", // various force operations
+	"--replace",      // terraform apply --replace=
+	"--recreate",     // docker-compose recreate, etc.
+	"--hard",         // git reset --hard
+	"--purge",        // apt/dpkg --purge
+	"--delete", "-D", // git branch -D, etc.
 }
 
 // commandHasDangerFlag reports whether cmd contains any sequenceDangerFlag.

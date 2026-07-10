@@ -1577,3 +1577,58 @@ func TestEngine_RewriteHint_EmptyOnContinue(t *testing.T) {
 		t.Errorf("Hint = %q, want empty on Continue verdict", out.Hint)
 	}
 }
+
+func TestDecide_RequireLLM_NoClassifier_DeniesOnFallthrough(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	e := NewWithOptions(Options{Config: cfg, RequireLLM: true})
+	// No LLM configured (Options.LLM left nil) — a command that would
+	// otherwise fall through to Continue should deny instead.
+	out := e.Decide(Input{ToolName: "Bash", Command: "make deploy"})
+	if out.Verdict != Deny {
+		t.Fatalf("Verdict = %v (tier=%s), want Deny", out.Verdict, out.Tier)
+	}
+	if out.Tier != "require_llm" {
+		t.Errorf("Tier = %q, want require_llm", out.Tier)
+	}
+}
+
+func TestDecide_RequireLLMFalse_FallsThroughNormally(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	e := NewWithOptions(Options{Config: cfg, RequireLLM: false})
+	out := e.Decide(Input{ToolName: "Bash", Command: "make deploy"})
+	if out.Verdict != Continue {
+		t.Fatalf("Verdict = %v, want Continue (RequireLLM=false is the default, unchanged behavior)", out.Verdict)
+	}
+}
+
+func TestDecide_RequireLLM_WithClassifierAvailable_DoesNotForceDeny(t *testing.T) {
+	stub := &stubClassifier{verdict: llm.VerdictUnsure}
+	e := newTestEngineWithClassifier(stub)
+	e.requireLLM = true
+	// Classifier IS available (non-nil) — RequireLLM must not force a deny
+	// just because the LLM's own verdict was unsure; only a nil classifier
+	// (no key resolvable at all) should trigger the require-LLM deny.
+	out := e.Decide(Input{ToolName: "Bash", Command: "make deploy"})
+	if out.Verdict == Deny && out.Tier == "require_llm" {
+		t.Fatalf("Verdict = %v (tier=%s), should not force-deny when a classifier is available", out.Verdict, out.Tier)
+	}
+}
+
+func TestDecide_RequireLLM_BudgetExhausted_DoesNotDoubleDeny(t *testing.T) {
+	// When llm_budget_exhausted already explains why Tier 4 didn't run,
+	// RequireLLM must not pile a second, misleading "no classifier"
+	// deny on top of it — SkipReason being already set is the signal.
+	stub := &stubClassifier{verdict: llm.VerdictSafe}
+	bgt := budget.New(t.TempDir(), 0, 10) // 0 daily LLM calls allowed
+	e := newTestEngineWithClassifierAndBudget(stub, bgt)
+	e.requireLLM = true
+	out := e.Decide(Input{ToolName: "Bash", Command: "make deploy"})
+	if out.SkipReason != "llm_budget_exhausted" {
+		t.Fatalf("SkipReason = %q, want llm_budget_exhausted (test setup assumption broke)", out.SkipReason)
+	}
+	if out.Tier == "require_llm" {
+		t.Errorf("Tier = %q, should not fire require_llm deny when SkipReason is already set", out.Tier)
+	}
+}

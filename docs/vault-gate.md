@@ -1,66 +1,93 @@
 # Vault gate
 
 `bin/claude-guard-vault-gate` is an optional PreToolUse wrapper for the `Bash`
-matcher. When a `token-vault` is unlocked, it loads
-`~/.config/claude-guard/keys.env` (if present) before forwarding to
-`claude-guard decide`, so vault-sourced API keys reach the LLM tier without
-being exported to your interactive shell. When no vault is unlocked, it
-**warns and still forwards** — it no longer blocks the command.
+matcher. It loads `~/.config/claude-guard/keys.env` (if present) into the
+environment, then forwards unconditionally to `claude-guard decide`. That's
+the whole job — it does not gate on vault lock state at all.
 
 This is useful when your Anthropic/Gemini API key (used by claude-guard's
 own LLM classification tier) lives in a
 [`token-vault`](https://github.com/RobinUS2/token-vault)-style session
 store rather than a plain environment variable.
 
-## Why it doesn't block anymore
+## Why this doesn't check vault lock state anymore
 
-An earlier version denied every Bash command outright when no vault was
-unlocked, on the theory that shell work might need vault-sourced secrets.
-In practice this created a deadlock: unlocking a vault requires an
-interactive passphrase prompt that Claude can't supply through the Bash
-tool, so if nobody was around to unlock it, Claude couldn't even run
-harmless read-only commands (`git status`, `go build`, `ls`) to explain
-what was stuck — none of which need a secret at all.
+Two earlier versions of this script tried to answer "is it safe to proceed"
+by checking `token-vault status` for a lock/unlock marker:
 
-The vault's only real purpose from claude-guard's point of view is
-supplying the Anthropic/Gemini key for Tier 4 (the LLM classifier,
-approve-only — see `internal/llm`). `claude-guard decide` already handles
-a missing key gracefully: Tier 4 is skipped, and the command falls
-through the remaining tiers to a manual confirmation prompt if nothing
-else resolves it. So the gate no longer duplicates that decision — it
-just makes sure the key is loaded when available, and gets out of the
-way (with a warning) when it isn't. You still get asked when a call
-would have been auto-approved by the AI tier; the difference is that
-now you actually get asked, instead of every command being denied
-upfront.
+- v1 denied every Bash command outright when no vault was unlocked. This
+  deadlocked: unlocking a vault needs an interactive passphrase Claude
+  can't supply through the Bash tool, so if nobody was around to unlock
+  it, Claude couldn't even run harmless read-only commands (`git status`,
+  `go build`, `ls`) to explain what was stuck.
+- v2 replaced the deny with a warn-and-forward default, plus an opt-in
+  `CLAUDE_GUARD_VAULT_GATE_STRICT` toggle back to denying. This still broke
+  in practice: the token-vault CLI's tiered rewrite silently stopped
+  printing lock-state text in `status` output at all, so the grep this
+  script depended on never matched — meaning strict mode denied *every*
+  command regardless of whether anything was actually unlocked, in every
+  session using it, the moment it shipped.
+
+The deeper problem both versions shared: **"is some vault unlocked
+somewhere" was never the right question.** This hook only cares about one
+thing — can claude-guard get the Anthropic/Gemini key it uses for its own
+LLM classification tier. A Standard-tier customer being unlocked (or
+locked) says nothing about whether that specific key is available, and
+`token-vault status`'s output format isn't a stable contract to grep
+against — it already changed shape once and silently broke this exact
+check.
+
+The precise question is already answered correctly elsewhere:
+`llm.LookupTokenVaultAnthropic()` (in the claude-guard Go binary) tries the
+specific candidate `(vault, secret)` pairs directly, with its own bounded
+timeout, independent of any other vault's lock state. So this script no
+longer duplicates that logic at all — it just loads `keys.env` (a plain
+local file, not the vault itself, so no lock-state check is needed to read
+it either) and forwards. `claude-guard decide` already falls through to a
+manual confirmation prompt when no key is available and nothing else
+resolves the command; see `CLAUDE_GUARD_REQUIRE_LLM` below if you want that
+case to deny instead.
 
 ## Behaviour
 
 Stdin: the standard PreToolUse JSON payload from Claude Code.
 
-1. Run `token-vault status`. Output is captured from stderr (where the
-   real `token-vault` prints) merged into stdout.
-2. If the output contains `[unlocked` for any vault → source
-   `~/.config/claude-guard/keys.env` if present (safe, owner-only-file
-   parsing, no `source`/eval), then forward stdin to `claude-guard
-   decide` unchanged.
-3. Otherwise → print a warning to stderr (bypass mode: no AI
-   classification tier this call), then **still** forward stdin to
-   `claude-guard decide` unchanged. No deny is emitted.
+1. If `~/.config/claude-guard/keys.env` exists and is owner-only (not
+   group- or world-readable), parse it line-by-line (`KEY=VALUE`, no
+   `source`/eval) and export each variable.
+2. Forward stdin to `claude-guard decide` unconditionally.
 
-`claude-guard decide` itself also detects this condition independently
-(via `llm.LookupVaultLockState()`) and prints its own rate-limited
-stderr warning plus an app-log entry — so the bypass is visible even if
-you invoke `claude-guard decide` directly, without this wrapper.
-`claude-guard doctor` reports it too, distinct from "no LLM configured
-at all":
+That's it — no vault status check, no deny path, no strict/bypass modes in
+this script. `claude-guard decide` handles the "no LLM key available" case
+itself, using the scoped candidate lookup described above.
 
+## Making "no LLM key" deny instead of fall through
+
+Set `CLAUDE_GUARD_REQUIRE_LLM=1` on the hook command line (inherited by
+`claude-guard decide` via `exec`, since this wrapper doesn't need to know
+about it at all):
+
+```json
+{
+  "type": "command",
+  "command": "CLAUDE_GUARD_REQUIRE_LLM=1 /path/to/claude-guard-vault-gate"
+}
 ```
-[warn] llm:provider                       BYPASS MODE: token-vault is installed but locked — no AI key
-                                           available. Commands needing AI review fall through to a
-                                           manual prompt instead of auto-approval. Run 'token-vault
-                                           decrypt --all' to restore it.
-```
+
+When set, `claude-guard decide`'s Tier 6 (the final fallback, reached only
+when nothing else — Tier 1 block, Tier 2 allow, cache, LLM, legacy list —
+already resolved the command) denies instead of falling through, but only
+when the reason Tier 4 didn't run is specifically "no classifier available"
+(`e.llm == nil` — env vars and the scoped token-vault lookup both came up
+empty). It does not fire when:
+- a classifier *is* available but returned an unsure/unsafe verdict (that
+  case already falls through by design — the LLM tier is approve-only), or
+- Tier 4 was skipped for an unrelated reason (LLM daily budget exhausted,
+  circuit breaker open) — those already have their own `SkipReason` and
+  shouldn't be reported as "no key configured".
+
+Off by default: most setups never configure an LLM key at all, and denying
+every unmatched command in that case would be a surprising default.
 
 ## Installation
 
@@ -96,24 +123,11 @@ way, so you don't want to run it twice):
 
 ### Environment overrides
 
-- `TOKEN_VAULT_BIN` — path to the `token-vault` binary (default: `token-vault`
-  on `PATH`).
-- `CLAUDE_GUARD_BIN` — path to the `claude-guard` binary (default: `claude-guard`
-  on `PATH`).
-- `CLAUDE_GUARD_VAULT_GATE_STRICT` — set to `1` to deny instead of warn-and-
-  forward when no vault is unlocked, restoring the pre-bypass-mode behavior.
-  Off by default, since turning it on reintroduces the exact deadlock bypass
-  mode exists to avoid — enable it deliberately, in the hook command itself
-  (see below), not as a global env var:
-  ```json
-  {
-    "type": "command",
-    "command": "CLAUDE_GUARD_VAULT_GATE_STRICT=1 /path/to/claude-guard-vault-gate"
-  }
-  ```
-
-`TOKEN_VAULT_BIN`/`CLAUDE_GUARD_BIN` are useful for tests (shim with a fake
-binary) and for non-standard install locations.
+- `CLAUDE_GUARD_BIN` — path to the `claude-guard` binary (default:
+  `claude-guard` on `PATH`). Useful for tests and non-standard install
+  locations.
+- `CLAUDE_GUARD_REQUIRE_LLM` — see above. Read directly by `claude-guard
+  decide`, not by this wrapper.
 
 ## Choosing the matcher
 
@@ -125,64 +139,43 @@ at the same script.
 
 ## Testing locally
 
-Unlocked path (loads keys.env, forwards to `claude-guard decide`):
-
 ```bash
 echo '{"tool_name":"Bash","tool_input":{"command":"ls"}}' \
   | ./scripts/claude-guard-vault-gate
 # → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow",...}}
 ```
 
-Locked path via a fake `token-vault` shim — warns, but still forwards
-and still gets a normal decide verdict (here `ls` matches a Tier 2 rule
-that needs no LLM at all):
+An ambiguous command with no LLM key available and `CLAUDE_GUARD_REQUIRE_LLM`
+unset falls through to no verdict (Claude Code's own permission prompt
+decides):
 
 ```bash
-mkdir -p /tmp/fake-vault-bin
-cat > /tmp/fake-vault-bin/token-vault <<'EOF'
-#!/bin/bash
-cat 1>&2 <<'STATUS'
-[vault] Token Vaults
-
-  demo  1 secret(s)  [locked]
-STATUS
-EOF
-chmod +x /tmp/fake-vault-bin/token-vault
-
-TOKEN_VAULT_BIN=/tmp/fake-vault-bin/token-vault \
-  ./scripts/claude-guard-vault-gate <<< '{"tool_name":"Bash","tool_input":{"command":"ls"}}'
-# stderr → claude-guard-vault-gate: WARNING: no token-vault unlocked — running in BYPASS MODE ...
-# stdout → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"tier=instant_allow rule=posix-readonly"}}
-```
-
-An ambiguous command that would normally rely on the LLM tier falls
-through to no verdict (Claude Code's own permission prompt decides)
-instead of being denied:
-
-```bash
-TOKEN_VAULT_BIN=/tmp/fake-vault-bin/token-vault \
+env -i HOME="$HOME" PATH=/usr/bin:/bin CLAUDE_GUARD_BIN=claude-guard \
   ./scripts/claude-guard-vault-gate <<< '{"tool_name":"Bash","tool_input":{"command":"some-random-custom-script.sh --deploy"}}'
 # stdout → {}
 ```
 
+Same, with `CLAUDE_GUARD_REQUIRE_LLM=1`:
+
+```bash
+env -i HOME="$HOME" PATH=/usr/bin:/bin CLAUDE_GUARD_BIN=claude-guard CLAUDE_GUARD_REQUIRE_LLM=1 \
+  ./scripts/claude-guard-vault-gate <<< '{"tool_name":"Bash","tool_input":{"command":"some-random-custom-script.sh --deploy"}}'
+# stdout → {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",...}}
+```
+
+(`env -i` with a bare `PATH=/usr/bin:/bin` is only needed to prove the
+deny path in an environment that has no real key configured anywhere —
+in practice, if you already have `ANTHROPIC_API_KEY`/`GEMINI_API_KEY` set
+or a working token-vault, decide will find a real key and this won't
+trigger.)
+
 ## Known limits
 
-- **No real cryptographic enforcement.** The gate trusts `token-vault
-  status`. Anyone who can run the gate can also run `token-vault decrypt`.
-  This is a workflow gate, not an authz boundary — it never was one, and
-  now that it can't even deny, that's more explicit than before.
-- **`token-vault status` writes to stderr.** The gate merges stderr into
-  stdout before grepping. If your `token-vault` fork changes the output
-  format, update the grep pattern (currently `\[unlocked`).
-- **Unlock state scope.** `token-vault` persists lease state to a file
-  readable from any shell, so the hook's subshell sees the same state as
-  your interactive shell. Implementations that store state in environment
-  variables only won't work with this gate without modification.
-- **The bypass warning can't distinguish "no vault installed" from
-  "vault installed but locked" at the shell-script level** — that
-  distinction needs `token-vault status`'s exit behavior, which the
-  gate doesn't parse beyond the `[unlocked` grep. `claude-guard doctor`
-  and `claude-guard decide`'s own warning (both backed by
-  `llm.LookupVaultLockState()`) do make that distinction, since they
-  can tell an exec failure (not installed) apart from a locked status
-  report.
+- **No real cryptographic enforcement.** Anyone who can run this gate can
+  also run `token-vault decrypt` or read `keys.env` directly. This is a
+  workflow convenience, not an authz boundary.
+- **`keys.env` covers Gemini too; the Go-level token-vault lookup is
+  Anthropic-only.** `llm.LookupTokenVaultAnthropic()` only tries Anthropic
+  candidate secrets. If your Gemini key lives in a vault rather than an
+  env var, `keys.env` (populated by you, however you like) is currently
+  the only path that gets it into claude-guard's environment.

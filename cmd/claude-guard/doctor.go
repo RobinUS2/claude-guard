@@ -85,14 +85,16 @@ func cmdDoctor(_ []string) int {
 	// means both env vars and vault lookup came up empty).
 	classifier := llm.AutoSelect("anthropic", os.Getenv)
 	if classifier == nil {
-		if lock := llm.LookupVaultLockState(); lock.Installed && !lock.Unlocked {
-			// Distinct from "no LLM configured at all": a vault exists but
-			// is locked right now, so the LLM tier is BYPASSED, not absent.
-			// Commands that would be auto-approved by Tier 4 fall through
-			// to a manual confirmation prompt until it's unlocked.
-			warn("llm:provider", "BYPASS MODE: token-vault is installed but locked — no AI key available. "+
-				"Commands needing AI review fall through to a manual prompt instead of auto-approval. "+
-				"Run 'token-vault decrypt --all' to restore it.")
+		if llm.TokenVaultInstalled() {
+			// Distinct from "no LLM configured at all": token-vault is set
+			// up, so a key was presumably expected to be reachable, but
+			// neither an env var nor the scoped token-vault lookup found
+			// one right now. Doesn't check whether some OTHER vault is
+			// locked/unlocked — that's unrelated to whether the specific
+			// Anthropic/Gemini secret this checks for is available.
+			warn("llm:provider", "no AI key resolved (env vars and token-vault lookup both empty) — "+
+				"commands needing AI review fall through to a manual prompt instead of auto-approval. "+
+				"If this is unexpected, check that the relevant token-vault secret is unlocked.")
 		} else if os.Getenv("CLAUDECODE") != "" {
 			// Under Claude Code (CLAUDECODE=1) this is load-bearing: OAuth
 			// does not expose an API key to subprocesses, so the hook's

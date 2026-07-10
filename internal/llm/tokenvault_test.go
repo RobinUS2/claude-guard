@@ -7,68 +7,35 @@ import (
 )
 
 // writeFakeTokenVault writes a shell script standing in for the real
-// token-vault binary, printing statusOutput to stderr on `status` and
-// exiting 0. Mirrors the real CLI's behavior of writing status to stderr.
-func writeFakeTokenVault(t *testing.T, statusOutput string) string {
+// token-vault binary. Content is irrelevant to TokenVaultInstalled,
+// which only checks resolvability, but this mirrors how other tests in
+// this package stub tokenVaultBinary with a real, executable file.
+func writeFakeTokenVault(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "token-vault")
-	script := "#!/bin/bash\ncat 1>&2 <<'STATUS'\n" + statusOutput + "\nSTATUS\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/bash\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
 
-func TestLookupVaultLockState_NotInstalled(t *testing.T) {
+func TestTokenVaultInstalled_False(t *testing.T) {
 	old := tokenVaultBinary
 	tokenVaultBinary = "/nonexistent-token-vault-stub"
 	t.Cleanup(func() { tokenVaultBinary = old })
 
-	got := LookupVaultLockState()
-	if got.Installed {
-		t.Fatal("expected Installed=false when token-vault binary doesn't exist")
-	}
-	if got.Unlocked {
-		t.Fatal("expected Unlocked=false when not installed")
+	if TokenVaultInstalled() {
+		t.Fatal("expected false when token-vault binary doesn't exist")
 	}
 }
 
-func TestLookupVaultLockState_InstalledAndLocked(t *testing.T) {
+func TestTokenVaultInstalled_True(t *testing.T) {
 	old := tokenVaultBinary
-	tokenVaultBinary = writeFakeTokenVault(t, "[vault] Token Vaults\n\n  demo  1 secret(s)  [locked]")
+	tokenVaultBinary = writeFakeTokenVault(t)
 	t.Cleanup(func() { tokenVaultBinary = old })
 
-	got := LookupVaultLockState()
-	if !got.Installed {
-		t.Fatal("expected Installed=true")
-	}
-	if got.Unlocked {
-		t.Fatal("expected Unlocked=false for a status report with only [locked] vaults")
-	}
-}
-
-func TestLookupVaultLockState_InstalledAndUnlocked(t *testing.T) {
-	old := tokenVaultBinary
-	tokenVaultBinary = writeFakeTokenVault(t, "[vault] Token Vaults\n\n  demo  1 secret(s)  [unlocked, expires in 47m]")
-	t.Cleanup(func() { tokenVaultBinary = old })
-
-	got := LookupVaultLockState()
-	if !got.Installed {
-		t.Fatal("expected Installed=true")
-	}
-	if !got.Unlocked {
-		t.Fatal("expected Unlocked=true when status reports an [unlocked ...] vault")
-	}
-}
-
-func TestLookupVaultLockState_MixedLockedAndUnlocked(t *testing.T) {
-	old := tokenVaultBinary
-	tokenVaultBinary = writeFakeTokenVault(t, "[vault] Token Vaults\n\n  a  [locked]\n  b  [unlocked, expires in 5m]")
-	t.Cleanup(func() { tokenVaultBinary = old })
-
-	got := LookupVaultLockState()
-	if !got.Unlocked {
-		t.Fatal("expected Unlocked=true when at least one vault is unlocked, even if others are locked")
+	if !TokenVaultInstalled() {
+		t.Fatal("expected true when token-vault binary resolves to a real file")
 	}
 }
