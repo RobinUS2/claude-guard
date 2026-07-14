@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/hook"
 	"github.com/RobinUS2/claude-guard/internal/webinspect"
 )
@@ -45,21 +46,46 @@ func runWebFetch(in io.Reader, out io.Writer, errOut io.Writer) int {
 		return 0
 	}
 
+	// Load guard config to get the webfetch daily cost cap.
+	guardCfg := config.Load("").Config
+	costCap := guardCfg.DailyBudget.WebFetchDailyCostUSD
+	if costCap <= 0 {
+		costCap = 10.00 // default: $10/day
+	}
+
 	cfg := webinspect.Config{}
 	if cfg.AnyAPIKey() == "" {
 		fmt.Fprintln(errOut, "claude-guard: no ANTHROPIC_API_KEY or GEMINI_API_KEY — URL inspection disabled (set one to enable Haiku/Gemini triage)")
 	}
+
+	// Check daily cost budget before making any LLM calls.
+	if spent := todayWebFetchCost(); spent >= costCap {
+		fmt.Fprintf(errOut, "claude-guard webfetch: daily LLM budget exhausted ($%.4f of $%.2f/day spent) — skipping inspection\n", spent, costCap)
+		_ = hook.WritePermissionResponse(out, hook.AllowPermission("daily budget exhausted"))
+		return 0
+	}
+
 	verdict := webinspect.Inspect(context.Background(), wf.URL, cfg)
 
 	for _, w := range verdict.Warnings {
 		fmt.Fprintln(errOut, "claude-guard webfetch [warn]:", w)
 	}
 
+	ev := webfetchEvent{Event: "inspected", Domain: wf.URL}
+	if verdict.Usage != nil {
+		ev.Model = verdict.Usage.Model
+		ev.TokensIn = verdict.Usage.In
+		ev.TokensOut = verdict.Usage.Out
+		ev.CostUSD = verdict.Usage.CostUSD
+	}
+
 	if verdict.Allow {
-		appendWebfetchEvent(webfetchEvent{Event: "inspected", Decision: "allow", Domain: wf.URL})
+		ev.Decision = "allow"
+		appendWebfetchEvent(ev)
 		_ = hook.WritePermissionResponse(out, hook.AllowPermission(verdict.Reason))
 	} else {
-		appendWebfetchEvent(webfetchEvent{Event: "inspected", Decision: "ask", Domain: wf.URL})
+		ev.Decision = "ask"
+		appendWebfetchEvent(ev)
 		fmt.Fprintln(errOut, "claude-guard webfetch [deny]:", verdict.Reason)
 		_ = hook.WritePermissionResponse(out, hook.AskPermission(verdict.Reason))
 	}

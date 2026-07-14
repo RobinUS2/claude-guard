@@ -20,6 +20,8 @@ func TestIsTextContent(t *testing.T) {
 		{"application/json", true},
 		{"application/xml", true},
 		{"application/xhtml+xml", true},
+		{"application/rss+xml", true},
+		{"application/atom+xml", true},
 		{"image/png", false},
 		{"application/zip", false},
 		{"application/octet-stream", false},
@@ -110,11 +112,11 @@ func TestFetch_BodyCap(t *testing.T) {
 func TestCallHaiku_Safe(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"SAFE"}]}`))
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"SAFE"}],"usage":{"input_tokens":120,"output_tokens":3}}`))
 	}))
 	defer srv.Close()
 
-	verdict, err := callHaiku(context.Background(), "https://example.com", "hello world", "fake-key", Config{
+	verdict, usage, err := callHaiku(context.Background(), "https://example.com", "hello world", "fake-key", Config{
 		AnthropicURL: srv.URL,
 		HTTP:         srv.Client(),
 	})
@@ -124,16 +126,25 @@ func TestCallHaiku_Safe(t *testing.T) {
 	if verdict != "SAFE" {
 		t.Errorf("verdict = %q, want SAFE", verdict)
 	}
+	if usage.Model != DefaultModel {
+		t.Errorf("usage.Model = %q, want %q", usage.Model, DefaultModel)
+	}
+	if usage.In != 120 || usage.Out != 3 {
+		t.Errorf("usage tokens = %d in / %d out, want 120/3", usage.In, usage.Out)
+	}
+	if usage.CostUSD <= 0 {
+		t.Errorf("usage.CostUSD = %v, want > 0", usage.CostUSD)
+	}
 }
 
 func TestCallHaiku_Unsafe(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"UNSAFE: phishing login form"}]}`))
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"UNSAFE: phishing login form"}],"usage":{"input_tokens":100,"output_tokens":6}}`))
 	}))
 	defer srv.Close()
 
-	verdict, err := callHaiku(context.Background(), "https://evil.example", "steal creds", "fake-key", Config{
+	verdict, _, err := callHaiku(context.Background(), "https://evil.example", "steal creds", "fake-key", Config{
 		AnthropicURL: srv.URL,
 		HTTP:         srv.Client(),
 	})
@@ -152,7 +163,7 @@ func TestCallHaiku_APIError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := callHaiku(context.Background(), "https://example.com", "content", "fake-key", Config{
+	_, _, err := callHaiku(context.Background(), "https://example.com", "content", "fake-key", Config{
 		AnthropicURL: srv.URL,
 		HTTP:         srv.Client(),
 	})

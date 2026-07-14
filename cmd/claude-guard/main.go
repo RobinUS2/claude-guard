@@ -83,6 +83,8 @@ func run(args []string) int {
 		return cmdStats(args[1:])
 	case "stop":
 		return cmdStop(args[1:])
+	case "freeze":
+		return cmdFreeze(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
 	case "migrate":

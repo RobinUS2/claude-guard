@@ -10,3 +10,4 @@ vendor/
 .vscode/
 .worktrees/
 .claude/worktrees/
+.snippets

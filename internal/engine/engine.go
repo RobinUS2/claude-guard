@@ -26,6 +26,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/filectx"
+	"github.com/RobinUS2/claude-guard/internal/freeze"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
@@ -75,7 +76,16 @@ const (
 	Continue Verdict = "continue"
 	Allow    Verdict = "allow"
 	Deny     Verdict = "deny"
+	// Ask surfaces the normal user permission dialog with a reason. Emitted
+	// by the release-freeze tier for ambiguous deploy commands and by the
+	// ask-reminder tier for direct-DB "last resort" nudges ("in doubt, ask").
+	// Unlike Deny it is intentionally answerable by the user.
+	Ask Verdict = "ask"
 )
+
+// preferAPIHint is appended to the ask-reminder reason. It points at the
+// preferred data-access path so Claude reconsiders before reaching for the DB.
+const preferAPIHint = "Query/modify data via the Studio API (e.g. GET/PUT /api/knowledge-files, /api/...) or the taufinity CLI / MCP tools. Use direct DB access only if the API genuinely can't do it, and say why."
 
 // Input carries the data the engine needs to decide.
 type Input struct {
@@ -161,6 +171,7 @@ type Engine struct {
 	bqBudget *budget.BQBudget   // BQ pre-flight budget tracker (nil = disabled)
 	store    *store.Store       // session-aware state (nil = session tier disabled)
 	repoRisk *reporisk.Registry // git push risk scoring (nil = heuristics only)
+	freeze   []*freeze.State    // active release-freeze states (nil/empty = not frozen)
 
 	// requireLLM, when true, turns "no LLM classifier available" into an
 	// explicit Tier 6 deny instead of a silent fall-through to the user's
@@ -237,6 +248,26 @@ type Options struct {
 	// RequireLLM turns "no LLM classifier available" into an explicit
 	// Tier 6 deny instead of a silent fall-through. See Engine.requireLLM.
 	RequireLLM bool
+
+	// Freeze holds the active release-freeze states (from freeze.yaml and/or
+	// the CLAUDE_GUARD_FREEZE env var). Injected so tests are deterministic
+	// and the matcher never reads a global path. Nil/empty = not frozen.
+	Freeze []*freeze.State
+}
+
+// evalFreeze runs the release-freeze evaluator for a parsed command. It only
+// resolves the git remote (a subprocess) when at least one active freeze is
+// project-scoped and thus needs the repo identity — a global freeze skips it,
+// and no active freeze never reaches here (guarded by the caller).
+func (e *Engine) evalFreeze(parsed *shellparse.Parsed, cwd string, now time.Time) freeze.Outcome {
+	remoteURL := ""
+	for _, s := range e.freeze {
+		if !s.ScopeAll() {
+			remoteURL = runGit(cwd, "remote", "get-url", "origin")
+			break
+		}
+	}
+	return freeze.Evaluate(parsed, remoteURL, e.freeze, now)
 }
 
 // New creates an engine with the given config and logger.
@@ -264,6 +295,7 @@ func NewWithOptions(opts Options) *Engine {
 		store:               opts.Store,
 		repoRisk:            opts.RepoRisk,
 		requireLLM:          opts.RequireLLM,
+		freeze:              opts.Freeze,
 	}
 	if e.cfg == nil {
 		e.cfg = config.Default()
@@ -447,6 +479,59 @@ func (e *Engine) Decide(in Input) Output {
 			}
 			// Shadow mode: log the would-have-blocked and continue to tier 2.
 			break
+		}
+	}
+
+	// Tier 1.5: RELEASE FREEZE (conditional block).
+	// Runs AFTER the unconditional deny rules — a genuine security block
+	// (rm -rf /, etc.) must hard-DENY and never be downgraded to a freeze
+	// ASK — but BEFORE tier-2 allow and the cache, so a frozen deploy is
+	// never auto-approved or served a stale allow. Enforces regardless of
+	// shadow mode (D3): a freeze is an explicit operator action, not a
+	// heuristic that needs a bake-in period.
+	if len(e.freeze) > 0 {
+		if fout := e.evalFreeze(parsed, in.CWD, start); fout.Action != freeze.Pass {
+			out.Rule = "freeze:" + fout.Rule
+			out.Reason = fout.Reason
+			out.Tier = "freeze"
+			out.Shadow.Tier1Rule = out.Rule
+			out.Shadow.Tier1Reason = fout.Reason
+			switch fout.Action {
+			case freeze.Deny:
+				out.Verdict = Deny
+			case freeze.Ask:
+				out.Verdict = Ask
+			}
+			out.Latency = time.Since(start)
+			e.record(in, out)
+			return out
+		}
+	}
+
+	// Tier 1.6: ASK REMINDER (soft "last resort" nudge).
+	// Runs AFTER unconditional block + freeze (a real security deny always
+	// wins) but BEFORE Tier 2 allow and the cache, so a command that would
+	// otherwise auto-approve (e.g. a `make …-pg-…` wrapper) still surfaces the
+	// permission dialog with a reason + hint. Enforced regardless of shadow
+	// mode? No — it is a nudge, not a security control, so honour shadow mode:
+	// in shadow the would-have-asked is recorded and the pipeline continues.
+	if out.Shadow.Tier1Rule == "" {
+		for _, r := range e.cfg.AskReminder {
+			if v, reason := r.Eval(parsed); v == rules.Match {
+				out.Shadow.Tier1Rule = r.Name()
+				out.Shadow.Tier1Reason = reason
+				if !e.cfg.ShadowMode {
+					out.Verdict = Ask
+					out.Tier = "ask_reminder"
+					out.Rule = r.Name()
+					out.Reason = reason
+					out.Hint = preferAPIHint
+					out.Latency = time.Since(start)
+					e.record(in, out)
+					return out
+				}
+				break
+			}
 		}
 	}
 

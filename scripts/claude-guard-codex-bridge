@@ -1,0 +1,82 @@
+#!/bin/bash
+# claude-guard-codex-bridge — adapts claude-guard's `decide` engine to Codex
+# CLI's PreToolUse hook (matcher = "Bash" / "shell").
+#
+# Background: docs/plans/2026-07-09-normalize-claude-codex-flow.md in
+# cto-as-a-service. Read that first if this script needs changing.
+#
+# VERIFIED, NOT ASSUMED (2026-07-09):
+#   - Codex's PreToolUse input JSON uses the same field names claude-guard's
+#     `decide` already expects: session_id, transcript_path, cwd,
+#     permission_mode, hook_event_name, tool_name, tool_input, tool_use_id.
+#     (checked internal/hook/hook.go's Request struct against Codex's hooks
+#     docs at learn.chatgpt.com/docs/hooks). Forwarded as-is, no translation.
+#   - Codex's PreToolUse deny/allow output schema is IDENTICAL to Claude
+#     Code's: {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+#     "permissionDecision":"deny"|"allow","permissionDecisionReason":"..."}}.
+#     claude-guard's real Deny()/Allow() responses pass through unchanged.
+#
+# THE ASYMMETRY THIS SCRIPT EXISTS TO HANDLE (also verified, not assumed):
+#   - claude-guard's own design (see cmd/claude-guard/decide.go's comment:
+#     "Must NEVER block the user from a crash, a config bug, or a logging
+#     bug") returns Continue() — an empty `{}` — for anything outside Tier 1
+#     deny / Tier 2 allow. In Claude Code, `{}` means "fall through to the
+#     normal user prompt" (safe — a human gets asked).
+#   - Codex has no equivalent mid-flight "ask the user" fallback for hooks.
+#     Per Codex's docs: a hook process that errors or times out is fail-OPEN
+#     ("Codex marks the hook run as failed... and continues the tool call"),
+#     and a well-formed empty/no-decision response reads as an implicit
+#     allow, not a prompt.
+#   - NET EFFECT: this bridge gives Codex claude-guard's Tier 1 hard-block
+#     denials (sudo, rm -rf, force-push to main, curl|sh, etc.) — those are
+#     always an explicit Deny() and pass through correctly either way.
+#     Everything claude-guard would normally ask a human about (Tier 3-6:
+#     cache, LLM, legacy, default) becomes an ALLOW in Codex instead of a
+#     prompt. This is hard-block-only parity, not full parity with Claude
+#     Code's interactive tier. Documented, not hidden.
+#
+# This wrapper's OWN failure must never become a silent allow via Codex's
+# fail-open default — any error here (claude-guard missing, times out, bad
+# JSON) emits an explicit deny instead of a non-zero exit or empty output.
+
+set -u
+
+input="$(cat)"
+CLAUDE_GUARD_BIN="${CLAUDE_GUARD_BIN:-claude-guard}"
+ERR_FILE="$(mktemp -t claude-guard-codex-bridge.XXXXXX)"
+trap 'rm -f "$ERR_FILE"' EXIT
+
+deny_default() {
+  reason="$1"
+  /usr/bin/env jq -n --arg reason "$reason" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: $reason
+    }
+  }'
+}
+
+output="$(printf '%s' "$input" | timeout 10 "$CLAUDE_GUARD_BIN" decide 2>"$ERR_FILE")"
+status=$?
+
+# decide's own contract: internal errors exit 1 but still emit valid
+# Continue() JSON on stdout — that's expected, not a bridge failure.
+# Anything else (127 = not found, 124 = timeout, >1 = unexpected crash) is
+# this bridge's own problem and must fail closed explicitly, since Codex's
+# default on a failed hook run is to proceed, not to ask.
+if [ "$status" -gt 1 ]; then
+  err="$(tr '\n' ' ' < "$ERR_FILE" 2>/dev/null | head -c 300)"
+  deny_default "claude-guard-codex-bridge: engine unreachable (exit=$status): ${err:-no stderr output}. Denying by default — Codex fails open on hook errors, this bridge does not."
+  exit 0
+fi
+
+if [ -z "$output" ] || ! printf '%s' "$output" | /usr/bin/env jq -e . >/dev/null 2>&1; then
+  deny_default "claude-guard-codex-bridge: engine returned unparseable or empty output. Denying by default."
+  exit 0
+fi
+
+# Real decision (Tier 1 deny or Tier 2 allow) or Continue() ({}) — both are
+# valid claude-guard output, pass through unchanged. See the asymmetry note
+# above for what Continue() actually means once it reaches Codex.
+printf '%s\n' "$output"

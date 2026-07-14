@@ -382,6 +382,182 @@ func DefaultBlockRules() []rules.Rule {
 			Programs:         []string{"terraform"},
 			RequireSubcmdAny: []string{"destroy"},
 		},
+
+		// gcloud stateful-service deletion — instance/database/backup
+		// removal for the managed data stores. These are 3-level
+		// noun/noun/verb shapes (`gcloud sql instances delete NAME`) that
+		// tier-2 gcloudReadonly already refuses to auto-allow (ForbidVerbs
+		// includes "delete"), but without this rule they'd fall through to
+		// the tier-4 LLM classifier, which is APPROVE-ONLY — a misjudged
+		// "safe cleanup" verdict would delete a database or backup with
+		// zero human confirmation. Read (list/describe/export) and create
+		// verbs are untouched; only the irreversible delete verb is
+		// blocked, matching the terraform-destroy / gh-repo-delete
+		// precedent above.
+		//
+		// gcloudWithReleaseTracks additionally covers `gcloud alpha ...`
+		// / `gcloud beta ...` — the release-track token shifts every
+		// positional by one, so a bare noun/noun/verb spec would
+		// otherwise silently miss `gcloud beta sql instances delete X`.
+		&rules.NestedSubcommand{
+			RuleName: "gcloud-destructive-data",
+			Program:  "gcloud",
+			Destructive: gcloudWithReleaseTracks([]string{
+				"sql/instances/delete",
+				"sql/databases/delete",
+				"sql/backups/delete",
+				"spanner/instances/delete",
+				"spanner/databases/delete",
+				"spanner/backups/delete",
+				"firestore/databases/delete",
+				"redis/instances/delete",
+				"bigtable/instances/delete",
+				"bigtable/clusters/delete",
+				"alloydb/instances/delete",
+				"alloydb/clusters/delete",
+				"alloydb/backups/delete",
+				"memcache/instances/delete",
+			}),
+			Reason: "gcloud database/backup deletion requires user approval",
+		},
+
+		// gsutil bucket removal — `gsutil rb` always deletes a whole
+		// bucket (no partial/safe variant), and `gsutil rm -r` recursively
+		// wipes every object under a prefix — the GCS equivalent of
+		// `rm -rf`. Plain non-recursive `gsutil rm gs://bucket/one-file`
+		// is left alone (common, low-blast-radius cleanup) and falls
+		// through to the normal prompt.
+		&rules.NestedSubcommand{
+			RuleName:    "gsutil-bucket-delete",
+			Program:     "gsutil",
+			Destructive: []string{"rb"},
+			Reason:      "gsutil bucket removal requires user approval",
+		},
+		&rules.NestedSubcommand{
+			RuleName:        "gsutil-recursive-rm",
+			Program:         "gsutil",
+			Destructive:     []string{"rm"},
+			RequireFlagsAny: [][]string{{"-r", "-R"}},
+			Reason:          "gsutil recursive rm (bucket/prefix wipe) requires user approval",
+		},
+
+		// bq rm deletes a BigQuery table or dataset outright — unlike a
+		// filesystem `rm`, there's no "just one row" safe subset, so the
+		// verb is blocked unconditionally regardless of flags.
+		&rules.NestedSubcommand{
+			RuleName:    "bq-rm",
+			Program:     "bq",
+			Destructive: []string{"rm"},
+			Reason:      "bq table/dataset deletion requires user approval",
+		},
+
+		// kubectl/oc namespace and volume-claim deletion — wipes an
+		// entire environment or the backing data of a stateful workload.
+		// Other `delete` targets (pod, deployment, service) are
+		// recoverable from manifests/replicas and are intentionally left
+		// to the normal prompt/LLM tier.
+		&rules.NestedSubcommand{
+			RuleName: "kubectl-destructive-data",
+			Program:  "kubectl",
+			Destructive: []string{
+				"delete/namespace", "delete/ns",
+				"delete/pvc", "delete/persistentvolumeclaim",
+				"delete/pv", "delete/persistentvolume",
+			},
+			Reason: "kubectl namespace/volume deletion requires user approval",
+		},
+		&rules.NestedSubcommand{
+			RuleName: "oc-destructive-data",
+			Program:  "oc",
+			Destructive: []string{
+				"delete/namespace", "delete/ns",
+				"delete/pvc", "delete/persistentvolumeclaim",
+				"delete/pv", "delete/persistentvolume",
+			},
+			Reason: "oc namespace/volume deletion requires user approval",
+		},
+
+		// docker/podman volume deletion — `volume rm` and `volume prune`
+		// destroy container-backed data (e.g. database volumes) that
+		// isn't recoverable from the image.
+		&rules.NestedSubcommand{
+			RuleName:    "docker-volume-destructive",
+			Program:     "docker",
+			Destructive: []string{"volume/rm", "volume/prune"},
+			Reason:      "docker volume deletion requires user approval",
+		},
+		&rules.NestedSubcommand{
+			RuleName:    "podman-volume-destructive",
+			Program:     "podman",
+			Destructive: []string{"volume/rm", "volume/prune"},
+			Reason:      "podman volume deletion requires user approval",
+		},
+
+		// `docker compose down -v` / `docker-compose down -v` — the `-v`/
+		// `--volumes` flag additionally deletes named volumes, which is
+		// where persistent (e.g. database) data lives. Plain `down`
+		// (no volume flag) just stops/removes containers and is left to
+		// the normal prompt/LLM tier.
+		&rules.NestedSubcommand{
+			RuleName:        "docker-compose-down-volumes",
+			Program:         "docker",
+			Destructive:     []string{"compose/down"},
+			RequireFlagsAny: [][]string{{"-v", "--volumes"}},
+			Reason:          "docker compose down --volumes deletes persistent data, requires user approval",
+		},
+		&rules.NestedSubcommand{
+			RuleName:        "docker-compose-standalone-down-volumes",
+			Program:         "docker-compose",
+			Destructive:     []string{"down"},
+			RequireFlagsAny: [][]string{{"-v", "--volumes"}},
+			Reason:          "docker-compose down --volumes deletes persistent data, requires user approval",
+		},
+	}
+}
+
+// gcloudWithReleaseTracks returns specs plus their "alpha"/"beta"
+// release-track variants. `gcloud beta sql instances delete X` shifts
+// every positional by one versus `gcloud sql instances delete X`, so a
+// literal noun/noun/verb spec would otherwise silently miss the
+// release-track form.
+func gcloudWithReleaseTracks(specs []string) []string {
+	out := make([]string, 0, len(specs)*3)
+	for _, s := range specs {
+		out = append(out, s, "alpha/"+s, "beta/"+s)
+	}
+	return out
+}
+
+// DefaultAskReminderRules returns the "last resort" soft rules. A match
+// surfaces the normal permission dialog (Ask) with a reason + hint instead of
+// silently allowing, nudging toward the Studio API / MCP over direct database
+// access. These do NOT block — the user can approve when the API genuinely
+// can't do the job. They run after Tier 1 (block/freeze) so a real security
+// deny always wins, but before Tier 2 allow so a `make …-pg-…` wrapper that
+// would otherwise auto-approve still prompts.
+func DefaultAskReminderRules() []rules.Rule {
+	return []rules.Rule{
+		// Direct database client binaries + the Cloud SQL proxy.
+		&rules.ProgramIs{
+			RuleName: "prefer-api:db-client",
+			Programs: []string{
+				"psql", "pg_dump", "pg_restore",
+				"mysql", "mariadb", "mysqldump",
+				"mongo", "mongosh",
+				"redis-cli",
+				"sqlite3",
+				"cloud-sql-proxy", "cloud_sql_proxy",
+			},
+			Reason: "Direct database access is a last resort. Prefer the Studio API or MCP tools first.",
+		},
+		// `make` wrappers that open a direct DB connection (e.g.
+		// `make staging-pg-proxy-bg`, `make prod-pg-shell`, `*-pg-migrate`).
+		&rules.ProgramArgContains{
+			RuleName: "prefer-api:make-db-target",
+			Programs: []string{"make"},
+			Substrs:  []string{"-pg-", "pg-proxy", "pg-shell", "pg-migrate", "pg-dump"},
+			Reason:   "This make target opens a direct DB connection. Prefer the Studio API or MCP tools first.",
+		},
 	}
 }
 

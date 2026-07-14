@@ -8,21 +8,51 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/RobinUS2/claude-guard/internal/config"
 )
 
 // webfetchEvent is one line in ~/.cache/claude-guard/webfetch-events.log.
 // The log is append-only NDJSON — no locking needed (appends < 512B are
 // atomic on macOS/Linux for O_APPEND).
 type webfetchEvent struct {
-	Time     string `json:"t"`
-	Event    string `json:"event"`              // "inspected" | "domain_learned"
-	Decision string `json:"decision,omitempty"` // "allow" | "ask"
-	Domain   string `json:"domain,omitempty"`
+	Time      string  `json:"t"`
+	Event     string  `json:"event"`              // "inspected" | "domain_learned"
+	Decision  string  `json:"decision,omitempty"` // "allow" | "ask"
+	Domain    string  `json:"domain,omitempty"`
+	Model     string  `json:"model,omitempty"`
+	TokensIn  int     `json:"tokens_in,omitempty"`
+	TokensOut int     `json:"tokens_out,omitempty"`
+	CostUSD   float64 `json:"cost_usd,omitempty"`
 }
 
 func webfetchLogPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cache", "claude-guard", "webfetch-events.log")
+}
+
+// todayWebFetchCost returns the sum of cost_usd for all "inspected" events
+// logged today. Returns 0 if the log is missing or unreadable (fail-open).
+func todayWebFetchCost() float64 {
+	today := time.Now().UTC().Format("2006-01-02")
+	f, err := os.Open(webfetchLogPath())
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	var total float64
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var ev webfetchEvent
+		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+			continue
+		}
+		if ev.Event == "inspected" && strings.HasPrefix(ev.Time, today) {
+			total += ev.CostUSD
+		}
+	}
+	return total
 }
 
 // appendWebfetchEvent writes a single event line. Fails silently — never
@@ -55,11 +85,43 @@ func cmdWebFetchStats(args []string) int {
 	}
 	defer f.Close()
 
+	type modelCounts struct {
+		calls                int
+		tokensIn, tokensOut  int
+		costUSD              float64
+	}
 	type counts struct {
 		asked, autoAllowed, userPrompted, domainsLearned int
+		tokensIn, tokensOut                              int
+		costUSD                                          float64
+		byModel                                          map[string]*modelCounts
 	}
-	all := counts{}
-	day := counts{}
+	newCounts := func() counts { return counts{byModel: make(map[string]*modelCounts)} }
+	all := newCounts()
+	day := newCounts()
+
+	addInspected := func(c *counts, ev webfetchEvent) {
+		c.asked++
+		if ev.Decision == "allow" {
+			c.autoAllowed++
+		} else {
+			c.userPrompted++
+		}
+		if ev.Model != "" {
+			c.tokensIn += ev.TokensIn
+			c.tokensOut += ev.TokensOut
+			c.costUSD += ev.CostUSD
+			mc := c.byModel[ev.Model]
+			if mc == nil {
+				mc = &modelCounts{}
+				c.byModel[ev.Model] = mc
+			}
+			mc.calls++
+			mc.tokensIn += ev.TokensIn
+			mc.tokensOut += ev.TokensOut
+			mc.costUSD += ev.CostUSD
+		}
+	}
 
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
@@ -71,19 +133,9 @@ func cmdWebFetchStats(args []string) int {
 
 		switch ev.Event {
 		case "inspected":
-			all.asked++
-			if ev.Decision == "allow" {
-				all.autoAllowed++
-			} else {
-				all.userPrompted++
-			}
+			addInspected(&all, ev)
 			if isToday {
-				day.asked++
-				if ev.Decision == "allow" {
-					day.autoAllowed++
-				} else {
-					day.userPrompted++
-				}
+				addInspected(&day, ev)
 			}
 		case "domain_learned":
 			all.domainsLearned++
@@ -110,15 +162,61 @@ func cmdWebFetchStats(args []string) int {
 		fmt.Printf("  Auto-allowed:    %4d%s\n", c.autoAllowed, pct(c.autoAllowed, c.asked))
 		fmt.Printf("  User prompted:   %4d%s\n", c.userPrompted, pct(c.userPrompted, c.asked))
 		fmt.Printf("  Domains learned: %4d\n", c.domainsLearned)
+		if c.tokensIn > 0 || c.tokensOut > 0 {
+			fmt.Printf("  LLM tokens:      %s in / %s out\n",
+				formatInt(c.tokensIn), formatInt(c.tokensOut))
+			fmt.Printf("  Est. cost:       $%.5f\n", c.costUSD)
+			for model, mc := range c.byModel {
+				costNote := ""
+				if mc.costUSD == 0 && mc.tokensIn > 0 {
+					costNote = "  (no pricing data)"
+				}
+				fmt.Printf("    %-36s %3d calls  %s in  %s out  $%.5f%s\n",
+					model, mc.calls, formatInt(mc.tokensIn), formatInt(mc.tokensOut), mc.costUSD, costNote)
+			}
+		}
 	}
+
+	guardCfg := config.Load("").Config
+	costCap := guardCfg.DailyBudget.WebFetchDailyCostUSD
+	if costCap <= 0 {
+		costCap = 10.00
+	}
+	todayCost := day.costUSD
+	remaining := costCap - todayCost
+	capLine := fmt.Sprintf("  Daily LLM cap:   $%.2f  (spent $%.5f, $%.5f remaining)\n", costCap, todayCost, remaining)
 
 	if todayOnly {
 		printCounts("WebFetch stats — today ("+today+"):", day)
+		fmt.Print(capLine)
 	} else {
 		printCounts("WebFetch stats — today ("+today+"):", day)
+		fmt.Print(capLine)
 		fmt.Println()
 		printCounts("WebFetch stats — all time:", all)
 	}
 
 	return 0
+}
+
+func formatInt(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	s := fmt.Sprintf("%d", n)
+	result := make([]byte, 0, len(s)+len(s)/3+1)
+	if neg {
+		result = append(result, '-')
+	}
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, byte(c))
+	}
+	return string(result)
 }

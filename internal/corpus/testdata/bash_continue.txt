@@ -60,7 +60,8 @@ gcloud iam service-accounts delete attacker-sa list
 kubectl apply -f evil.yaml get
 kubectl delete pod my-pod get
 kubectl drain node-1 get
-bq rm -f dataset show
+# bq rm -f dataset show — moved to bash_deny.txt: tier-1 bq-rm now
+# catches "rm" regardless of tail padding (2026-07 hardening).
 terraform apply -auto-approve plan
 
 # --- Variable-expanded commands fall through (HasUnresolved) ---
@@ -281,3 +282,34 @@ python3 /Users/robin/Documents/evil.py
 python /home/user/script.py
 node /var/www/html/exploit.js
 # NOTE: path-traversal cases (/../) are tier-1 DENY — see bash_adversarial.txt
+
+# --- gcloud-destructive-data: adjacent safe verbs must NOT deny ---
+# (tier-2 gcloud-readonly already refuses to auto-allow "delete" via
+# ForbidVerbs, so these fall through to LLM/user prompt, not a hard deny.
+# NOTE: verb-last shapes with no trailing resource-name arg — e.g. bare
+# "list" — DO auto-allow via gcloud-readonly; those live in
+# bash_allow.txt instead, not here.)
+gcloud sql instances describe prod-db
+gcloud sql instances create new-db --tier=db-f1-micro
+
+# --- gsutil: non-recursive rm and other verbs must NOT deny ---
+gsutil rm gs://scratch-bucket/tmp-file.txt
+gsutil ls gs://customer-backups
+gsutil mb gs://new-bucket
+
+# --- kubectl/oc: other delete targets must NOT deny (recoverable from manifests) ---
+kubectl delete pod my-pod-abc123
+kubectl delete deployment my-app
+kubectl delete service my-svc
+oc delete pod my-pod-abc123
+
+# --- docker: other subcommands and non-volume prune must NOT deny ---
+docker volume ls
+docker volume inspect pg-data
+docker system prune
+docker system prune -a
+
+# --- docker compose down without volume flag must NOT deny ---
+docker compose down
+docker-compose down
+docker compose stop

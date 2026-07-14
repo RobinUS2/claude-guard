@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/engine"
+	"github.com/RobinUS2/claude-guard/internal/freeze"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 )
@@ -39,6 +41,17 @@ func cmdTest(args []string) int {
 	}
 	command := strings.Join(rest, " ")
 
+	// Default --cwd to the real working directory so cwd-dependent tiers
+	// (project-scoped freeze, smart git-push, per-project config) evaluate the
+	// same way the live hook would. Without this, `claude-guard test` in a repo
+	// can't resolve the git remote and a project-scoped freeze silently reads
+	// as "not frozen" — misleading when verifying a freeze.
+	if cwd == "" {
+		if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		}
+	}
+
 	result := config.Load("")
 	if result.Warning != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", result.Warning)
@@ -62,6 +75,9 @@ func cmdTest(args []string) int {
 		Config:              cfg,
 		Legacy:              legacyList,
 		ProjectConfigLoader: projectconfig.Load,
+		// Reflect the live release-freeze state so `test` answers "why was
+		// this blocked / asked" for freezes too.
+		Freeze: freeze.Sources(freeze.DefaultPath(), os.Getenv, time.Now()),
 	})
 	out := eng.Decide(engine.Input{
 		ToolName: "Bash",
