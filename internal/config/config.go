@@ -45,6 +45,13 @@ type Config struct {
 	InstantBlock []rules.Rule `yaml:"-"`
 	InstantAllow []rules.Rule `yaml:"-"`
 
+	// AskReminder holds soft "last resort" rules. A match surfaces the normal
+	// permission dialog (Ask verdict) with a reason + hint, rather than
+	// silently allowing. Used to nudge toward the API/MCP over direct DB
+	// access. Runs after Tier 1 block/freeze but before Tier 2 allow, so it
+	// intercepts commands that would otherwise auto-approve.
+	AskReminder []rules.Rule `yaml:"-"`
+
 	// AgentTrustProfiles holds per-agent-type pre-approved program lists.
 	// Populated from DefaultAgentTrustProfiles(); YAML override not supported.
 	AgentTrustProfiles map[string]AgentTrustProfile `yaml:"-"`
@@ -150,6 +157,7 @@ func Default() *Config {
 		},
 		InstantBlock:       DefaultBlockRules(),
 		InstantAllow:       DefaultAllowRules(),
+		AskReminder:        DefaultAskReminderRules(),
 		AgentTrustProfiles: DefaultAgentTrustProfiles(),
 		WorkflowSequences:  DefaultWorkflowSequences(),
 	}
@@ -218,6 +226,7 @@ func Load(path string) LoadResult {
 	// Re-apply compiled-in rules/profiles — authoritative, not YAML-driven.
 	cfg.InstantBlock = DefaultBlockRules()
 	cfg.InstantAllow = DefaultAllowRules()
+	cfg.AskReminder = DefaultAskReminderRules()
 	cfg.AgentTrustProfiles = DefaultAgentTrustProfiles()
 	cfg.WorkflowSequences = DefaultWorkflowSequences()
 

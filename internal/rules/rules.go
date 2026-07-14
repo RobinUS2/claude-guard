@@ -271,6 +271,41 @@ func (r *ProgramIs) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// --- ProgramArgContains: matches when a top-level call's program is in
+// Programs AND at least one of its args contains any substring in Substrs.
+// Used for wrapper commands whose subject lives in an argument rather than
+// the program name — e.g. `make staging-pg-proxy-bg` (program `make`, target
+// arg contains `-pg-`). Substring (not exact) match keeps it robust to target
+// prefixes/suffixes.
+type ProgramArgContains struct {
+	RuleName string
+	Programs []string
+	Substrs  []string
+	Reason   string
+}
+
+func (r *ProgramArgContains) Name() string { return r.RuleName }
+func (r *ProgramArgContains) Kind() string { return "program_arg_contains" }
+
+func (r *ProgramArgContains) Eval(p *shellparse.Parsed) (Verdict, string) {
+	for _, c := range p.Calls {
+		if c.Nesting != shellparse.NestTopLevel {
+			continue
+		}
+		if !stringIn(c.Program, r.Programs) {
+			continue
+		}
+		for _, a := range c.Args {
+			for _, sub := range r.Substrs {
+				if sub != "" && strings.Contains(a, sub) {
+					return Match, r.Reason
+				}
+			}
+		}
+	}
+	return NoMatch, ""
+}
+
 // --- BlockedCommand: a block rule for destructive commands like `rm -rf /`.
 // Matches when a call has:
 //   - program in Programs
@@ -540,7 +575,16 @@ type NestedSubcommand struct {
 	RuleName    string
 	Program     string
 	Destructive []string
-	Reason      string
+	// RequireFlagsAny, if non-empty, gates the match on top of the
+	// positional-path check: at least one flag from EVERY group must be
+	// present (same semantics as BlockedCommand/AnchoredCommand). Used for
+	// verb-first CLIs (gsutil, docker compose) where the destructive
+	// signal is a flag rather than an extra subcommand level, e.g.
+	// `gsutil rm -r gs://bucket` (Destructive: ["rm"], RequireFlagsAny:
+	// [["-r","-R"]]). Optional — nil/empty leaves existing rules
+	// untouched.
+	RequireFlagsAny [][]string
+	Reason          string
 }
 
 func (r *NestedSubcommand) Name() string { return r.RuleName }
@@ -557,34 +601,57 @@ func (r *NestedSubcommand) Eval(p *shellparse.Parsed) (Verdict, string) {
 		if len(c.Positional) == 0 {
 			continue
 		}
-		noun := c.Positional[0]
-		verb := ""
-		if len(c.Positional) >= 2 {
-			verb = c.Positional[1]
+		if len(r.RequireFlagsAny) > 0 && !flagsMatchAllGroups(c.Flags, r.RequireFlagsAny) {
+			continue
 		}
 		for _, spec := range r.Destructive {
-			// "noun" alone: match on noun regardless of verb.
-			if !strings.Contains(spec, "/") {
-				if spec == noun {
-					return Match, r.Reason
-				}
-				continue
-			}
-			// "noun/verb" or "noun/*"
-			slash := strings.IndexByte(spec, '/')
-			specNoun, specVerb := spec[:slash], spec[slash+1:]
-			if specNoun != noun {
-				continue
-			}
-			if specVerb == "*" {
-				return Match, r.Reason
-			}
-			if specVerb == verb {
+			if nestedSpecMatchesAnywhere(c.Positional, spec) {
 				return Match, r.Reason
 			}
 		}
 	}
 	return NoMatch, ""
+}
+
+// nestedSpecMatchesAnywhere reports whether a "/"-delimited spec path of
+// arbitrary depth (e.g. "auth/login" or "sql/instances/delete") appears as
+// an in-order (not necessarily contiguous) subsequence of positional.
+//
+// Subsequence rather than a contiguous/anchored run defends against flags
+// that consume a separate value token without "=" (e.g. `docker compose -f
+// docker-compose.yml down -v`, where the file path lands in Positional
+// because it has no leading dash), which inserts a stray token between the
+// intended subcommand words and would otherwise slip past an anchored
+// match. Since NestedSubcommand is only ever used for tier-1 BLOCK rules,
+// widening the match surface this way can only ever prompt the user MORE
+// often — it can never silently auto-allow something. This mirrors the
+// existing gcloudReadonly ForbidVerbs philosophy ("reject if any
+// positional matches a destructive verb, regardless of where") already
+// used for the tier-2 allow list in this same package.
+//
+// A "*" part matches immediately once reached, regardless of whether
+// further positionals exist — mirrors the old "noun/*" behavior where a
+// bare noun invocation with no verb still matched.
+func nestedSpecMatchesAnywhere(positional []string, spec string) bool {
+	parts := strings.Split(spec, "/")
+	pos := 0
+	for _, part := range parts {
+		if part == "*" {
+			return true
+		}
+		found := false
+		for ; pos < len(positional); pos++ {
+			if positional[pos] == part {
+				found = true
+				pos++
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // --- NestedSubcommandAllow: a tier-2 allow rule for CLIs with a

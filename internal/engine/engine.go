@@ -77,10 +77,15 @@ const (
 	Allow    Verdict = "allow"
 	Deny     Verdict = "deny"
 	// Ask surfaces the normal user permission dialog with a reason. Emitted
-	// only by the release-freeze tier for ambiguous deploy commands ("in
-	// doubt, ask"). Unlike Deny it is intentionally answerable by the user.
+	// by the release-freeze tier for ambiguous deploy commands and by the
+	// ask-reminder tier for direct-DB "last resort" nudges ("in doubt, ask").
+	// Unlike Deny it is intentionally answerable by the user.
 	Ask Verdict = "ask"
 )
+
+// preferAPIHint is appended to the ask-reminder reason. It points at the
+// preferred data-access path so Claude reconsiders before reaching for the DB.
+const preferAPIHint = "Query/modify data via the Studio API (e.g. GET/PUT /api/knowledge-files, /api/...) or the taufinity CLI / MCP tools. Use direct DB access only if the API genuinely can't do it, and say why."
 
 // Input carries the data the engine needs to decide.
 type Input struct {
@@ -500,6 +505,33 @@ func (e *Engine) Decide(in Input) Output {
 			out.Latency = time.Since(start)
 			e.record(in, out)
 			return out
+		}
+	}
+
+	// Tier 1.6: ASK REMINDER (soft "last resort" nudge).
+	// Runs AFTER unconditional block + freeze (a real security deny always
+	// wins) but BEFORE Tier 2 allow and the cache, so a command that would
+	// otherwise auto-approve (e.g. a `make …-pg-…` wrapper) still surfaces the
+	// permission dialog with a reason + hint. Enforced regardless of shadow
+	// mode? No — it is a nudge, not a security control, so honour shadow mode:
+	// in shadow the would-have-asked is recorded and the pipeline continues.
+	if out.Shadow.Tier1Rule == "" {
+		for _, r := range e.cfg.AskReminder {
+			if v, reason := r.Eval(parsed); v == rules.Match {
+				out.Shadow.Tier1Rule = r.Name()
+				out.Shadow.Tier1Reason = reason
+				if !e.cfg.ShadowMode {
+					out.Verdict = Ask
+					out.Tier = "ask_reminder"
+					out.Rule = r.Name()
+					out.Reason = reason
+					out.Hint = preferAPIHint
+					out.Latency = time.Since(start)
+					e.record(in, out)
+					return out
+				}
+				break
+			}
 		}
 	}
 

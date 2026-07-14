@@ -244,3 +244,28 @@ node --eval 'require("fs").readFileSync("/etc/passwd")'
 # LoopReadonly is the only new auto-approve path, and it rejects
 # these.
 
+# --- gcloud-destructive-data: alpha/beta release-track shift ---
+# `gcloud beta ...` / `gcloud alpha ...` shifts every positional by one;
+# a literal noun/noun/verb spec without release-track variants would
+# silently miss these.
+gcloud beta sql instances delete customer-prod-db
+gcloud alpha sql instances delete customer-prod-db
+gcloud beta spanner instances delete prod-instance
+gcloud alpha firestore databases delete --database=prod
+gcloud beta redis instances delete prod-cache --region=europe-west4
+gcloud --quiet sql instances delete mydb
+gcloud sql instances delete --quiet mydb
+gcloud sql instances "delete" mydb
+
+# --- flag-with-separate-value shifts positional indexing ---
+# A short/long flag that takes its value as its own token (no "=") lands
+# the value in Positional (no leading dash), shifting every subsequent
+# subcommand word by one. Contiguous/anchored matching would miss these;
+# subsequence matching (nestedSpecMatchesAnywhere) catches them.
+docker compose -f docker-compose.prod.yml down -v
+docker compose --file docker-compose.prod.yml down --volumes
+gsutil -o Credentials:proxy_user=foo rm -r gs://customer-backups/
+bq --project=my-project rm -f mydataset.mytable
+kubectl --namespace=prod delete pvc data-postgres-0
+docker --log-level=debug volume rm pg-data
+

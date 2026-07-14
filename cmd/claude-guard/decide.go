@@ -23,6 +23,16 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/store"
 )
 
+// askReasonWithHint appends the concrete rewrite hint to an Ask reason so the
+// permission dialog tells the user (and Claude) what to do instead. Mirrors
+// how the Deny path surfaces out.Hint. Empty hint = reason unchanged.
+func askReasonWithHint(reason, hint string) string {
+	if hint == "" {
+		return reason
+	}
+	return reason + " " + hint
+}
+
 // cmdDecide is the PreToolUse hook entrypoint.
 //
 // Must NEVER block the user from a crash, a config bug, or a logging bug.
@@ -237,7 +247,7 @@ func cmdDecide(_ []string) int {
 			pResp = hook.DenyPermission(denyReason)
 		case engine.Ask:
 			// PermissionRequest ask = fall through to the normal dialog.
-			pResp = hook.AskPermission(out.Reason)
+			pResp = hook.AskPermission(askReasonWithHint(out.Reason, out.Hint))
 		default:
 			pResp = hook.AskPermission("no verdict")
 		}
@@ -258,7 +268,7 @@ func cmdDecide(_ []string) int {
 			denyReason := fmt.Sprintf("%s (tier=%s rule=%s)", out.Reason, out.Tier, out.Rule)
 			resp = hook.Deny(denyReason, out.Hint)
 		case engine.Ask:
-			resp = hook.Ask(out.Reason)
+			resp = hook.Ask(askReasonWithHint(out.Reason, out.Hint))
 		default:
 			if out.UserMessage != "" {
 				resp = hook.ContinueWithMessage(out.UserMessage)

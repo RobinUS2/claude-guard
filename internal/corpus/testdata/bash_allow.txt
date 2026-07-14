@@ -137,6 +137,18 @@ bq ls
 bq show
 bq show my-dataset.my-table
 
+# --- regression: bare-verb-last siblings of the new tier-1
+# gcloud-destructive-data / bq-rm rules must still auto-allow
+# (2026-07 hardening added delete/rm blocks; these are the adjacent
+# read verbs that must be unaffected) ---
+gcloud sql instances list
+gcloud sql backups list --instance=prod-instance
+gcloud spanner instances list
+gcloud firestore databases list
+gcloud redis instances list --region=europe-west4
+bq show mydataset.mytable
+bq ls mydataset
+
 # --- kubectl extra (verb-noun shape) ---
 kubectl describe pods
 

