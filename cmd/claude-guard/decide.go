@@ -16,6 +16,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
+	"github.com/RobinUS2/claude-guard/internal/lock"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"github.com/RobinUS2/claude-guard/internal/projectconfig"
 	"github.com/RobinUS2/claude-guard/internal/redact"
@@ -222,6 +223,11 @@ func cmdDecide(_ []string) int {
 		// hook process. A malformed file fails open (Sources swallows the
 		// error) — never a broken guard.
 		Freeze: freeze.Sources(freeze.DefaultPath(), os.Getenv, time.Now()),
+		// Release-lock hint: always active (unlike Freeze, never needs to be
+		// armed). Wraps GHChecker in a short TTL cache so a burst of
+		// deploy-shaped commands in one session doesn't hit the GitHub API
+		// once per command. Fails open on any gh/network error.
+		LockChecker: &lock.CachingChecker{Inner: lock.GHChecker{}},
 	})
 	if sessionStore != nil {
 		defer sessionStore.Close()

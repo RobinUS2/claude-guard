@@ -30,6 +30,7 @@ import (
 	"github.com/RobinUS2/claude-guard/internal/legacy"
 	"github.com/RobinUS2/claude-guard/internal/llm"
 	"github.com/RobinUS2/claude-guard/internal/llm/breaker"
+	"github.com/RobinUS2/claude-guard/internal/lock"
 	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"github.com/RobinUS2/claude-guard/internal/normalize"
 	"github.com/RobinUS2/claude-guard/internal/projectconfig"
@@ -158,20 +159,21 @@ type ShadowTrace struct {
 
 // Engine evaluates Bash commands against the configured rules.
 type Engine struct {
-	cfg      *config.Config
-	log      *clog.DecisionLogger
-	app      *slog.Logger
-	redactor *redact.Redactor
-	llm      llm.Classifier
-	verifier llm.Classifier // optional cross-provider verifier
-	breaker  *breaker.Breaker
-	budget   *budget.Budget
-	cache    *cache.Cache
-	legacy   *legacy.AllowList  // tier 5: migrated allow list from settings.json
-	bqBudget *budget.BQBudget   // BQ pre-flight budget tracker (nil = disabled)
-	store    *store.Store       // session-aware state (nil = session tier disabled)
-	repoRisk *reporisk.Registry // git push risk scoring (nil = heuristics only)
-	freeze   []*freeze.State    // active release-freeze states (nil/empty = not frozen)
+	cfg         *config.Config
+	log         *clog.DecisionLogger
+	app         *slog.Logger
+	redactor    *redact.Redactor
+	llm         llm.Classifier
+	verifier    llm.Classifier // optional cross-provider verifier
+	breaker     *breaker.Breaker
+	budget      *budget.Budget
+	cache       *cache.Cache
+	legacy      *legacy.AllowList  // tier 5: migrated allow list from settings.json
+	bqBudget    *budget.BQBudget   // BQ pre-flight budget tracker (nil = disabled)
+	store       *store.Store       // session-aware state (nil = session tier disabled)
+	repoRisk    *reporisk.Registry // git push risk scoring (nil = heuristics only)
+	freeze      []*freeze.State    // active release-freeze states (nil/empty = not frozen)
+	lockChecker lock.Checker       // release-lock hint (nil = disabled, tier is a no-op)
 
 	// requireLLM, when true, turns "no LLM classifier available" into an
 	// explicit Tier 6 deny instead of a silent fall-through to the user's
@@ -253,6 +255,12 @@ type Options struct {
 	// the CLAUDE_GUARD_FREEZE env var). Injected so tests are deterministic
 	// and the matcher never reads a global path. Nil/empty = not frozen.
 	Freeze []*freeze.State
+
+	// LockChecker hints at the release-lock (see
+	// cto-as-a-service/scripts/release-lock.sh) — a GitHub Issue based signal
+	// that someone is currently releasing prod/staging. Unlike Freeze this is
+	// always active, not operator-armed. Nil disables the tier entirely.
+	LockChecker lock.Checker
 }
 
 // evalFreeze runs the release-freeze evaluator for a parsed command. It only
@@ -268,6 +276,39 @@ func (e *Engine) evalFreeze(parsed *shellparse.Parsed, cwd string, now time.Time
 		}
 	}
 	return freeze.Evaluate(parsed, remoteURL, e.freeze, now)
+}
+
+// evalLock runs the release-lock hint for a parsed command. Remote and
+// identity resolution are lazy — lock.Evaluate only calls them after a
+// catalog match — so a command that doesn't look like a deploy never pays
+// for the git subprocesses.
+func (e *Engine) evalLock(ctx context.Context, parsed *shellparse.Parsed, cwd string, now time.Time) lock.Outcome {
+	if e.lockChecker == nil {
+		return lock.Outcome{Action: lock.Pass}
+	}
+	resolveRepo := func() (string, bool) {
+		remoteURL := runGit(cwd, "remote", "get-url", "origin")
+		return lockOwnerRepo(remoteURL)
+	}
+	resolveWhoHost := func() (string, string) {
+		return lock.CurrentWhoHost(cwd)
+	}
+	return lock.Evaluate(ctx, parsed, resolveRepo, e.lockChecker, resolveWhoHost, now)
+}
+
+// lockOwnerRepo extracts "owner/repo" from a git remote URL for the `gh`
+// CLI. Only GitHub remotes are supported (release-lock.sh itself is
+// gh-CLI-only) — anything else returns ok=false so the caller fails open.
+func lockOwnerRepo(remoteURL string) (string, bool) {
+	if remoteURL == "" {
+		return "", false
+	}
+	norm := reporisk.NormalizeRemoteURL(remoteURL)
+	const prefix = "github.com/"
+	if !strings.HasPrefix(norm, prefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(norm, prefix), true
 }
 
 // New creates an engine with the given config and logger.
@@ -294,6 +335,7 @@ func NewWithOptions(opts Options) *Engine {
 		bqBudget:            opts.BQBudget,
 		store:               opts.Store,
 		repoRisk:            opts.RepoRisk,
+		lockChecker:         opts.LockChecker,
 		requireLLM:          opts.RequireLLM,
 		freeze:              opts.Freeze,
 	}
@@ -502,6 +544,29 @@ func (e *Engine) Decide(in Input) Output {
 			case freeze.Ask:
 				out.Verdict = Ask
 			}
+			out.Latency = time.Since(start)
+			e.record(in, out)
+			return out
+		}
+	}
+
+	// Tier 1.55: RELEASE LOCK HINT (conditional ask).
+	// Sibling to Tier 1.5, but always active — unlike freeze it never needs
+	// to be manually armed. Hints that someone else appears to be releasing
+	// prod/staging right now (see cto-as-a-service/scripts/release-lock.sh).
+	// Never denies: a stale/orphaned lock must never be able to hard-block a
+	// real release with no way through, so this only ever surfaces Ask.
+	// Runs after freeze (a real operator-armed freeze always wins) and
+	// before the ask-reminder nudge and Tier 2 allow, so a lock-matched
+	// command is never auto-approved out from under this hint.
+	if e.lockChecker != nil {
+		if lout := e.evalLock(context.Background(), parsed, in.CWD, start); lout.Action == lock.Ask {
+			out.Rule = "release-lock:" + lout.Rule
+			out.Reason = lout.Reason
+			out.Tier = "release_lock"
+			out.Shadow.Tier1Rule = out.Rule
+			out.Shadow.Tier1Reason = lout.Reason
+			out.Verdict = Ask
 			out.Latency = time.Since(start)
 			e.record(in, out)
 			return out
