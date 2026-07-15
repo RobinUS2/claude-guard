@@ -340,17 +340,6 @@ func DefaultBlockRules() []rules.Rule {
 			},
 			Reason: "gh critical verb (data loss, identity takeover, or code wrapper)",
 		},
-		// `gh api` with mutating HTTP methods — covers the shapes the
-		// (noun, verb) matcher above can't express because the method
-		// is a flag value, not a positional.
-		&rules.GhApiMutation{
-			RuleName:      "gh-api-mutation",
-			MutatingVerbs: []string{"DELETE", "POST", "PATCH", "PUT"},
-			// PR review creation and inline comment creation are safe mutations:
-			// scoped to a single PR, no data loss, fully auditable on GitHub.
-			AllowPathSuffixes: []string{"/reviews", "/comments"},
-			Reason:            "gh api with mutating HTTP method",
-		},
 
 		// terraform state mutations — `state rm`, `state mv`, etc.
 		// mutate state without touching infrastructure, which then
@@ -557,6 +546,25 @@ func DefaultAskReminderRules() []rules.Rule {
 			Programs: []string{"make"},
 			Substrs:  []string{"-pg-", "pg-proxy", "pg-shell", "pg-migrate", "pg-dump"},
 			Reason:   "This make target opens a direct DB connection. Prefer the Studio API or MCP tools first.",
+		},
+		// `gh api` with mutating HTTP methods — moved here from Tier 1 block
+		// (2026-07-15, at Robin's request): these are legitimate, sometimes
+		// necessary actions (repo settings, rulesets, branch protection)
+		// that Claude can't diff-review the way a file edit can, so instead
+		// of a hard block they now surface a real confirmation prompt. Ask
+		// (this tier) is deterministic and runs before Tier 4 LLM, so it
+		// can't be silently auto-approved the way just deleting the Tier 1
+		// rule and falling through to the LLM tier would risk.
+		//
+		// PR review creation and inline comment creation are still
+		// unconditional Tier 2 allows (AllowPathSuffixes below) — scoped to
+		// a single PR, no data loss, fully auditable on GitHub, never needed
+		// a prompt in the first place.
+		&rules.GhApiMutation{
+			RuleName:          "gh-api-mutation",
+			MutatingVerbs:     []string{"DELETE", "POST", "PATCH", "PUT"},
+			AllowPathSuffixes: []string{"/reviews", "/comments"},
+			Reason:            "gh api with mutating HTTP method",
 		},
 	}
 }
@@ -942,8 +950,10 @@ func DefaultAllowRules() []rules.Rule {
 	//
 	// Accepts only nouns that have no destructive child commands at
 	// the CLI root — `gh api <path>` is safe because `gh-api-mutation`
-	// (tier 1) catches POST/PATCH/etc. `gh search <query>` and
-	// `gh status` are always reads. Nouns with destructive verbs
+	// (tier 1.6 ask-reminder) catches POST/PATCH/etc. and surfaces a
+	// confirmation prompt before this tier-2 rule would otherwise
+	// auto-approve it. `gh search <query>` and `gh status` are always
+	// reads. Nouns with destructive verbs
 	// (pr, issue, repo, run, workflow, auth, release, codespace) are
 	// intentionally omitted here — they go through ghNounVerbReadonly
 	// below, which additionally requires positional[1] to be a known

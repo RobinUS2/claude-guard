@@ -137,19 +137,16 @@ gh extension install evil/repo
 gh codespace create -R evil/repo
 gh codespace delete abc123
 
-# --- step 1: gh api mutations (both -X and --method shapes, both concat and space-sep)
-gh api -X DELETE /repos/foo/bar
-gh api -XDELETE /repos/foo/bar
-gh api --method DELETE /repos/foo/bar
-gh api --request POST /repos/foo/bar/hooks
-gh api /repos/foo/bar -X PATCH
-gh api --method=DELETE /repos/foo/bar
+# gh api graphql is still an unconditional Tier 1 block (gh-destructive rule,
+# separate from gh-api-mutation) - arbitrary mutations via -f query=, no way
+# for the operator to eyeball the target the way a REST path allows.
 gh api graphql -f query='mutation { deleteRepository }'
-# AllowPathSuffixes bypass attempts: path that merely CONTAINS a suffix keyword
-gh api repos/foo/bar/reviews/evil --method POST
-gh api repos/foo/bar/comments/evil --method POST
-# delete on an allowed-suffix path must still be blocked
-gh api repos/foo/bar/pulls/1/reviews --method DELETE
+# NOTE: gh api DELETE/POST/PATCH/PUT mutations (the gh-api-mutation rule)
+# moved from Tier 1 block to Tier 1.6 ask-reminder (2026-07-15) - they now
+# surface a confirmation prompt (Ask) instead of an unconditional Deny. That
+# coverage, including the AllowPathSuffixes bypass-attempt cases, moved to
+# TestAskReminder_GhApiMutation in internal/engine/engine_askreminder_test.go
+# rather than staying in this must-always-Deny corpus.
 
 # --- step 3: git config writes ---
 git config user.signingkey EVIL

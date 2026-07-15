@@ -591,6 +591,9 @@ func (e *Engine) Decide(in Input) Output {
 					out.Rule = r.Name()
 					out.Reason = reason
 					out.Hint = preferAPIHint
+					if h, ok := config.DefaultAskReminderHints()[r.Name()]; ok {
+						out.Hint = h
+					}
 					out.Latency = time.Since(start)
 					e.record(in, out)
 					return out
