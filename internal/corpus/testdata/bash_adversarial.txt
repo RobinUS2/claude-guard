@@ -47,6 +47,14 @@ git push origin +master
 git push origin +production
 git push origin +refs/heads/main
 
+# --- git checkout/restore whole-tree pathspec, disguised forms ---
+git checkout main -- ././
+git checkout main -- ./.
+git checkout main -- a/..
+git checkout --quiet main -- .
+git checkout main -- . extra-arg
+git restore --quiet --source=main .
+
 # --- SSH private key access ---
 cat ~/.ssh/id_rsa
 cat ~/.ssh/id_ed25519

@@ -85,6 +85,15 @@ func DefaultBlockRules() []rules.Rule {
 			Reason:            "force push to protected branch",
 		},
 
+		// git checkout/restore with a whole-tree pathspec ("." or "./") —
+		// silently overwrites uncommitted changes on every tracked file,
+		// no confirmation prompt. See rules.GitDestructiveCheckout doc
+		// comment for the incident that motivated this.
+		&rules.GitDestructiveCheckout{
+			RuleName: "git-destructive-checkout-whole-tree",
+			Reason:   "git checkout/restore targeting the whole working tree (\".\") silently discards uncommitted changes on every tracked file — run git status and stash/commit first, or target a specific path instead of \".\"",
+		},
+
 		// SSH file access from non-ssh programs — covers private keys
 		// AND auxiliary SSH files (authorized_keys, known_hosts,
 		// config) because an attacker writing to authorized_keys

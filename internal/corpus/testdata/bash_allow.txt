@@ -270,6 +270,18 @@ git remote -v
 git remote show origin
 git remote get-url origin
 
+# --- git checkout/restore/switch: narrow single-path forms stay
+# instant_allow via git-readonly. Only a whole-tree "." pathspec is
+# destructive enough to hit the tier-1 git-destructive-checkout-whole-tree
+# block instead — see bash_deny.txt / bash_adversarial.txt. ---
+git checkout main
+git checkout -b feature/foo
+git switch main
+git checkout main -- path/to/file.go
+git checkout main -- src/app.js
+git restore path/to/file.go
+git restore --source=main path/to/file.go
+
 # --- cd-prefixed compound commands (subagent patterns) ---
 cd /tmp && git status
 cd /Users/robin/Documents/code/ai-site-gen && git log --oneline -5
