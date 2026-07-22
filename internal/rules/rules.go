@@ -1043,6 +1043,59 @@ func (r *GitForcePush) Eval(p *shellparse.Parsed) (Verdict, string) {
 	return NoMatch, ""
 }
 
+// GitDestructiveCheckout blocks `git checkout`/`git restore` calls whose
+// pathspec is the whole working tree (a bare "." or "./"), with or without
+// an explicit source ref. That form silently overwrites uncommitted
+// changes on every tracked file under the given path — either with
+// <ref>'s committed content (`git checkout main -- .`) or with the index's
+// content (`git checkout .` / `git restore .`) — with no "you have local
+// changes, are you sure" warning, unlike an ordinary branch-switching
+// `git checkout <ref>`.
+//
+// Real incident (2026-07-22): `git checkout main -- .`, run to isolate one
+// file before creating a new branch, silently discarded uncommitted work
+// on ~20 unrelated tracked files from other in-progress sessions in the
+// same repo. Narrow single-path forms (`git checkout main -- path/to/file.go`)
+// are intentionally NOT blocked — the risk is specifically the broad
+// whole-tree pathspec, not restoring a ref for one known file.
+//
+// Known limitation: only catches the literal "." / "./" pathspec, not
+// shell-glob forms like `git checkout main -- *` that expand to "every
+// file in cwd" before git ever sees them — those would need cwd-aware
+// glob evaluation, out of scope for a static AST rule.
+type GitDestructiveCheckout struct {
+	RuleName string
+	Reason   string
+}
+
+func (r *GitDestructiveCheckout) Name() string { return r.RuleName }
+func (r *GitDestructiveCheckout) Kind() string { return "git_destructive_checkout" }
+
+func (r *GitDestructiveCheckout) Eval(p *shellparse.Parsed) (Verdict, string) {
+	for _, c := range p.Calls {
+		if baseProgram(c.Program) != "git" {
+			continue
+		}
+		if len(c.Positional) == 0 {
+			continue
+		}
+		sub := c.Positional[0]
+		if sub != "checkout" && sub != "restore" {
+			continue
+		}
+		for _, pos := range c.Positional[1:] {
+			// filepath.Clean normalizes trivial disguises like "././",
+			// "./.", "a/.." down to ".", so those don't slip past a
+			// literal string match. Empty string guard: Clean("") is
+			// "." too, but an empty positional isn't a real pathspec.
+			if pos != "" && filepath.Clean(pos) == "." {
+				return Match, r.Reason
+			}
+		}
+	}
+	return NoMatch, ""
+}
+
 // --- PathAccess: block rule for commands that read/write specific paths.
 // Conservative: only matches fully-resolved arguments. A command with
 // unresolved $HOME-style expansion doesn't match (falls through to prompt).

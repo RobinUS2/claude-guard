@@ -75,6 +75,16 @@ git push origin +main
 git push origin +master
 git push origin +refs/heads/main
 
+# --- git checkout/restore with a whole-tree pathspec ---
+git checkout main -- .
+git checkout main -- ./
+git checkout HEAD -- .
+git checkout .
+git restore .
+git restore --source=main .
+git restore --source main .
+git checkout origin/main -- .
+
 # --- SSH private key access from non-ssh tools ---
 cat ~/.ssh/id_rsa
 cat ~/.ssh/id_ed25519
