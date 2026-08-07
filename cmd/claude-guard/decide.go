@@ -87,8 +87,9 @@ func cmdDecide(_ []string) int {
 	// against prompt injection attacks targeted at one provider's prompt
 	// format.
 	classifier, verifier := pickClassifierAndVerifier(os.Getenv)
+	var noLLMKeyMsg string
 	if classifier == nil {
-		warnNoLLMKey(appLogger)
+		noLLMKeyMsg = warnNoLLMKey(appLogger)
 	}
 
 	cacheRoot := filepath.Join(os.Getenv("HOME"), ".cache", "claude-guard")
@@ -276,8 +277,12 @@ func cmdDecide(_ []string) int {
 		case engine.Ask:
 			resp = hook.Ask(askReasonWithHint(out.Reason, out.Hint))
 		default:
-			if out.UserMessage != "" {
-				resp = hook.ContinueWithMessage(out.UserMessage)
+			msg := out.UserMessage
+			if msg == "" {
+				msg = noLLMKeyMsg
+			}
+			if msg != "" {
+				resp = hook.ContinueWithMessage(msg)
 			} else {
 				resp = hook.Continue()
 			}
@@ -423,11 +428,13 @@ func pickClassifierAndVerifier(getenv func(string) string) (llm.Classifier, llm.
 	}
 }
 
-// noLLMKeyWarnTTL rate-limits the stderr warning. decide runs once per
-// Bash tool call, so without a cooldown a missing key would print this
-// on every single command — the app log entry below still records
-// every occurrence, uncapped, for anyone checking `explain`/`stats`.
-const noLLMKeyWarnTTL = 10 * time.Minute
+// noLLMKeyWarnTTL rate-limits the warning. decide runs once per Bash
+// tool call, so without a cooldown a missing key would fire on every
+// single command. 24h matches the "standard" token-vault tier's EOD
+// lease: unlock once in the morning, get nudged once if you forgot,
+// stay quiet the rest of the day. The app log entry below still
+// records every occurrence, uncapped, for anyone checking `explain`/`stats`.
+const noLLMKeyWarnTTL = 24 * time.Hour
 
 func noLLMKeyMarkerPath() string {
 	home, err := os.UserHomeDir()
@@ -448,9 +455,17 @@ func noLLMKeyMarkerPath() string {
 // deliberately does not ask "is some vault unlocked" — see
 // llm.TokenVaultInstalled's doc comment for why that's the wrong
 // question.
-func warnNoLLMKey(appLogger *slog.Logger) {
+//
+// Returns the warning text when it should be surfaced to the user this
+// call (empty string when throttled by noLLMKeyWarnTTL or when
+// token-vault isn't installed at all). The caller threads a non-empty
+// return into the hook response's UserMessage so it actually reaches
+// the conversation instead of sitting unread in stderr — this is a
+// clear one-time nudge, not a block: the command still falls through
+// to the normal permission prompt either way.
+func warnNoLLMKey(appLogger *slog.Logger) string {
 	if !llm.TokenVaultInstalled() {
-		return
+		return ""
 	}
 	if appLogger != nil {
 		appLogger.Warn("llm_tier_unavailable", "reason", "no_key_resolved")
@@ -458,14 +473,17 @@ func warnNoLLMKey(appLogger *slog.Logger) {
 	path := noLLMKeyMarkerPath()
 	if path != "" {
 		if info, err := os.Stat(path); err == nil && time.Since(info.ModTime()) < noLLMKeyWarnTTL {
-			return
+			return ""
 		}
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
 		_ = os.WriteFile(path, []byte(""), 0o640)
 	}
-	fmt.Fprintln(os.Stderr, "claude-guard: WARNING: no Anthropic/Gemini key resolved — LLM tier unavailable this "+
-		"session. Commands that would normally be auto-approved by the AI classifier fall through to a manual "+
-		"confirmation prompt instead. If this is unexpected, check that the relevant token-vault secret is unlocked.")
+	msg := "claude-guard: no Anthropic/Gemini key resolved — the AI auto-approval tier is unavailable, so this " +
+		"and other commands fall through to a manual confirmation prompt instead of auto-approval. Run " +
+		"`token-vault decrypt taufinity standard` to unlock it for the rest of today (won't ask again until " +
+		"tomorrow)."
+	fmt.Fprintln(os.Stderr, msg)
+	return msg
 }
 
 // VerifierAnthropicModel is the strong Anthropic model used as a
