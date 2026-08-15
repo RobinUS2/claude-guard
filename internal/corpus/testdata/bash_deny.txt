@@ -167,3 +167,12 @@ docker compose down -v
 docker compose down --volumes
 docker-compose down -v
 docker-compose down --volumes
+
+# --- cp over a path where executables live ---
+# In-place rewrite SIGKILLs anything running that image, including
+# claude-guard's own hook. Use `install -m 755`. See docs/install-safety.md.
+cp /Users/robin/.claude/bin/claude-guard /Users/robin/go/bin/claude-guard
+cp ~/.claude/bin/claude-guard ~/go/bin/claude-guard
+cp bin/claude-guard /usr/local/bin/claude-guard
+cp -f build/tool ~/.local/bin/tool
+cp -R dist/ /opt/homebrew/bin

@@ -15,5 +15,6 @@ package config
 func DefaultRewriteHints() map[string]string {
 	return map[string]string{
 		"script-interpreter-exec": "write the code to /tmp/claude-<random>.<ext> with the Write tool, then run `<interpreter> /tmp/claude-<random>.<ext>`. Inline -c/-e cannot be reviewed; a file can.",
+		"cp-over-executable-path": "use `install -m 755 <src> <dest>` instead. It writes a temp file and rename(2)s it, so the destination gets a NEW inode and any process already running the old binary keeps its vnode and finishes cleanly. `cp` rewrites in place and the kernel SIGKILLs those processes. `mv` is also safe. Same hazard applies to `go build -o <dest>` and `> <dest>` — build to a temp path, then install.",
 	}
 }
