@@ -386,22 +386,57 @@ func checkHookWired(settingsPath string) (bool, string) {
 	if pre == nil {
 		return false, fmt.Sprintf("no PreToolUse hook in %s", settingsPath)
 	}
+	var bashCmd string
+	monitorCovered := false
 	for _, entry := range pre {
 		m, _ := entry.(map[string]any)
 		matcher, _ := m["matcher"].(string)
-		if !strings.EqualFold(matcher, "Bash") {
+		coversBash := matcherCovers(matcher, "Bash")
+		coversMonitor := matcherCovers(matcher, "Monitor")
+		if !coversBash && !coversMonitor {
 			continue
 		}
 		inner, _ := m["hooks"].([]any)
 		for _, h := range inner {
 			hm, _ := h.(map[string]any)
 			cmd, _ := hm["command"].(string)
-			if strings.Contains(cmd, "claude-guard") {
-				return true, cmd
+			if !strings.Contains(cmd, "claude-guard") {
+				continue
+			}
+			if coversBash && bashCmd == "" {
+				bashCmd = cmd
+			}
+			if coversMonitor {
+				monitorCovered = true
 			}
 		}
 	}
-	return false, fmt.Sprintf("no Bash hook pointing to claude-guard in %s", settingsPath)
+	if bashCmd == "" {
+		return false, fmt.Sprintf("no Bash hook pointing to claude-guard in %s", settingsPath)
+	}
+	if !monitorCovered {
+		// Monitor runs shell commands too. A Bash-only matcher leaves
+		// every Monitor command unreviewed — see internal/engine.Decide.
+		return false, fmt.Sprintf("%s (Monitor NOT covered — it runs shell commands too; "+
+			"use matcher \"Bash|Monitor\" in %s)", bashCmd, settingsPath)
+	}
+	return true, bashCmd
+}
+
+// matcherCovers reports whether a Claude Code hook matcher applies to a
+// given tool. Matchers are regex alternations ("Bash|Monitor"); an empty
+// matcher or "*" applies to every tool.
+func matcherCovers(matcher, tool string) bool {
+	matcher = strings.TrimSpace(matcher)
+	if matcher == "" || matcher == "*" {
+		return true
+	}
+	for _, alt := range strings.Split(matcher, "|") {
+		if strings.EqualFold(strings.TrimSpace(alt), tool) {
+			return true
+		}
+	}
+	return false
 }
 
 // scanSettingsCredentials counts permission entries that appear to contain
