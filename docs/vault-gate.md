@@ -92,7 +92,7 @@ every unmatched command in that case would be a surprising default.
 ## Installation
 
 Copy or symlink the script somewhere on your filesystem and reference it
-from a PreToolUse hook with matcher `Bash`:
+from a PreToolUse hook with matcher `Bash|Monitor`:
 
 ```bash
 cp scripts/claude-guard-vault-gate ~/.claude/bin/claude-guard-vault-gate
@@ -108,7 +108,7 @@ way, so you don't want to run it twice):
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Monitor",
         "hooks": [
           {
             "type": "command",
@@ -131,8 +131,13 @@ way, so you don't want to run it twice):
 
 ## Choosing the matcher
 
-The gate is scoped to **`Bash` only** — the only tool where an LLM
-classification tier is relevant in the first place.
+The gate is scoped to **`Bash|Monitor`** — the two tools that execute
+shell commands, and so the two where an LLM classification tier is
+relevant in the first place.
+
+`Monitor` matters as much as `Bash` here. It takes a `command` string
+and runs it in the same shell, so a matcher of `Bash` alone leaves every
+command wrapped in `Monitor` unreviewed. Do not drop it.
 
 If you want key-loading on more tools, add additional matchers pointing
 at the same script.

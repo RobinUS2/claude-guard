@@ -461,11 +461,20 @@ func computeRulesHash(cfg *config.Config) string {
 	return cache.HashStrings(names)
 }
 
+// isShellTool reports whether a tool executes its Command in a shell and
+// therefore runs the full Bash tier pipeline. Tiers that key off "this is
+// a real shell command" must use this rather than comparing to "Bash",
+// or Monitor silently skips them.
+func isShellTool(toolName string) bool {
+	return toolName == "Bash" || toolName == "Monitor"
+}
+
 // Decide runs the tier pipeline for a single input.
 //
-// Only ToolName == "Bash" is processed; everything else returns Continue.
-// Parse failures return Continue (can't make structural decisions without
-// an AST — fall through to safer tiers or user prompt).
+// Bash and Monitor both run shell commands and share the full tier
+// pipeline; other tools get their own evaluators. Parse failures return
+// Continue (can't make structural decisions without an AST — fall
+// through to safer tiers or user prompt).
 //
 // This method is the hot path — it must be fast (<10ms for deterministic
 // tiers) and never panic.
@@ -476,6 +485,25 @@ func (e *Engine) Decide(in Input) Output {
 	switch in.ToolName {
 	case "Bash":
 		// Fall through to the existing Bash pipeline below.
+	case "Monitor":
+		// Monitor executes its `command` in the same shell Bash does, so
+		// it gets the identical pipeline — anything else would make
+		// Monitor a wrapper that walks arbitrary commands around tier 1.
+		switch {
+		case in.Command != "":
+			// Fall through to the Bash pipeline below.
+		case in.URL != "":
+			// ws-only monitor: no shell, just egress to an arbitrary
+			// socket. Same SSRF checks WebFetch gets.
+			return e.decideWebFetch(in, start)
+		default:
+			// Neither command nor ws — nothing to inspect, so nothing to
+			// base an approval on. Prompt the user.
+			out.Reason = "Monitor with neither command nor ws"
+			out.Latency = time.Since(start)
+			e.record(in, out)
+			return out
+		}
 	case "WebFetch":
 		return e.decideWebFetch(in, start)
 	case "WebSearch":
@@ -726,7 +754,7 @@ func (e *Engine) Decide(in Input) Output {
 	// strong conservative framing (user approval dialog still shown).
 	// Note: this tier only fires when git-push-nonforce (Tier 2) did NOT match,
 	// meaning the command is ambiguous enough to have reached this point.
-	if isGitPush(in.Command) && in.ToolName == "Bash" && out.Shadow.Tier1Rule == "" {
+	if isGitPush(in.Command) && isShellTool(in.ToolName) && out.Shadow.Tier1Rule == "" {
 		pushScore, pushExplanation, _ := e.evaluateGitPush(in)
 		if !e.cfg.ShadowMode {
 			if pushScore <= PushScoreAutoAllow {

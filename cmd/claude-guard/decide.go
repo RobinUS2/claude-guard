@@ -144,6 +144,19 @@ func cmdDecide(_ []string) int {
 		}
 		in.Command = bi.Command
 		in.Description = bi.Description
+	case "Monitor":
+		mi, err := req.Monitor()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "claude-guard: monitor parse: %v\n", err)
+			_ = hook.WriteResponse(os.Stdout, hook.Continue())
+			return 1
+		}
+		// A command monitor is a shell command; the engine runs it
+		// through the Bash pipeline. A ws monitor has no command and is
+		// evaluated on its URL instead.
+		in.Command = mi.Command
+		in.Description = mi.Description
+		in.URL = mi.URL()
 	case "WebFetch":
 		wf, err := req.WebFetch()
 		if err != nil {

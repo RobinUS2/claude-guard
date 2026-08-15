@@ -245,3 +245,78 @@ func TestContinueWithMessage(t *testing.T) {
 		t.Errorf("UserMessage = %q", decoded.UserMessage)
 	}
 }
+
+// Monitor payloads, captured from a real PreToolUse probe. The command
+// form is what a build-watch looks like; the ws form has no command at
+// all.
+const monitorCommandPayload = `{
+  "session_id": "e284566e-3f24-4992-acb2-19b9f2aaabe3",
+  "cwd": "/Users/robin/Documents/code/cto-as-a-service",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Monitor",
+  "tool_input": {
+    "command": "BUILD=75766224-6b67-4c68-9fe1-eabbc0000001; while true; do gcloud builds describe $BUILD --format='value(status)'; sleep 30; done",
+    "description": "DR backup image build",
+    "timeout_ms": 1800000,
+    "persistent": false
+  },
+  "tool_use_id": "toolu_01MonitorProbe"
+}`
+
+const monitorWSPayload = `{
+  "session_id": "e284566e-3f24-4992-acb2-19b9f2aaabe3",
+  "cwd": "/tmp",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Monitor",
+  "tool_input": {
+    "ws": {"url": "wss://events.example.com/stream", "protocols": ["v1"]},
+    "description": "deploy events",
+    "timeout_ms": 300000,
+    "persistent": true
+  },
+  "tool_use_id": "toolu_01MonitorWSProbe"
+}`
+
+func TestRequest_Monitor_Command(t *testing.T) {
+	req, err := ReadRequest(strings.NewReader(monitorCommandPayload))
+	if err != nil {
+		t.Fatalf("ReadRequest: %v", err)
+	}
+	mi, err := req.Monitor()
+	if err != nil {
+		t.Fatalf("Monitor(): %v", err)
+	}
+	if !strings.Contains(mi.Command, "gcloud builds describe") {
+		t.Errorf("Command = %q", mi.Command)
+	}
+	if mi.Description != "DR backup image build" {
+		t.Errorf("Description = %q", mi.Description)
+	}
+	if mi.URL() != "" {
+		t.Errorf("URL = %q, want empty for a command monitor", mi.URL())
+	}
+}
+
+func TestRequest_Monitor_WS(t *testing.T) {
+	req, err := ReadRequest(strings.NewReader(monitorWSPayload))
+	if err != nil {
+		t.Fatalf("ReadRequest: %v", err)
+	}
+	mi, err := req.Monitor()
+	if err != nil {
+		t.Fatalf("Monitor(): %v", err)
+	}
+	if mi.Command != "" {
+		t.Errorf("Command = %q, want empty for a ws monitor", mi.Command)
+	}
+	if mi.URL() != "wss://events.example.com/stream" {
+		t.Errorf("URL = %q", mi.URL())
+	}
+}
+
+func TestRequest_Monitor_WrongTool(t *testing.T) {
+	req := &Request{ToolName: "Bash"}
+	if _, err := req.Monitor(); err == nil {
+		t.Error("expected error for non-Monitor tool")
+	}
+}

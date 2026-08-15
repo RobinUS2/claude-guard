@@ -14,7 +14,8 @@
   4. **LLM Classifier**: Uses models like Claude Haiku to judge semantic safety.
   5. **Legacy Allow List**: Compatibility with existing glob-based permissions.
   6. **Human-in-the-loop**: Falls back to user prompt if no verdict is reached.
-- **SSRF Protection**: Guards for `WebFetch` and `WebSearch` tools.
+- **SSRF Protection**: Guards for `WebFetch`, `WebSearch`, and WebSocket `Monitor` targets.
+- **Every Shell Path Covered**: `Bash` and `Monitor` both execute shell commands, so both run the identical tier pipeline. Wire the PreToolUse matcher as `Bash|Monitor` — a `Bash`-only matcher leaves `Monitor` commands unreviewed.
 - **Cross-Provider Verification**: Optional second-opinion from a different LLM provider to defend against prompt injection.
 - **Release Freeze**: An operator-toggled deploy lock enforced for every agent in every session — hard-blocks confident release commands, asks on ambiguous ones, scoped by environment and project. See below.
 

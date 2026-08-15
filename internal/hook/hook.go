@@ -47,6 +47,42 @@ func (r *Request) Bash() (*BashInput, error) {
 	return &bi, nil
 }
 
+// MonitorInput is the tool_input shape when ToolName == "Monitor".
+//
+// Monitor runs `command` in the same shell Bash does — it is a second
+// Bash that streams stdout, not a reader attached to an already-approved
+// process. Its command therefore gets the full Bash tier pipeline.
+// The `ws` variant carries no command; it opens a socket to an arbitrary
+// URL and is evaluated on the URL instead.
+type MonitorInput struct {
+	Command     string `json:"command,omitempty"`
+	Description string `json:"description,omitempty"`
+	WS          *struct {
+		URL string `json:"url"`
+	} `json:"ws,omitempty"`
+}
+
+// URL returns the WebSocket target, or "" when this is a command monitor.
+func (m *MonitorInput) URL() string {
+	if m.WS == nil {
+		return ""
+	}
+	return m.WS.URL
+}
+
+// Monitor returns the parsed Monitor tool_input, or an error if ToolName
+// is not Monitor or the payload is malformed.
+func (r *Request) Monitor() (*MonitorInput, error) {
+	if r.ToolName != "Monitor" {
+		return nil, fmt.Errorf("tool is %q, not Monitor", r.ToolName)
+	}
+	var mi MonitorInput
+	if err := json.Unmarshal(r.ToolInput, &mi); err != nil {
+		return nil, fmt.Errorf("decode monitor tool_input: %w", err)
+	}
+	return &mi, nil
+}
+
 // WebFetchInput is the tool_input shape for WebFetch.
 type WebFetchInput struct {
 	URL    string `json:"url"`

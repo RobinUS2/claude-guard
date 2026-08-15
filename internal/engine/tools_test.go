@@ -232,7 +232,8 @@ func TestDecideGeneric_StructurallySafeTools(t *testing.T) {
 		{"Agent subagent spawn", "Agent", "safe-builtin-tool"},
 		{"ToolSearch schema fetch", "ToolSearch", "safe-builtin-tool"},
 		{"TodoWrite state", "TodoWrite", "safe-builtin-tool"},
-		{"Monitor bg stream", "Monitor", "safe-builtin-tool"},
+		// Monitor is deliberately absent — it runs shell commands.
+		// See TestMonitorNotStructurallySafe in monitor_test.go.
 		// MCP server prefixes
 		{"ccd_session mark_chapter", "mcp__ccd_session__mark_chapter", "safe-mcp-server"},
 		{"ccd_session spawn_task", "mcp__ccd_session__spawn_task", "safe-mcp-server"},
