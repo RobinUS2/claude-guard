@@ -23,6 +23,19 @@ install: build
 	@# `claude-guard` via PATH — a stale copy from `go install` at
 	@# ~/go/bin/claude-guard shadows ~/.claude/bin and silently runs
 	@# old rules. Warn when the PATH-resolved binary doesn't match.
+	@#
+	@# The suggested fix MUST be atomic. `cp` truncates and rewrites the
+	@# destination in place, keeping the same inode. macOS validates code
+	@# pages lazily against the vnode, and Go binaries are ad-hoc signed
+	@# ("a.out"), so rewriting the file in place invalidates the cached
+	@# page hashes and the kernel SIGKILLs every process running that
+	@# image. When the stale copy IS the one the PreToolUse hook resolves
+	@# via PATH, that kills the hook mid-decision: it dies before writing
+	@# its JSON response, Claude Code waits forever on a hook that will
+	@# never answer, and the whole session deadlocks on the next Bash
+	@# call. `install` uses mkstemp + rename(2) — new inode, so processes
+	@# already running the old image keep their vnode and finish cleanly.
+	@# See docs/install-safety.md.
 	@active_bin=$$(command -v $(BIN) 2>/dev/null || true); \
 	installed_bin=$(BIN_DIR)/$(BIN); \
 	if [ -z "$$active_bin" ]; then \
@@ -35,7 +48,8 @@ install: build
 			echo "warn: stale $(BIN) shadowing the installed binary on PATH:"; \
 			echo "  active (PATH): $$active_bin ($$active_ver)"; \
 			echo "  installed:     $$installed_bin ($$installed_ver)"; \
-			echo "  fix: cp $$installed_bin $$active_bin  (or remove the stale copy)"; \
+			echo "  fix: install -m 755 $$installed_bin $$active_bin  (or remove the stale copy)"; \
+			echo "       use install, NOT cp — cp rewrites in place and SIGKILLs the running hook"; \
 		fi; \
 	fi
 	@# TODO(security plan #18): move this CLAUDE.md splice into the Go binary
