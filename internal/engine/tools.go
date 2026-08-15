@@ -299,15 +299,18 @@ var mcpReadVerbs = []string{
 // log: subagents' inner tool calls do trigger PreToolUse, so auto-
 // allowing the outer Agent call is NOT a bypass — the inner work
 // still gets evaluated). ToolSearch loads tool schemas; TodoWrite
-// is local conversation state. Monitor streams stdout from a
-// background process already started via Bash (which went through
-// the hook itself) — reading its output is harmless.
-// None reach outside the harness.
+// is local conversation state. None reach outside the harness.
+//
+// Monitor is deliberately NOT here. It was, on the premise that it
+// only streamed stdout from a process already started via Bash. That
+// premise is wrong: Monitor takes a `command` string and runs it in a
+// shell itself, so listing it here would auto-allow arbitrary commands
+// without inspection. Monitor is routed through the Bash pipeline in
+// Decide() instead — see TestMonitorNotStructurallySafe.
 var safeBuiltinTools = map[string]bool{
 	"Agent":      true,
 	"ToolSearch": true,
 	"TodoWrite":  true,
-	"Monitor":    true,
 }
 
 // safeMCPServerPrefixes match MCP servers whose entire surface is
