@@ -12,6 +12,7 @@
 package rules
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1818,4 +1819,59 @@ func matchGlobOrPrefix(arg, pattern string) bool {
 
 func trimStar(s string) string {
 	return strings.TrimRight(s, "*")
+}
+
+// --- Copy-onto-executable matcher ---
+
+// CopyOntoExecutable blocks commands that rewrite a file in place at a
+// path where executables live. It checks only the DESTINATION (the last
+// positional), so copying *out of* a bin directory stays allowed.
+//
+// Why this is a tier-1 deny and not a warning: `cp` opens the
+// destination with O_TRUNC and rewrites it in place, keeping the same
+// inode. macOS validates code pages lazily against the vnode, and Go
+// binaries are ad-hoc signed, so an in-place rewrite invalidates the
+// cached page hashes and the kernel SIGKILLs every process running that
+// image. When the target is claude-guard itself — which runs as a
+// PreToolUse hook, so a copy of it is live during essentially every
+// Bash call — this kills the hook mid-decision. It dies before writing
+// its JSON response and the session deadlocks on a hook that will never
+// answer. See docs/install-safety.md.
+//
+// `install` (mkstemp + rename) and `mv` (rename) are safe: a new inode
+// means already-running processes keep their vnode and finish cleanly.
+// Both are deliberately absent from Programs.
+type CopyOntoExecutable struct {
+	RuleName string
+	Programs []string
+	// DestPrefixes: normalized path prefixes that hold executables.
+	DestPrefixes []string
+	Reason       string
+}
+
+func (r *CopyOntoExecutable) Name() string { return r.RuleName }
+func (r *CopyOntoExecutable) Kind() string { return "blocked_command" }
+
+func (r *CopyOntoExecutable) Eval(p *shellparse.Parsed) (Verdict, string) {
+	for _, c := range p.Calls {
+		if !stringIn(baseProgram(c.Program), r.Programs) && !stringIn(c.Program, r.Programs) {
+			continue
+		}
+		// Need at least a source and a destination. A single positional
+		// is malformed cp; nothing to block.
+		if len(c.Positional) < 2 {
+			continue
+		}
+		dest := normalizePath(c.Positional[len(c.Positional)-1])
+		if dest == "" {
+			continue
+		}
+		for _, prefix := range r.DestPrefixes {
+			np := normalizePath(prefix)
+			if dest == np || strings.HasPrefix(dest, strings.TrimSuffix(np, "/")+"/") {
+				return Match, fmt.Sprintf("%s (destination %s)", r.Reason, c.Positional[len(c.Positional)-1])
+			}
+		}
+	}
+	return NoMatch, ""
 }

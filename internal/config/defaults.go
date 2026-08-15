@@ -14,6 +14,29 @@ func DefaultBlockRules() []rules.Rule {
 			Reason:   "sudo/doas/su requires explicit user approval",
 		},
 
+		// cp over a path where executables live. In-place rewrite
+		// SIGKILLs anything currently running that image — including
+		// claude-guard's own PreToolUse hook, which wedges the session.
+		// `install` and `mv` rename instead, and stay allowed.
+		&rules.CopyOntoExecutable{
+			RuleName: "cp-over-executable-path",
+			Programs: []string{"cp"},
+			DestPrefixes: []string{
+				"$HOME/.claude/bin",
+				"$HOME/go/bin",
+				"$HOME/.local/bin",
+				"$HOME/bin",
+				"/usr/local/bin",
+				"/usr/local/sbin",
+				"/opt/homebrew/bin",
+				"/opt/homebrew/sbin",
+				"/usr/bin", "/usr/sbin",
+				"/bin", "/sbin",
+			},
+			Reason: "cp rewrites the destination in place and SIGKILLs any process running " +
+				"that binary — including claude-guard's own hook, which deadlocks the session",
+		},
+
 		// rm -rf on system or home directories
 		&rules.BlockedCommand{
 			RuleName: "rm-rf-system",

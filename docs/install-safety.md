@@ -72,6 +72,31 @@ mv new-binary ~/go/bin/claude-guard          # also a rename
 cp ~/.claude/bin/claude-guard ~/go/bin/claude-guard
 ```
 
+This is enforced, not just documented. The tier-1 rule
+`cp-over-executable-path` denies `cp` whose **destination** is under a
+directory where executables live (`~/.claude/bin`, `~/go/bin`,
+`~/.local/bin`, `~/bin`, `/usr/local/bin`, `/opt/homebrew/bin`,
+`/usr/bin`, `/bin`, and the `sbin` variants). The deny carries a rewrite
+hint naming `install -m 755`.
+
+Only the destination is checked, so copying *out of* a bin directory
+(`cp ~/go/bin/claude-guard /tmp/backup`) stays allowed. `install` and
+`mv` are not in the rule's program list — they rename, so they are safe
+by construction.
+
+### The same hazard, not covered by the rule
+
+Anything that opens an existing executable with `O_TRUNC` has the same
+effect. The rule covers `cp` because that is what the tooling used to
+recommend, but watch for:
+
+```bash
+go build -o ~/go/bin/claude-guard ./cmd/claude-guard   # truncates in place
+./generate > /usr/local/bin/tool                       # truncates in place
+```
+
+Build to a temp path, then `install` it.
+
 Deleting first (`rm` then copy) also avoids the SIGKILL, since the
 unlink detaches the running vnode. But it leaves a window where the
 hook binary does not exist, and a hook that fails to execute is its own

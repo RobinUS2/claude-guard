@@ -274,3 +274,5 @@ bq --project=my-project rm -f mydataset.mytable
 kubectl --namespace=prod delete pvc data-postgres-0
 docker --log-level=debug volume rm pg-data
 
+/bin/cp bin/claude-guard ~/go/bin/claude-guard
+cp -v -f -p bin/tool /usr/local/bin/tool
