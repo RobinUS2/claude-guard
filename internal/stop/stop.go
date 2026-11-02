@@ -2,6 +2,7 @@ package stop
 
 import (
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -49,11 +50,12 @@ type StopRule interface {
 // user-visible continue string ("" = let Claude stop). The remaining
 // fields are for logging / explainability.
 type Result struct {
-	Message       string // continue message, "" if no rule fired or cap reached
-	Rule          string // name of the rule that fired, "" otherwise
-	CapReached    bool   // true when a rule would have fired but the session cap was hit
-	RulesSeen     int    // how many rules were evaluated (not skipped by gates)
-	ContinueCount int    // total continues this session after this evaluation
+	Message       string   // continue message, "" if no rule fired or cap reached
+	Rule          string   // name of the rule that fired, "" otherwise
+	CapReached    bool     // true when a rule would have fired but the session cap was hit
+	WouldBlock    []string // log-mode rules that matched; they did not block
+	RulesSeen     int      // how many rules were evaluated (not skipped by gates)
+	ContinueCount int      // total continues this session after this evaluation
 }
 
 // Evaluate runs all rules against the transcript and returns the first
@@ -63,9 +65,46 @@ func Evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 	return EvaluateResult(sessionID, sessionDir, stopHookActive, t, rules, shellTimeout).Message
 }
 
-// EvaluateResult is the full-information variant of Evaluate. Callers
-// that log the decision should use this and propagate Result fields.
+// Rule modes. An enforced rule sends the session back to work; a log-mode
+// rule only reports that it would have, and lets the session stop.
+const (
+	ModeEnforce = "enforce"
+	ModeLog     = "log"
+)
+
+// DefaultMode is the built-in mode for a rule: log for everything except
+// waiting-nothing-running.
+func DefaultMode(rule string) string {
+	if rule == "waiting-nothing-running" {
+		return ModeEnforce
+	}
+	return ModeLog
+}
+
+// RuleMode resolves the mode of a rule from the config overrides, falling
+// back to DefaultMode. Unknown override values are ignored.
+func RuleMode(rule string, overrides map[string]string) string {
+	if m := strings.ToLower(strings.TrimSpace(overrides[rule])); m == ModeEnforce || m == ModeLog {
+		return m
+	}
+	return DefaultMode(rule)
+}
+
+// EvaluateResult runs every rule in enforce mode. It is the full-information
+// variant of Evaluate; hook code that honours the per-rule switch uses
+// EvaluateModes.
 func EvaluateResult(sessionID, sessionDir string, stopHookActive bool, t Transcript, rules []StopRule, shellTimeout time.Duration) Result {
+	return evaluate(sessionID, sessionDir, stopHookActive, t, rules, shellTimeout, func(string) string { return ModeEnforce })
+}
+
+// EvaluateModes is EvaluateResult with per-rule modes from the config
+// overrides (see RuleMode). Log-mode rules that match are listed in
+// Result.WouldBlock and never block or consume the session continue cap.
+func EvaluateModes(sessionID, sessionDir string, stopHookActive bool, t Transcript, rules []StopRule, shellTimeout time.Duration, modes map[string]string) Result {
+	return evaluate(sessionID, sessionDir, stopHookActive, t, rules, shellTimeout, func(name string) string { return RuleMode(name, modes) })
+}
+
+func evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, rules []StopRule, shellTimeout time.Duration, modeOf func(string) string) Result {
 	sess := newSession(sessionID, sessionDir)
 	sh := newShellContext(shellTimeout)
 
@@ -101,6 +140,13 @@ func EvaluateResult(sessionID, sessionDir string, stopHookActive bool, t Transcr
 
 		ok, reason := rule.Eval(t, sh)
 		if !ok {
+			continue
+		}
+
+		// Log mode: record the match, never block, keep evaluating so every
+		// rule gets its numbers.
+		if modeOf(rule.Name()) == ModeLog {
+			res.WouldBlock = append(res.WouldBlock, rule.Name())
 			continue
 		}
 
