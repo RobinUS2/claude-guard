@@ -359,6 +359,38 @@ func (r *contextMonitorRule) Eval(t Transcript, _ ShellContext) (bool, string) {
 	)
 }
 
+// waitingNothingRunningRule fires when the last message says the session is
+// waiting on something to finish, but Claude Code reports no background task
+// and no scheduled wake-up, so nothing will ever resume the session.
+type waitingNothingRunningRule struct{}
+
+func (r *waitingNothingRunningRule) Name() string          { return "waiting-nothing-running" }
+func (r *waitingNothingRunningRule) HighConfidence() bool  { return false }
+func (r *waitingNothingRunningRule) MaxContinues() int     { return 1 } // fire once only
+func (r *waitingNothingRunningRule) TextPreFilter() string { return waitingPattern }
+
+const waitingTargets = `(ci|checks?|builds?|deploys?|deployments?|pipelines?|reviews?|agents?|runs?|workflows?|jobs?|tests?)`
+
+// waitingPattern matches English and Dutch "I am waiting for X" phrasing.
+var waitingPattern = `\b(` +
+	`waiting\s+(for|on)\b[^.\n]{0,60}\b` + waitingTargets + `\b` +
+	`|wait\s+for\b[^.\n]{0,60}\b` + waitingTargets + `\b` +
+	`|once\s+(the\s+)?` + waitingTargets + `\b` +
+	`|when\s+(the\s+)?` + waitingTargets + `\s+(finish(es)?|complete[sd]?|is\s+done|pass(es)?)` +
+	`|i'?ll\s+check\s+back` +
+	`|wacht(en)?\s+op\b` +
+	`|zodra\b` +
+	`)`
+
+func (r *waitingNothingRunningRule) Eval(t Transcript, _ ShellContext) (bool, string) {
+	if !t.RunningKnown || t.BackgroundTasks != 0 || t.SessionCrons != 0 {
+		return false, ""
+	}
+	return true, "You said you are waiting, but nothing is running that will wake you: " +
+		"start a watcher in the background (for example `gh pr checks <n> --watch --fail-fast`), " +
+		"or report the item as blocked with what it waits on."
+}
+
 // DefaultRules returns the built-in rule set in evaluation order.
 // Transcript-only rules (no shell cost) run first, then shell-based.
 // completionQualityRule is intentionally LAST: it fires only when every
@@ -372,6 +404,7 @@ func DefaultRules() []StopRule {
 		&stopPhraseGuardRule{},
 		&noAskHumanRule{},
 		&contextMonitorRule{},
+		&waitingNothingRunningRule{},
 		&installNotRunRule{},
 		&proposedTestNotRunRule{},
 		// Shell-based (~5ms each).

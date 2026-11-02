@@ -19,6 +19,10 @@ type stopInput struct {
 	SessionID      string            `json:"session_id"`
 	StopHookActive bool              `json:"stop_hook_active"`
 	Transcript     []json.RawMessage `json:"transcript"`
+	// BackgroundTasks and SessionCrons are kept raw so a missing field
+	// (older Claude Code) can be told apart from an empty array.
+	BackgroundTasks json.RawMessage `json:"background_tasks"`
+	SessionCrons    json.RawMessage `json:"session_crons"`
 }
 
 type stopResponse struct {
@@ -44,14 +48,13 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 		return 1
 	}
 
-	var in stopInput
-	if err := json.Unmarshal(data, &in); err != nil {
+	in, tr, err := parseStopInput(data)
+	if err != nil {
 		// Malformed input: fail-open, let Claude stop.
 		fmt.Fprintf(os.Stderr, "stop: parse input: %v\n", err)
 		return writeStopResp(w, "")
 	}
 
-	tr := parseTranscript(in.Transcript)
 	timeout := time.Duration(stopShellTimeoutMs) * time.Millisecond
 
 	// Build rule list: deterministic rules first, LLM semantic review last.
@@ -123,6 +126,46 @@ func writeStopResp(w io.Writer, msg string) int {
 	data, _ := json.Marshal(stopResponse{UserMessage: msg})
 	fmt.Fprintln(w, string(data))
 	return 0
+}
+
+// applyRunning copies the running-work counts from the Stop hook input onto
+// the transcript. RunningKnown stays false unless at least one of the two
+// fields is present as an array, so older Claude Code never triggers rules
+// that depend on it.
+func applyRunning(tr *stop.Transcript, in stopInput) {
+	if n, ok := arrayLen(in.BackgroundTasks); ok {
+		tr.BackgroundTasks = n
+		tr.RunningKnown = true
+	}
+	if n, ok := arrayLen(in.SessionCrons); ok {
+		tr.SessionCrons = n
+		tr.RunningKnown = true
+	}
+}
+
+// arrayLen returns the element count of a raw JSON array, and false when the
+// field is absent, null or not an array.
+func arrayLen(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil || arr == nil {
+		return 0, false
+	}
+	return len(arr), true
+}
+
+// parseStopInput decodes the Stop hook JSON into the input and the
+// transcript rules evaluate, including the running-work fields.
+func parseStopInput(data []byte) (stopInput, stop.Transcript, error) {
+	var in stopInput
+	if err := json.Unmarshal(data, &in); err != nil {
+		return in, stop.Transcript{}, err
+	}
+	tr := parseTranscript(in.Transcript)
+	applyRunning(&tr, in)
+	return in, tr, nil
 }
 
 // parseTranscript extracts the Transcript fields claude-guard rules need.

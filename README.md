@@ -45,6 +45,16 @@ Behavior when a freeze is active (**"in doubt, ask; else hard block"**):
 
 **Scope** — `--env prod|staging|dev|all` (default `prod`); `--project <substring>` matches the repo's origin remote (omit = all repos). A `CLAUDE_GUARD_FREEZE=prod` env var freezes just the current shell's agents. Genuine security denies (`rm -rf /`) still win over a freeze; a freeze never downgrades them to an ask.
 
+## 🛑 Stop Hook Rules
+
+`claude-guard stop` runs as a Claude Code Stop hook and can send a session back to work with a continue message. Rules run in order; the first that fires wins.
+
+### `waiting-nothing-running`
+
+- **Checks**: the last assistant message says the session is waiting on something to finish (CI, checks, a build, a deploy, a pipeline, a review, an agent, a run; English and Dutch, for example "waiting for", "wait for", "once CI", "when the build finishes", "I'll check back", "wacht op", "zodra"), while the Stop hook input reports `background_tasks` and `session_crons` as both empty.
+- **Message**: "You said you are waiting, but nothing is running that will wake you: start a watcher in the background (for example `gh pr checks <n> --watch --fail-fast`), or report the item as blocked with what it waits on."
+- **Limits**: fires at most once per session, so it can never loop. It never fires when both running fields are missing from the input (older Claude Code), because then nothing is known about what is running.
+
 ## 🛠️ Quick Start
 
 ### Installation

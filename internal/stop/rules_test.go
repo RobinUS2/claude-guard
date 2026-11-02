@@ -129,8 +129,8 @@ func TestRulePRCreatedNotVerified_NoFire(t *testing.T) {
 
 func TestDefaultRules_Length(t *testing.T) {
 	rules := DefaultRules()
-	if len(rules) != 13 {
-		t.Errorf("expected 13 default rules, got %d", len(rules))
+	if len(rules) != 14 {
+		t.Errorf("expected 14 default rules, got %d", len(rules))
 	}
 }
 
@@ -228,4 +228,52 @@ func searchString(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestStopWaiting(t *testing.T) {
+	waiting := "PR is open. Waiting for CI to finish, I'll check back."
+	eval := func(dir string, tr Transcript) string {
+		return Evaluate("waiting-sess", dir, false, tr, []StopRule{&waitingNothingRunningRule{}}, 0)
+	}
+	t.Run("waiting_nothing_running_blocks", func(t *testing.T) {
+		msg := eval(t.TempDir(), Transcript{LastAssistantText: waiting, RunningKnown: true})
+		if msg == "" {
+			t.Error("expected rule to fire")
+		}
+	})
+	t.Run("waiting_with_background_task_passes", func(t *testing.T) {
+		if eval(t.TempDir(), Transcript{LastAssistantText: waiting, RunningKnown: true, BackgroundTasks: 1}) != "" {
+			t.Error("should not fire with a background task")
+		}
+	})
+	t.Run("waiting_with_cron_passes", func(t *testing.T) {
+		if eval(t.TempDir(), Transcript{LastAssistantText: waiting, RunningKnown: true, SessionCrons: 1}) != "" {
+			t.Error("should not fire with a cron")
+		}
+	})
+	t.Run("not_waiting_passes", func(t *testing.T) {
+		if eval(t.TempDir(), Transcript{LastAssistantText: "All done, merged.", RunningKnown: true}) != "" {
+			t.Error("should not fire when not waiting")
+		}
+	})
+	t.Run("dutch_blocks", func(t *testing.T) {
+		if eval(t.TempDir(), Transcript{LastAssistantText: "Ik wacht op de build.", RunningKnown: true}) == "" {
+			t.Error("expected Dutch phrasing to fire")
+		}
+	})
+	t.Run("unknown_running_passes", func(t *testing.T) {
+		if eval(t.TempDir(), Transcript{LastAssistantText: waiting}) != "" {
+			t.Error("should not fire when running state is unknown")
+		}
+	})
+	t.Run("second_stop_passes", func(t *testing.T) {
+		dir := t.TempDir()
+		tr := Transcript{LastAssistantText: waiting, RunningKnown: true}
+		if eval(dir, tr) == "" {
+			t.Fatal("first stop should block")
+		}
+		if eval(dir, tr) != "" {
+			t.Error("second stop should pass")
+		}
+	})
 }

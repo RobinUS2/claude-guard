@@ -135,3 +135,33 @@ func TestCmdStop_OpenTodosFires(t *testing.T) {
 	}
 	_ = stop.DefaultRules // ensure import used
 }
+
+func TestParseStopInput(t *testing.T) {
+	t.Run("background_tasks_counted", func(t *testing.T) {
+		_, tr, err := parseStopInput([]byte(`{"transcript":[],"background_tasks":[{"id":"a"},{"id":"b"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tr.BackgroundTasks != 2 || tr.SessionCrons != 0 || !tr.RunningKnown {
+			t.Errorf("got %+v", tr)
+		}
+	})
+	t.Run("crons_counted", func(t *testing.T) {
+		_, tr, err := parseStopInput([]byte(`{"transcript":[],"session_crons":[{"id":"c"}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tr.SessionCrons != 1 || tr.BackgroundTasks != 0 || !tr.RunningKnown {
+			t.Errorf("got %+v", tr)
+		}
+	})
+	t.Run("fields_missing_unknown", func(t *testing.T) {
+		_, tr, err := parseStopInput([]byte(`{"transcript":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tr.RunningKnown || tr.BackgroundTasks != 0 || tr.SessionCrons != 0 {
+			t.Errorf("got %+v", tr)
+		}
+	})
+}

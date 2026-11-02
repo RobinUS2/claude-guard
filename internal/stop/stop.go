@@ -14,6 +14,10 @@ type Transcript struct {
 	LastTodoItems     []TodoItem
 	TurnCount         int // total number of turns in the transcript
 	TranscriptBytes   int // approximate raw size of the transcript JSON
+
+	BackgroundTasks int  // still-running background tasks, shells and subagents
+	SessionCrons    int  // scheduled wake-ups for this session
+	RunningKnown    bool // true only when the input carried background_tasks or session_crons
 }
 
 // TodoItem represents a single todo entry.
