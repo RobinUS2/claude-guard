@@ -473,11 +473,48 @@ func TestTranscriptRead(t *testing.T) {
 			t.Error("fired although a test ran after the proposal")
 		}
 		before := parse(t, writeTranscript(t, bashLine("go test ./..."), textLine), msg)
-		if fires, _ := proposed.Eval(before, nil); !fires {
-			t.Error("a test run before the proposal suppressed the rule")
+		if fires, _ := proposed.Eval(before, nil); fires {
+			t.Error("fired although a test ran in the same turn, before the final text")
 		}
 		notRan := parse(t, writeTranscript(t, bashLine("ls")), msg)
 		if fires, _ := proposed.Eval(notRan, nil); !fires {
+			t.Error("did not fire although no test ran")
+		}
+	})
+}
+
+func TestProposedTestRun(t *testing.T) {
+	var proposed stop.StopRule
+	for _, r := range stop.DefaultRules() {
+		if r.Name() == "proposed-test-not-run" {
+			proposed = r
+		}
+	}
+	parseFixture := func(t *testing.T, name, msg string) stop.Transcript {
+		path := filepath.Join("..", "..", "internal", "stop", "testdata", name)
+		payload, _ := json.Marshal(map[string]any{
+			"session_id": "fx", "transcript_path": path, "last_assistant_message": msg,
+		})
+		_, tr, err := parseStopInput(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tr.TranscriptBlind {
+			t.Fatal("fixture unreadable")
+		}
+		return tr
+	}
+
+	t.Run("ran_in_same_turn_does_not_fire", func(t *testing.T) {
+		tr := parseFixture(t, "proposed_test_ran.jsonl", "Done. Next you can run go test ./... again.")
+		if fires, _ := proposed.Eval(tr, nil); fires {
+			t.Error("fired although go test ran in the same turn, before the final text")
+		}
+	})
+
+	t.Run("never_ran_fires", func(t *testing.T) {
+		tr := parseFixture(t, "proposed_test_never_ran.jsonl", "Done. Next run go test ./... to verify.")
+		if fires, _ := proposed.Eval(tr, nil); !fires {
 			t.Error("did not fire although no test ran")
 		}
 	})

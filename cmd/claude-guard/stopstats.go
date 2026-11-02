@@ -49,7 +49,9 @@ func collectStopStats(r io.Reader, cutoff time.Time) map[string]*stopRuleStat {
 		case statBlind:
 			st.Blind++
 		}
-		if session != "" {
+		// SESSIONS counts only sessions where the rule matched; blind
+		// sessions have their own column.
+		if session != "" && kind != statBlind {
 			st.sessions[session] = struct{}{}
 		}
 	}

@@ -14,6 +14,7 @@ type Transcript struct {
 	BashCalls         []string
 	BashCallTurns     []int // 1-based turn of each BashCalls entry; empty when unknown
 	LastTextTurn      int   // 1-based turn of the last assistant text (the proposal); 0 when unknown
+	TurnStart         int   // 1-based message index of the last real user prompt; 0 when unknown
 	HasTodoWrite      bool
 	LastTodoItems     []TodoItem
 	TurnCount         int // total number of turns in the transcript
@@ -40,6 +41,13 @@ var transcriptRules = map[string]bool{
 	"install-not-run":         true,
 	"proposed-test-not-run":   true,
 	"completion-quality":      true,
+	"llm-semantic-review":     true,
+}
+
+// ExternalRule is implemented by rules whose evaluation calls an external
+// service. Such a rule never runs while it is in log mode.
+type ExternalRule interface {
+	CallsExternalService() bool
 }
 
 // TodoItem represents a single todo entry.
@@ -76,6 +84,7 @@ type Result struct {
 	CapReached    bool     // true when a rule would have fired but the session cap was hit
 	WouldBlock    []string // log-mode rules that matched; they did not block
 	Blind         []string // transcript rules skipped because no transcript data was available
+	SkippedLog    []string // external-service rules skipped because they are in log mode
 	RulesSeen     int      // how many rules were evaluated (not skipped by gates)
 	ContinueCount int      // total continues this session after this evaluation
 }
@@ -143,6 +152,13 @@ func evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 		// session gates: a rule that lacks its data is blind whatever the text says.
 		if t.TranscriptBlind && transcriptRules[rule.Name()] {
 			res.Blind = append(res.Blind, rule.Name())
+			continue
+		}
+
+		// A rule that would call an external service never runs in log mode:
+		// no call, no record beyond the skip.
+		if er, ok := rule.(ExternalRule); ok && er.CallsExternalService() && modeOf(rule.Name()) == ModeLog {
+			res.SkippedLog = append(res.SkippedLog, rule.Name())
 			continue
 		}
 

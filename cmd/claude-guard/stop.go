@@ -92,13 +92,13 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 
 	// Only the message length is logged, never any of its text.
 	dlog.StopHook(clog.StopHookRecord{
-		SessionID:         in.SessionID,
-		StopHookActive:    in.StopHookActive,
-		FiredRule:         res.Rule,
-		Injected:          res.Message != "",
-		Suppressed:        suppressed,
-		ContinueCount:     res.ContinueCount,
-		LatencyUS:         time.Since(start).Microseconds(),
+		SessionID:        in.SessionID,
+		StopHookActive:   in.StopHookActive,
+		FiredRule:        res.Rule,
+		Injected:         res.Message != "",
+		Suppressed:       suppressed,
+		ContinueCount:    res.ContinueCount,
+		LatencyUS:        time.Since(start).Microseconds(),
 		TranscriptTurns:  tr.TurnCount,
 		LastAssistantLen: len(tr.LastAssistantText),
 		BashCallCount:    len(tr.BashCalls),
@@ -306,6 +306,20 @@ func parseTranscript(raw []json.RawMessage) stop.Transcript {
 					tr.FirstUserText = s
 				}
 			}
+			// A user message that is not just tool results starts a new turn.
+			toolResultsOnly := false
+			var ublocks []contentBlock
+			if json.Unmarshal(t.Content, &ublocks) == nil && len(ublocks) > 0 {
+				toolResultsOnly = true
+				for _, blk := range ublocks {
+					if blk.Type != "tool_result" {
+						toolResultsOnly = false
+					}
+				}
+			}
+			if !toolResultsOnly {
+				tr.TurnStart = idx + 1
+			}
 
 		case "assistant":
 			lastAssistantParts = nil
@@ -350,7 +364,7 @@ func parseTranscript(raw []json.RawMessage) stop.Transcript {
 			tr.LastTextTurn = idx + 1
 		}
 	}
-	tr.LastAssistantText =strings.Join(lastAssistantParts, "\n")
+	tr.LastAssistantText = strings.Join(lastAssistantParts, "\n")
 	tr.TurnCount = len(raw)
 	// Approximate transcript size — sum of raw JSON bytes.
 	for _, r := range raw {
