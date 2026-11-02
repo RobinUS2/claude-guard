@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
@@ -92,13 +91,13 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 
 	// Only the message length is logged, never any of its text.
 	dlog.StopHook(clog.StopHookRecord{
-		SessionID:         in.SessionID,
-		StopHookActive:    in.StopHookActive,
-		FiredRule:         res.Rule,
-		Injected:          res.Message != "",
-		Suppressed:        suppressed,
-		ContinueCount:     res.ContinueCount,
-		LatencyUS:         time.Since(start).Microseconds(),
+		SessionID:        in.SessionID,
+		StopHookActive:   in.StopHookActive,
+		FiredRule:        res.Rule,
+		Injected:         res.Message != "",
+		Suppressed:       suppressed,
+		ContinueCount:    res.ContinueCount,
+		LatencyUS:        time.Since(start).Microseconds(),
 		TranscriptTurns:  tr.TurnCount,
 		LastAssistantLen: len(tr.LastAssistantText),
 		BashCallCount:    len(tr.BashCalls),
@@ -260,101 +259,6 @@ func readTranscriptFile(path string) (transcriptFile, bool) {
 }
 
 // parseTranscript extracts the Transcript fields claude-guard rules need.
-//
-// Claude Code transcript format:
-//   - role="user":      string or []content-block
-//   - role="assistant": string or []content-block, which includes type="text"
-//     AND type="tool_use" blocks (this is where Bash/TodoWrite calls live)
-//
-// Tool calls appear inside assistant content as type="tool_use" — NOT as
-// separate role="tool" entries. This is the key structural fact.
 func parseTranscript(raw []json.RawMessage) stop.Transcript {
-	var tr stop.Transcript
-
-	type contentBlock struct {
-		Type  string          `json:"type"`
-		Text  string          `json:"text"`
-		Name  string          `json:"name"`
-		Input json.RawMessage `json:"input"`
-	}
-	type turn struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	}
-	type bashInput struct {
-		Command string `json:"command"`
-	}
-	type todoInput struct {
-		Todos []stop.TodoItem `json:"todos"`
-	}
-
-	var lastAssistantParts []string
-	firstUser := true
-
-	for idx, rawTurn := range raw {
-		var t turn
-		if err := json.Unmarshal(rawTurn, &t); err != nil {
-			continue
-		}
-
-		switch t.Role {
-		case "user":
-			if firstUser {
-				firstUser = false
-				var s string
-				if err := json.Unmarshal(t.Content, &s); err == nil {
-					tr.FirstUserText = s
-				}
-			}
-
-		case "assistant":
-			lastAssistantParts = nil
-
-			var s string
-			if err := json.Unmarshal(t.Content, &s); err == nil {
-				lastAssistantParts = append(lastAssistantParts, s)
-				break
-			}
-
-			var blocks []contentBlock
-			if err := json.Unmarshal(t.Content, &blocks); err != nil {
-				break
-			}
-			for _, blk := range blocks {
-				switch blk.Type {
-				case "text":
-					if blk.Text != "" {
-						lastAssistantParts = append(lastAssistantParts, blk.Text)
-					}
-				case "tool_use":
-					if blk.Name == "Bash" {
-						var inp bashInput
-						if err := json.Unmarshal(blk.Input, &inp); err == nil && inp.Command != "" {
-							tr.BashCalls = append(tr.BashCalls, inp.Command)
-							tr.BashCallTurns = append(tr.BashCallTurns, idx+1)
-						}
-					}
-					if blk.Name == "TodoWrite" {
-						var inp todoInput
-						if err := json.Unmarshal(blk.Input, &inp); err == nil && len(inp.Todos) > 0 {
-							tr.HasTodoWrite = true
-							tr.LastTodoItems = inp.Todos
-						}
-					}
-				}
-			}
-		}
-		// The last turn that carries assistant text is where a test run
-		// would have been proposed.
-		if t.Role == "assistant" && len(lastAssistantParts) > 0 {
-			tr.LastTextTurn = idx + 1
-		}
-	}
-	tr.LastAssistantText =strings.Join(lastAssistantParts, "\n")
-	tr.TurnCount = len(raw)
-	// Approximate transcript size — sum of raw JSON bytes.
-	for _, r := range raw {
-		tr.TranscriptBytes += len(r)
-	}
-	return tr
+	return stop.ParseTranscript(raw)
 }

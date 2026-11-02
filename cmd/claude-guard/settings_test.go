@@ -135,12 +135,12 @@ func TestSettingsMigrate_DryRun(t *testing.T) {
 
 func TestSettingsMigrate_Apply(t *testing.T) {
 	entries := []string{
-		"Bash(git status:*)",           // redundant (tier 2)
-		"Bash(ls -la:*)",               // redundant (tier 2)
-		"Bash(python3 script.py:*)",    // remaining -> learned
-		"Bash(make test:*)",            // remaining -> learned
-		"Read(file:/tmp/foo)",          // non-Bash -> keep
-		"WebFetch(domain:github.com)",  // non-Bash -> keep
+		"Bash(git status:*)",          // redundant (tier 2)
+		"Bash(ls -la:*)",              // redundant (tier 2)
+		"Bash(python3 script.py:*)",   // remaining -> learned
+		"Bash(make test:*)",           // remaining -> learned
+		"Read(file:/tmp/foo)",         // non-Bash -> keep
+		"WebFetch(domain:github.com)", // non-Bash -> keep
 	}
 	settingsPath, cleanup := writeTestSettings(t, entries)
 	defer cleanup()
@@ -232,4 +232,3 @@ func TestClassifyEntry(t *testing.T) {
 		}
 	}
 }
-

@@ -473,8 +473,8 @@ func TestTranscriptRead(t *testing.T) {
 			t.Error("fired although a test ran after the proposal")
 		}
 		before := parse(t, writeTranscript(t, bashLine("go test ./..."), textLine), msg)
-		if fires, _ := proposed.Eval(before, nil); !fires {
-			t.Error("a test run before the proposal suppressed the rule")
+		if fires, _ := proposed.Eval(before, nil); fires {
+			t.Error("fired although a test ran in the same turn, before the final text")
 		}
 		notRan := parse(t, writeTranscript(t, bashLine("ls")), msg)
 		if fires, _ := proposed.Eval(notRan, nil); !fires {

@@ -15,11 +15,11 @@ import (
 
 // postToolUseInput is the JSON schema Claude Code sends to PostToolUse hooks.
 type postToolUseInput struct {
-	SessionID  string          `json:"session_id"`
-	ToolName   string          `json:"tool_name"`
-	ToolInput  json.RawMessage `json:"tool_input"`
-	ToolUseID  string          `json:"tool_use_id"`
-	CWD        string          `json:"cwd"`
+	SessionID string          `json:"session_id"`
+	ToolName  string          `json:"tool_name"`
+	ToolInput json.RawMessage `json:"tool_input"`
+	ToolUseID string          `json:"tool_use_id"`
+	CWD       string          `json:"cwd"`
 }
 
 type bashToolInput struct {
@@ -165,7 +165,6 @@ func cmdLearnWithIO(r io.Reader, w io.Writer) int {
 	writeLearnResp(w, true, canonical)
 	return 0
 }
-
 
 func writeLearnResp(w io.Writer, learned bool, pattern string) {
 	resp := learnResponse{Learned: learned, Pattern: pattern}

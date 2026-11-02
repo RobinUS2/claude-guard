@@ -162,17 +162,17 @@ func parseSince(s string, fallback time.Duration) time.Duration {
 // ---------------------------------------------------------------------------
 
 type statsResponse struct {
-	Since       string         `json:"since"`
-	Total       int            `json:"total"`
-	ByVerdict   map[string]int `json:"by_verdict"`
-	ByTier      map[string]int `json:"by_tier"`
-	LatencyP50  float64        `json:"latency_p50_ms"`
-	LatencyP95  float64        `json:"latency_p95_ms"`
-	LatencyP99  float64        `json:"latency_p99_ms"`
-	LatencyMax  float64        `json:"latency_max_ms"`
-	CacheStats  *cacheInfo     `json:"cache,omitempty"`
-	StopHooks   *stopHookInfo  `json:"stop_hooks,omitempty"`
-	TimeSaved   *timeSavedInfo `json:"time_saved,omitempty"`
+	Since      string         `json:"since"`
+	Total      int            `json:"total"`
+	ByVerdict  map[string]int `json:"by_verdict"`
+	ByTier     map[string]int `json:"by_tier"`
+	LatencyP50 float64        `json:"latency_p50_ms"`
+	LatencyP95 float64        `json:"latency_p95_ms"`
+	LatencyP99 float64        `json:"latency_p99_ms"`
+	LatencyMax float64        `json:"latency_max_ms"`
+	CacheStats *cacheInfo     `json:"cache,omitempty"`
+	StopHooks  *stopHookInfo  `json:"stop_hooks,omitempty"`
+	TimeSaved  *timeSavedInfo `json:"time_saved,omitempty"`
 }
 
 type cacheInfo struct {
@@ -365,7 +365,7 @@ type stopHookEntry struct {
 	FiredRule     string `json:"fired_rule,omitempty"`
 	Injected      bool   `json:"injected"`
 	Suppressed    string `json:"suppressed,omitempty"`
-	ContinueCount int   `json:"continue_count"`
+	ContinueCount int    `json:"continue_count"`
 }
 
 func handleAPIStopHooks(w http.ResponseWriter, r *http.Request) {
