@@ -18,13 +18,13 @@ run in the same turn (any Bash call after the assistant proposed the test, in th
 sequence) means the test ran. Use a real-shape transcript fixture (each content block on its own JSONL
 line, final text after the Bash calls) under internal/stop/testdata/. Tests: TestProposedTestRun with
 subtests ran_in_same_turn_does_not_fire, never_ran_fires.
-  - reopened (1): hidden acceptance check failed: `~/.fleetctl/tasks/bin/pass.sh ./internal/stop/ TestProposedTestRun ran_in_same_turn_does_not_fire never_ran_fires` (output in the round feedback)
+  - verified
 - [x] **T3**: stop-stats in cmd/claude-guard/stopstats.go counts in SESSIONS only sessions where the rule matched (would
 block or did block); blind sessions get their own BLIND column. Tests: TestStopStats with subtests
 sessions_exclude_blind, blind_column_counts.
   - verified
 - [x] **T4**: gofmt: every Go file this branch touches is gofmt-clean.
-  - reopened (1): hidden acceptance check failed: `test -z "$(gofmt -l cmd/claude-guard internal/stop internal/log)"` (output in the round feedback)
+  - verified
 
 ## Discovered
 
