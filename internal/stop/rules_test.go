@@ -310,3 +310,23 @@ func TestStopWaitingPhrases(t *testing.T) {
 		})
 	}
 }
+
+func TestStopWaitingClauses(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"comma_clause_fires", "PR #12 is open, waiting for CI.", true},
+		{"semicolon_clause_fires", "Pushed the fix; waiting for CI.", true},
+		{"dutch_comma_clause_fires", "Gepusht, ik wacht nu op de pipeline.", true},
+		{"review_clause_still_passes", "PR #12 is open, waiting for your review.", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sessionWaitsOnMachine(c.text); got != c.want {
+				t.Errorf("sessionWaitsOnMachine(%q) = %v, want %v", c.text, got, c.want)
+			}
+		})
+	}
+}

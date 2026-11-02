@@ -409,7 +409,7 @@ var (
 	// Single quotes only count as quotes when not part of a word (apostrophes).
 	waitingSingleQuote = regexp.MustCompile(`(^|[^\p{L}\p{N}])'[^'\n]*'($|[^\p{L}\p{N}])`)
 	waitingBlockquote  = regexp.MustCompile(`(?m)^\s*>.*$`)
-	waitingSentenceSep = regexp.MustCompile(`[.!?]+\s+|\n`)
+	waitingSentenceSep = regexp.MustCompile(`[.!?]+\s+|\n|[,;:]\s*|\s+[-\x{2013}\x{2014}]+\s+`)
 )
 
 // stripQuoted removes code blocks, inline code, quoted text and blockquotes,

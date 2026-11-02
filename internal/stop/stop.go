@@ -20,6 +20,24 @@ type Transcript struct {
 	BackgroundTasks int  // still-running background tasks, shells and subagents
 	SessionCrons    int  // scheduled wake-ups for this session
 	RunningKnown    bool // true only when the input carried background_tasks or session_crons
+
+	// TranscriptBlind is true when neither an inline transcript nor a
+	// readable transcript file supplied BashCalls, todo items and TurnCount.
+	// Rules in transcriptRules are then skipped rather than evaluated on
+	// empty data.
+	TranscriptBlind bool
+}
+
+// transcriptRules lists the rules that read BashCalls, todo items, the first
+// user message or the turn count. They cannot be judged without a transcript.
+var transcriptRules = map[string]bool{
+	"open-todo-items":         true,
+	"pr-created-not-verified": true,
+	"failing-tests":           true,
+	"context-monitor":         true,
+	"install-not-run":         true,
+	"proposed-test-not-run":   true,
+	"completion-quality":      true,
 }
 
 // TodoItem represents a single todo entry.
@@ -55,6 +73,7 @@ type Result struct {
 	Rule          string   // name of the rule that fired, "" otherwise
 	CapReached    bool     // true when a rule would have fired but the session cap was hit
 	WouldBlock    []string // log-mode rules that matched; they did not block
+	Blind         []string // transcript rules skipped because no transcript data was available
 	RulesSeen     int      // how many rules were evaluated (not skipped by gates)
 	ContinueCount int      // total continues this session after this evaluation
 }
@@ -137,6 +156,13 @@ func evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 			continue
 		}
 
+		// Transcript rules cannot be judged without transcript data: skip
+		// them and report them as blind.
+		if t.TranscriptBlind && transcriptRules[rule.Name()] {
+			res.Blind = append(res.Blind, rule.Name())
+			continue
+		}
+
 		res.RulesSeen++
 
 		ok, reason := rule.Eval(t, sh)
@@ -172,9 +198,13 @@ func evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 }
 
 // RecordWouldBlock writes one "would block" record (rule, session id, time)
-// to the decision log for every log-mode rule that matched.
+// to the decision log for every log-mode rule that matched, and one "blind"
+// record for every rule skipped for lack of transcript data.
 func RecordWouldBlock(dlog *clog.DecisionLogger, sessionID string, res Result) {
 	for _, name := range res.WouldBlock {
 		dlog.StopWouldBlock(clog.StopWouldBlockRecord{SessionID: sessionID, Rule: name})
+	}
+	for _, name := range res.Blind {
+		dlog.StopBlind(clog.StopWouldBlockRecord{SessionID: sessionID, Rule: name})
 	}
 }

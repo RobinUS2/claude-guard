@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -89,11 +90,7 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 		suppressed = "max_continues_reached"
 	}
 
-	// Truncate last assistant text for logging.
-	head := tr.LastAssistantText
-	if len(head) > 200 {
-		head = head[:200]
-	}
+	// Only the message length is logged, never any of its text.
 	dlog.StopHook(clog.StopHookRecord{
 		SessionID:         in.SessionID,
 		StopHookActive:    in.StopHookActive,
@@ -102,11 +99,10 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 		Suppressed:        suppressed,
 		ContinueCount:     res.ContinueCount,
 		LatencyUS:         time.Since(start).Microseconds(),
-		TranscriptTurns:   len(in.Transcript),
-		LastAssistantLen:  len(tr.LastAssistantText),
-		LastAssistantHead: head,
-		BashCallCount:     len(tr.BashCalls),
-		HasTodoWrite:      tr.HasTodoWrite,
+		TranscriptTurns:  tr.TurnCount,
+		LastAssistantLen: len(tr.LastAssistantText),
+		BashCallCount:    len(tr.BashCalls),
+		HasTodoWrite:     tr.HasTodoWrite,
 	})
 
 	return writeStopResp(w, res.Message)
@@ -176,6 +172,19 @@ func parseStopInput(data []byte) (stopInput, stop.Transcript, error) {
 		return in, stop.Transcript{}, err
 	}
 	tr := parseTranscript(in.Transcript)
+	// Without an inline transcript, the transcript file is the data source.
+	// When it cannot be read either, the transcript rules are blind.
+	if len(in.Transcript) == 0 {
+		if fileTurns, ok := readTranscriptFile(in.TranscriptPath); ok {
+			tr = parseTranscript(fileTurns.turns)
+			if fileTurns.truncated {
+				// The first user message was cut off with the head of the file.
+				tr.FirstUserText = ""
+			}
+		} else {
+			tr.TranscriptBlind = true
+		}
+	}
 	// The legacy transcript text is used only when the field is absent. A
 	// present but null or non-string value counts as an empty message.
 	if len(in.LastAssistantMessage) > 0 {
@@ -185,6 +194,69 @@ func parseStopInput(data []byte) (stopInput, stop.Transcript, error) {
 	}
 	applyRunning(&tr, in)
 	return in, tr, nil
+}
+
+// maxTranscriptBytes bounds how much of the transcript file is read: the last
+// 2 MB, so a long session cannot slow the hook down.
+const maxTranscriptBytes = 2 << 20
+
+type transcriptFile struct {
+	turns     []json.RawMessage
+	truncated bool // only the tail of the file was read
+}
+
+// readTranscriptFile reads the Claude Code transcript JSONL at path (last
+// maxTranscriptBytes only) and returns its turns in the {role, content}
+// shape parseTranscript expects. Each line wraps its turn in "message".
+// ok is false when the path is empty, missing or unreadable.
+func readTranscriptFile(path string) (transcriptFile, bool) {
+	var out transcriptFile
+	if path == "" {
+		return out, false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return out, false
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.IsDir() {
+		return out, false
+	}
+	if st.Size() > maxTranscriptBytes {
+		if _, err := f.Seek(st.Size()-maxTranscriptBytes, io.SeekStart); err != nil {
+			return out, false
+		}
+		out.truncated = true
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxTranscriptBytes))
+	if err != nil {
+		return out, false
+	}
+	if out.truncated {
+		// Drop the partial first line.
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			data = data[i+1:]
+		} else {
+			data = nil
+		}
+	}
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		var entry struct {
+			Message json.RawMessage `json:"message"`
+		}
+		if err := json.Unmarshal(line, &entry); err != nil || len(entry.Message) == 0 {
+			continue
+		}
+		var turn struct {
+			Role string `json:"role"`
+		}
+		if err := json.Unmarshal(entry.Message, &turn); err != nil || turn.Role == "" {
+			continue
+		}
+		out.turns = append(out.turns, entry.Message)
+	}
+	return out, true
 }
 
 // parseTranscript extracts the Transcript fields claude-guard rules need.

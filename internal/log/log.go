@@ -40,6 +40,10 @@ const (
 	// MsgStopWouldBlock is the slog msg for a log-mode Stop rule that
 	// matched. The session was allowed to stop.
 	MsgStopWouldBlock = "stop_would_block"
+
+	// MsgStopBlind is the slog msg for a transcript rule that was skipped
+	// because the transcript was missing or unreadable.
+	MsgStopBlind = "stop_blind"
 )
 
 // StopHookRecord is the shape for reading stop_hook events from decisions.jsonl.
@@ -311,6 +315,20 @@ func (l *DecisionLogger) StopWouldBlock(rec StopWouldBlockRecord) {
 	}
 	attrs = append(attrs, slog.String("rule", rec.Rule))
 	l.firehose.LogAttrs(context.Background(), slog.LevelInfo, MsgStopWouldBlock, attrs...)
+}
+
+// StopBlind records that a transcript-based Stop rule was skipped because no
+// transcript data was available. Same shape as StopWouldBlock.
+func (l *DecisionLogger) StopBlind(rec StopWouldBlockRecord) {
+	if l == nil {
+		return
+	}
+	attrs := make([]slog.Attr, 0, 2)
+	if rec.SessionID != "" {
+		attrs = append(attrs, slog.String("session_id", rec.SessionID))
+	}
+	attrs = append(attrs, slog.String("rule", rec.Rule))
+	l.firehose.LogAttrs(context.Background(), slog.LevelInfo, MsgStopBlind, attrs...)
 }
 
 // decisionAttrs produces the stable attribute list. Field names here
