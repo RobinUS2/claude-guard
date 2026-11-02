@@ -239,9 +239,9 @@ type auditResult struct {
 }
 
 type auditEntry struct {
-	entry    string
-	reason   string
-	program  string
+	entry   string
+	reason  string
+	program string
 }
 
 func auditSettings(entries []string) auditResult {

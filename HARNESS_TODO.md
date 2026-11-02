@@ -13,7 +13,7 @@ respects its once-per-session cap. Also add llm-semantic-review to the blind-rul
 transcript is missing. Tests: TestLLMRuleLogMode with subtests no_external_call_in_log_mode,
 enforce_mode_capped_once, blind_without_transcript.
   - verified
-- [ ] **T2**: proposed-test-not-run in internal/stop/rules.go compares by message order, not line order: a test command
+- [x] **T2**: proposed-test-not-run in internal/stop/rules.go compares by message order, not line order: a test command
 run in the same turn (any Bash call after the assistant proposed the test, in the transcript's message
 sequence) means the test ran. Use a real-shape transcript fixture (each content block on its own JSONL
 line, final text after the Bash calls) under internal/stop/testdata/. Tests: TestProposedTestRun with
@@ -23,7 +23,7 @@ subtests ran_in_same_turn_does_not_fire, never_ran_fires.
 block or did block); blind sessions get their own BLIND column. Tests: TestStopStats with subtests
 sessions_exclude_blind, blind_column_counts.
   - verified
-- [ ] **T4**: gofmt: every Go file this branch touches is gofmt-clean.
+- [x] **T4**: gofmt: every Go file this branch touches is gofmt-clean.
   - reopened (1): hidden acceptance check failed: `test -z "$(gofmt -l cmd/claude-guard internal/stop internal/log)"` (output in the round feedback)
 
 ## Discovered

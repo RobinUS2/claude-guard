@@ -49,8 +49,8 @@ func cmdCompare(args []string) int {
 	}
 
 	now := time.Now()
-	afterStart := now.Add(-period)   // [afterStart, now]
-	beforeStart := now.Add(-since)   // [beforeStart, afterStart)
+	afterStart := now.Add(-period) // [afterStart, now]
+	beforeStart := now.Add(-since) // [beforeStart, afterStart)
 
 	before := newAggregation()
 	after := newAggregation()

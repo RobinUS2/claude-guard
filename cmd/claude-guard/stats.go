@@ -733,8 +733,8 @@ func showBySession(logPath string, since time.Duration) int {
 	}
 
 	type sessionRow struct {
-		id        string
-		data      *sessionData
+		id           string
+		data         *sessionData
 		interruptPct float64
 	}
 	rows := make([]sessionRow, 0, len(sessions))
