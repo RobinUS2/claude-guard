@@ -13,7 +13,7 @@ when last_assistant_message is absent). background_tasks and session_crons: an e
 nothing running; null, absent or non-array means unknown. Tests: TestStopInput with subtests
 last_assistant_message_read, empty_arrays_known_nothing_running, null_fields_unknown,
 non_array_fields_unknown.
-  - reopened (1): verifier: Fallback is not limited to an absent last_assistant_message. At lines 180-184, null or any present non-string value leaves the legacy transcript-derived text intact, effectively falling back despite the field being present. Next: Track field presence separately and use the legacy transcript only when last_assistant_message is absent; add null and non-string regression cases. | RunningKno…
+  - verified
 - [x] **T2**: Output: when an ENFORCED rule fires, cmd/claude-guard/stop.go prints {"decision":"block","reason":"<the
 rule's message>"} (the documented shape); otherwise {}. End-to-end test that runs the hook's entry point
 with a docs-shaped stdin JSON ("Waiting for CI on PR 12.", empty background_tasks and session_crons) and
@@ -25,7 +25,7 @@ claude-guard config (document the key), default log for all rules except waiting
 defaults to enforce. A log-mode rule that matches writes a "would block" record (rule name, session id,
 time) to the decision log and lets the session stop. Tests: TestRuleMode with subtests
 default_only_waiting_enforces, log_mode_records_would_block, config_override_enforces.
-  - reopened (1): hidden acceptance check failed: `~/.fleetctl/tasks/bin/pass.sh ./internal/stop/ TestRuleMode default_only_waiting_enforces log_mode_records_would_block config_override_enforces` (output in the round feedback)
+  - verified
 - [x] **T4**: Tighten waiting-nothing-running in internal/stop/rules.go: it matches only when the session says IT is
 waiting on a machine process (CI, checks, a build, a deploy, a pipeline, a job, a run, an agent, a test
 suite), in English or Dutch. It never matches waiting on a person or a decision (your review, approval,
@@ -34,7 +34,7 @@ akkoord, an answer, the owner), negations ("not waiting"), text inside code bloc
 waiting_for_ci_matches, wacht_op_de_build_matches, waiting_for_your_review_passes,
 blocked_on_owner_approval_passes, not_waiting_passes, quoted_text_passes, code_block_passes,
 wacht_op_jouw_akkoord_passes, zodra_je_merget_passes.
-  - reopened (1): verifier: The implementation does not fully guarantee that only the session's own waiting statement matches, and it does not exclude all ordinarily quoted text. Next: Extend quote stripping to supported single-quote forms and require an explicit or safely implied session subject. Add regression cases for single-quoted text and third-person statements such as `The agent is waiting for CI`.
+  - verified
 - [x] **T5**: Numbers for the week: add `claude-guard stop-stats [--since 7d]`, which reads the decision log and prints
 per rule how often it would have blocked (log mode) or did block (enforce), and in how many distinct
 sessions; no message text. Put it in cmd/claude-guard/stopstats.go. Tests: TestStopStats with subtests
@@ -43,7 +43,9 @@ counts_per_rule, distinct_sessions, since_filter.
 - [x] **T6**: README.md: describe what the Stop hook reads and returns, the enforce/log switch and its defaults, that only
 waiting-nothing-running enforces by default, and `stop-stats`. Remove any claim that the other rules send a
 session back to work while they are in log mode.
-  - reopened (1): hidden acceptance check failed: `grep -qi 'log mode\|log-mode\|mode: log\|"log"' README.md` (output in the round feedback)
+  - verified
+- [ ] **T7**: Public-repository hygiene is not satisfied. Personal absolute paths, private naming conventions, and potentially customer-identifying project names remain in code, tests, and documentation. Replace personal paths, identities, vault names, hostnames, and customer/project identifiers throughout the repository with neutral synthetic examples, then run a repository-wide sensitive-string scan.
+  - added by the verifier
 
 ## Discovered
 
