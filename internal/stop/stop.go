@@ -12,6 +12,8 @@ type Transcript struct {
 	LastAssistantText string // joined text blocks of last assistant message
 	FirstUserText     string // first user message content
 	BashCalls         []string
+	BashCallTurns     []int // 1-based turn of each BashCalls entry; empty when unknown
+	LastTextTurn      int   // 1-based turn of the last assistant text (the proposal); 0 when unknown
 	HasTodoWrite      bool
 	LastTodoItems     []TodoItem
 	TurnCount         int // total number of turns in the transcript

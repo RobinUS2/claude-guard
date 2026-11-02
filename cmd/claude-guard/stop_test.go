@@ -460,6 +460,15 @@ func TestTranscriptRead(t *testing.T) {
 		if fires, _ := proposed.Eval(ran, nil); fires {
 			t.Error("fired although the transcript shows a test run")
 		}
+		textLine := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + msg + `"}]}}`
+		after := parse(t, writeTranscript(t, textLine, bashLine("go test ./...")), msg)
+		if fires, _ := proposed.Eval(after, nil); fires {
+			t.Error("fired although a test ran after the proposal")
+		}
+		before := parse(t, writeTranscript(t, bashLine("go test ./..."), textLine), msg)
+		if fires, _ := proposed.Eval(before, nil); !fires {
+			t.Error("a test run before the proposal suppressed the rule")
+		}
 		notRan := parse(t, writeTranscript(t, bashLine("ls")), msg)
 		if fires, _ := proposed.Eval(notRan, nil); !fires {
 			t.Error("did not fire although no test ran")

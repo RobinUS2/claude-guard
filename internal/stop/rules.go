@@ -42,7 +42,13 @@ func (r *proposedTestNotRunRule) TextPreFilter() string {
 
 func (r *proposedTestNotRunRule) Eval(t Transcript, _ ShellContext) (bool, string) {
 	testPatterns := []string{"go test", "npm test", "make test", "pytest", "cargo test"}
-	for _, bash := range t.BashCalls {
+	// Only test runs at or after the turn that carries the proposal count; a
+	// run before it does not satisfy it. Without turn positions every call counts.
+	positioned := t.LastTextTurn > 0 && len(t.BashCallTurns) == len(t.BashCalls)
+	for i, bash := range t.BashCalls {
+		if positioned && t.BashCallTurns[i] < t.LastTextTurn {
+			continue
+		}
 		for _, pat := range testPatterns {
 			if strings.Contains(bash, pat) {
 				return false, ""

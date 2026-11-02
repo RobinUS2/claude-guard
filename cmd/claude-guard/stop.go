@@ -291,7 +291,7 @@ func parseTranscript(raw []json.RawMessage) stop.Transcript {
 	var lastAssistantParts []string
 	firstUser := true
 
-	for _, rawTurn := range raw {
+	for idx, rawTurn := range raw {
 		var t turn
 		if err := json.Unmarshal(rawTurn, &t); err != nil {
 			continue
@@ -331,6 +331,7 @@ func parseTranscript(raw []json.RawMessage) stop.Transcript {
 						var inp bashInput
 						if err := json.Unmarshal(blk.Input, &inp); err == nil && inp.Command != "" {
 							tr.BashCalls = append(tr.BashCalls, inp.Command)
+							tr.BashCallTurns = append(tr.BashCallTurns, idx+1)
 						}
 					}
 					if blk.Name == "TodoWrite" {
@@ -343,8 +344,13 @@ func parseTranscript(raw []json.RawMessage) stop.Transcript {
 				}
 			}
 		}
+		// The last turn that carries assistant text is where a test run
+		// would have been proposed.
+		if t.Role == "assistant" && len(lastAssistantParts) > 0 {
+			tr.LastTextTurn = idx + 1
+		}
 	}
-	tr.LastAssistantText = strings.Join(lastAssistantParts, "\n")
+	tr.LastAssistantText =strings.Join(lastAssistantParts, "\n")
 	tr.TurnCount = len(raw)
 	// Approximate transcript size — sum of raw JSON bytes.
 	for _, r := range raw {
