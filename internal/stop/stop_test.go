@@ -2,8 +2,12 @@ package stop
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	clog "github.com/RobinUS2/claude-guard/internal/log"
 )
 
 // mockRule is a StopRule for testing.
@@ -109,4 +113,54 @@ func TestEvaluate_CoolDownPreventsRefire(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
+}
+
+func TestRuleMode(t *testing.T) {
+	t.Run("default_only_waiting_enforces", func(t *testing.T) {
+		for _, r := range DefaultRules() {
+			want := ModeLog
+			if r.Name() == "waiting-nothing-running" {
+				want = ModeEnforce
+			}
+			if got := RuleMode(r.Name(), nil); got != want {
+				t.Errorf("%s mode = %s, want %s", r.Name(), got, want)
+			}
+		}
+	})
+	t.Run("log_mode_records_would_block", func(t *testing.T) {
+		dir := t.TempDir()
+		rules := []StopRule{&mockRule{name: "some-rule", shouldFire: true, reason: "r"}}
+		res := EvaluateModes("sess-log", dir, false, Transcript{}, rules, 0, nil)
+		if res.Message != "" || len(res.WouldBlock) != 1 || res.WouldBlock[0] != "some-rule" {
+			t.Fatalf("result = %+v, want no message and a would-block for some-rule", res)
+		}
+		paths := clog.DefaultPaths(filepath.Join(dir, "logs"))
+		dl, err := clog.OpenDecisionLogger(paths, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		RecordWouldBlock(dl, "sess-log", res)
+		dl.Close()
+		b, err := os.ReadFile(paths.Decisions)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{`"msg":"stop_would_block"`, `"session_id":"sess-log"`, `"rule":"some-rule"`, `"time":`} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("log lacks %s: %s", want, b)
+			}
+		}
+	})
+	t.Run("config_override_enforces", func(t *testing.T) {
+		dir := t.TempDir()
+		rules := []StopRule{&mockRule{name: "some-rule", shouldFire: true, reason: "r"}}
+		res := EvaluateModes("sess-enf", dir, false, Transcript{}, rules, 0, map[string]string{"some-rule": "enforce"})
+		if res.Message != "r" || len(res.WouldBlock) != 0 {
+			t.Errorf("result = %+v, want enforced block", res)
+		}
+		res = EvaluateModes("sess-enf2", dir, false, Transcript{}, rules, 0, map[string]string{"some-rule": "log"})
+		if res.Message != "" {
+			t.Errorf("log override still blocked: %+v", res)
+		}
+	})
 }

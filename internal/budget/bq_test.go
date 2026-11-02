@@ -2,6 +2,7 @@ package budget
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -62,7 +63,9 @@ func TestBQBudget_CorruptFile(t *testing.T) {
 }
 
 func TestBQBudget_MissingDir(t *testing.T) {
-	b := NewBQ("/tmp/claude-guard-test-nonexistent-dir", 100)
+	// A fresh path per run: a fixed /tmp path kept its daily usage between runs, so the
+	// eleventh test run of a day exhausted the budget and failed.
+	b := NewBQ(filepath.Join(t.TempDir(), "not-created-yet"), 100)
 	ok, _, _ := b.CheckAndRecord(10)
 	if !ok {
 		t.Error("should fail-open when dir doesn't exist yet (creates it)")

@@ -359,6 +359,109 @@ func (r *contextMonitorRule) Eval(t Transcript, _ ShellContext) (bool, string) {
 	)
 }
 
+// waitingNothingRunningRule fires when the last message says the session
+// itself is waiting on a machine process (CI, a build, a deploy, a job, an
+// agent, a test suite), but Claude Code reports no background task and no
+// scheduled wake-up, so nothing will ever resume the session. Waiting on a
+// person or a decision never matches.
+type waitingNothingRunningRule struct{}
+
+func (r *waitingNothingRunningRule) Name() string          { return "waiting-nothing-running" }
+func (r *waitingNothingRunningRule) HighConfidence() bool  { return false }
+func (r *waitingNothingRunningRule) MaxContinues() int     { return 1 } // fire once only
+func (r *waitingNothingRunningRule) TextPreFilter() string { return `\b(wait|waiting|once|when|wacht|wachten|zodra)\b` }
+
+const (
+	waitingTargetsEN = `(?:ci|checks?|builds?|deploys?|deployments?|pipelines?|workflows?|jobs?|runs?|agents?|tests?|test\s+suites?|github\s+actions)`
+	waitingTargetsNL = `(?:ci|checks?|builds?|deploys?|deployments?|pipelines?|workflows?|jobs?|runs?|agents?|tests?|testsuites?|test\s+suites?)`
+	waitingDoneEN    = `(?:finish(?:es|ed)?|complete[sd]?|is\s+done|are\s+done|pass(?:es|ed)?|succeed[s]?|is\s+green|turns?\s+green|lands?)`
+	waitingDoneNL    = `(?:klaar|groen|geslaagd|af|rond|gedaan|doorgelopen|slaagt|is|zijn|wordt|draait)`
+)
+
+type waitingPattern struct {
+	re *regexp.Regexp
+	// subject: "wait" patterns must be preceded only by this session's own
+	// subject (or nothing); "cond" patterns (once/when/zodra) need a
+	// first-person pronoun somewhere in the sentence.
+	kind string
+}
+
+var (
+	// A machine target within a few words of "waiting for/on".
+	waitingMachineRes = []waitingPattern{
+		{regexp.MustCompile(`(?i)\bwaiting\s+(?:for|on)\s+(?:[\w'#./-]+\s+){0,3}?` + waitingTargetsEN + `\b`), "wait"},
+		{regexp.MustCompile(`(?i)\bwait\s+for\s+(?:[\w'#./-]+\s+){0,3}?` + waitingTargetsEN + `\b`), "wait"},
+		{regexp.MustCompile(`(?i)\b(?:once|when)\s+(?:the\s+)?` + waitingTargetsEN + `\s+` + waitingDoneEN), "cond"},
+		{regexp.MustCompile(`(?i)\bwacht(?:en)?\s+(?:nu\s+|even\s+)?op\s+(?:[\w'#./-]+\s+){0,3}?` + waitingTargetsNL + `\b`), "wait"},
+		{regexp.MustCompile(`(?i)\bzodra\s+(?:de\s+|het\s+|alle\s+)?(?:[\w'#./-]+\s+){0,2}?` + waitingTargetsNL + `\s+(?:\w+\s+){0,2}?` + waitingDoneNL + `\b`), "cond"},
+	}
+	// What may precede "waiting" when this session is the one waiting: nothing
+	// (a gerund fragment), or I/we, optionally with connectors and adverbs.
+	waitingOwnSubject = regexp.MustCompile(`(?i)^[\s,;:-]*(?:(?:so|and|ok|okay|then|nu|dus|en)[\s,]+)*(?:(?:i|we|ik|wij)(?:['\x{2019}](?:m|re|ll)|\s+(?:am|are|will|zal|ga))?\s+)?(?:(?:now|still|currently|just|also|nu|even|nog)\s+)*$`)
+	waitingFirstPerson = regexp.MustCompile(`(?i)\b(?:i|we|i['\x{2019}](?:ll|m|ve)|we['\x{2019}](?:ll|re)|ik|wij|we)\b`)
+	// The sentence is about a person or a decision.
+	waitingHuman = regexp.MustCompile(`(?i)\b(?:your|jouw|jullie|uw|approval|approve[sd]?|akkoord|goedkeuring|answers?|antwoord|owner|eigenaar|decisions?|beslissing|sign-?off|confirmation|bevestiging|replies|reply|feedback|reviews?|reviewers?)\b`)
+	waitingNegation = regexp.MustCompile(`(?i)(?:\b(?:not|never|no\s+longer|niet|nooit|geen)\b|n't)`)
+
+	waitingFenceRe     = regexp.MustCompile("(?s)```.*?(?:```|$)")
+	waitingInlineRe    = regexp.MustCompile("`[^`\\n]*`")
+	waitingQuotedRe    = regexp.MustCompile(`"[^"\n]*"|\x{201C}[^\x{201D}\n]*\x{201D}|\x{2018}[^\x{2019}\n]*\x{2019}`)
+	// Single quotes only count as quotes when not part of a word (apostrophes).
+	waitingSingleQuote = regexp.MustCompile(`(^|[^\p{L}\p{N}])'[^'\n]*'($|[^\p{L}\p{N}])`)
+	waitingBlockquote  = regexp.MustCompile(`(?m)^\s*>.*$`)
+	waitingSentenceSep = regexp.MustCompile(`[.!?]+\s+|\n`)
+)
+
+// stripQuoted removes code blocks, inline code, quoted text and blockquotes,
+// so a session quoting someone else's words is not mistaken for waiting.
+func stripQuoted(text string) string {
+	text = waitingFenceRe.ReplaceAllString(text, " ")
+	text = waitingBlockquote.ReplaceAllString(text, " ")
+	text = waitingInlineRe.ReplaceAllString(text, " ")
+	text = waitingQuotedRe.ReplaceAllString(text, " ")
+	return waitingSingleQuote.ReplaceAllString(text, "$1 $2")
+}
+
+// sessionWaitsOnMachine reports whether the text says this session is waiting
+// on a machine process.
+func sessionWaitsOnMachine(text string) bool {
+	for _, sent := range waitingSentenceSep.Split(stripQuoted(text), -1) {
+		if waitingHuman.MatchString(sent) {
+			continue
+		}
+		for _, p := range waitingMachineRes {
+			loc := p.re.FindStringIndex(sent)
+			if loc == nil {
+				continue
+			}
+			before := sent[:loc[0]]
+			if waitingNegation.MatchString(before) {
+				continue
+			}
+			if p.kind == "wait" && !waitingOwnSubject.MatchString(before) {
+				continue
+			}
+			if p.kind == "cond" && !waitingFirstPerson.MatchString(sent) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func (r *waitingNothingRunningRule) Eval(t Transcript, _ ShellContext) (bool, string) {
+	if !t.RunningKnown || t.BackgroundTasks != 0 || t.SessionCrons != 0 {
+		return false, ""
+	}
+	if !sessionWaitsOnMachine(t.LastAssistantText) {
+		return false, ""
+	}
+	return true, "You said you are waiting, but nothing is running that will wake you: " +
+		"start a watcher in the background (for example `gh pr checks <n> --watch --fail-fast`), " +
+		"or report the item as blocked with what it waits on."
+}
+
 // DefaultRules returns the built-in rule set in evaluation order.
 // Transcript-only rules (no shell cost) run first, then shell-based.
 // completionQualityRule is intentionally LAST: it fires only when every
@@ -372,6 +475,7 @@ func DefaultRules() []StopRule {
 		&stopPhraseGuardRule{},
 		&noAskHumanRule{},
 		&contextMonitorRule{},
+		&waitingNothingRunningRule{},
 		&installNotRunRule{},
 		&proposedTestNotRunRule{},
 		// Shell-based (~5ms each).
