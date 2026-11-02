@@ -138,6 +138,14 @@ func evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 			continue
 		}
 
+		// Transcript rules cannot be judged without transcript data: skip
+		// them and report them as blind. This comes before the text pre-filter and
+		// session gates: a rule that lacks its data is blind whatever the text says.
+		if t.TranscriptBlind && transcriptRules[rule.Name()] {
+			res.Blind = append(res.Blind, rule.Name())
+			continue
+		}
+
 		// Text pre-filter gate — must match before any shell check runs.
 		if pf := rule.TextPreFilter(); pf != "" {
 			re, err := regexp.Compile(`(?i)` + pf)
@@ -155,13 +163,6 @@ func evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 		// Per-rule continue cap: if the rule has a MaxContinues() > 0 and
 		// has already fired that many times, skip it.
 		if mc := rule.MaxContinues(); mc > 0 && sess.ruleFireCount(rule.Name()) >= mc {
-			continue
-		}
-
-		// Transcript rules cannot be judged without transcript data: skip
-		// them and report them as blind.
-		if t.TranscriptBlind && transcriptRules[rule.Name()] {
-			res.Blind = append(res.Blind, rule.Name())
 			continue
 		}
 

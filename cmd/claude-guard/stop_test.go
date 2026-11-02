@@ -438,12 +438,19 @@ func TestTranscriptRead(t *testing.T) {
 		var buf bytes.Buffer
 		cmdStopWithIO(bytes.NewReader(payload), &buf)
 		log := readFile(t, logPath)
-		if !strings.Contains(log, `"stop_blind"`) || !strings.Contains(log, `"rule":"open-todo-items"`) {
+		if !strings.Contains(log, `"stop_blind"`) {
 			t.Errorf("blind rules not logged:\n%s", log)
 		}
+		// Every transcript rule is blind, also those whose text pre-filter
+		// does not match the message ("done").
 		stats := collectStopStats(strings.NewReader(log), time.Now().Add(-time.Hour))
-		if stats["open-todo-items"] == nil || stats["open-todo-items"].Blind != 1 {
-			t.Errorf("stop-stats blind count wrong: %+v", stats["open-todo-items"])
+		for _, name := range []string{"open-todo-items", "pr-created-not-verified", "failing-tests", "context-monitor", "install-not-run", "proposed-test-not-run", "completion-quality"} {
+			if !strings.Contains(log, `"rule":"`+name+`"`) {
+				t.Errorf("%s not logged as blind", name)
+			}
+			if stats[name] == nil || stats[name].Blind != 1 {
+				t.Errorf("%s: stop-stats blind count wrong: %+v", name, stats[name])
+			}
 		}
 	})
 

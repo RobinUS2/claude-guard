@@ -10,7 +10,7 @@ Do not edit or remove items. Add work you discover under "## Discovered" as `- [
 only its length in bytes; README.md says so. Tests: TestStopLogPrivacy with subtests
 no_message_text_logged, message_length_logged.
   - verified
-- [ ] **T2**: Transcript rules can see their data: cmd/claude-guard/stop.go reads the transcript file at
+- [x] **T2**: Transcript rules can see their data: cmd/claude-guard/stop.go reads the transcript file at
 `transcript_path` (JSONL, bounded to the last 2 MB) to fill BashCalls, todo items and turn count, so the
 transcript-based rules can match in log mode. When the path is missing or unreadable, those rules are
 reported as blind (skipped, counted as `blind` in stop-stats) instead of evaluated on empty data, and
