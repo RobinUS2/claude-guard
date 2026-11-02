@@ -82,9 +82,7 @@ func cmdStopWithIO(r io.Reader, w io.Writer) int {
 		timeout,
 		cfg.Stop.Modes,
 	)
-	for _, name := range res.WouldBlock {
-		dlog.StopWouldBlock(clog.StopWouldBlockRecord{SessionID: in.SessionID, Rule: name})
-	}
+	stop.RecordWouldBlock(dlog, in.SessionID, res)
 
 	suppressed := ""
 	if res.CapReached {
@@ -142,18 +140,18 @@ func writeStopResp(w io.Writer, msg string) int {
 }
 
 // applyRunning copies the running-work counts from the Stop hook input onto
-// the transcript. RunningKnown stays false unless at least one of the two
-// fields is present as an array, so older Claude Code never triggers rules
-// that depend on it.
+// the transcript. RunningKnown is true only when BOTH background_tasks and
+// session_crons are arrays; if either is absent, null or not an array, what
+// is running is unknown and rules that depend on it stay quiet.
 func applyRunning(tr *stop.Transcript, in stopInput) {
-	if n, ok := arrayLen(in.BackgroundTasks); ok {
-		tr.BackgroundTasks = n
-		tr.RunningKnown = true
+	tasks, okTasks := arrayLen(in.BackgroundTasks)
+	crons, okCrons := arrayLen(in.SessionCrons)
+	if !okTasks || !okCrons {
+		return
 	}
-	if n, ok := arrayLen(in.SessionCrons); ok {
-		tr.SessionCrons = n
-		tr.RunningKnown = true
-	}
+	tr.BackgroundTasks = tasks
+	tr.SessionCrons = crons
+	tr.RunningKnown = true
 }
 
 // arrayLen returns the element count of a raw JSON array, and false when the
@@ -178,8 +176,11 @@ func parseStopInput(data []byte) (stopInput, stop.Transcript, error) {
 		return in, stop.Transcript{}, err
 	}
 	tr := parseTranscript(in.Transcript)
-	var msg string
-	if string(in.LastAssistantMessage) != "null" && json.Unmarshal(in.LastAssistantMessage, &msg) == nil {
+	// The legacy transcript text is used only when the field is absent. A
+	// present but null or non-string value counts as an empty message.
+	if len(in.LastAssistantMessage) > 0 {
+		var msg string
+		_ = json.Unmarshal(in.LastAssistantMessage, &msg)
 		tr.LastAssistantText = msg
 	}
 	applyRunning(&tr, in)

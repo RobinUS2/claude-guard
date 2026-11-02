@@ -168,7 +168,7 @@ func readFile(t *testing.T, path string) string {
 
 func TestParseStopInput(t *testing.T) {
 	t.Run("background_tasks_counted", func(t *testing.T) {
-		_, tr, err := parseStopInput([]byte(`{"transcript":[],"background_tasks":[{"id":"a"},{"id":"b"}]}`))
+		_, tr, err := parseStopInput([]byte(`{"transcript":[],"background_tasks":[{"id":"a"},{"id":"b"}],"session_crons":[]}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -177,7 +177,7 @@ func TestParseStopInput(t *testing.T) {
 		}
 	})
 	t.Run("crons_counted", func(t *testing.T) {
-		_, tr, err := parseStopInput([]byte(`{"transcript":[],"session_crons":[{"id":"c"}]}`))
+		_, tr, err := parseStopInput([]byte(`{"transcript":[],"background_tasks":[],"session_crons":[{"id":"c"}]}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,6 +210,13 @@ func TestStopInput(t *testing.T) {
 		if in.SessionID != "s1" || in.TranscriptPath != "/x/t.jsonl" || !in.StopHookActive {
 			t.Errorf("input = %+v", in)
 		}
+		// Present but null or non-string: no fallback to the legacy array.
+		for _, v := range []string{`null`, `5`, `{}`} {
+			_, tr, _ = parseStopInput([]byte(`{"last_assistant_message":` + v + `,"transcript":[{"role":"assistant","content":"old text"}]}`))
+			if tr.LastAssistantText != "" {
+				t.Errorf("last_assistant_message=%s fell back to %q", v, tr.LastAssistantText)
+			}
+		}
 		// Absent last_assistant_message falls back to the legacy array.
 		_, tr, _ = parseStopInput([]byte(`{"transcript":[{"role":"assistant","content":"old text"}]}`))
 		if tr.LastAssistantText != "old text" {
@@ -223,6 +230,20 @@ func TestStopInput(t *testing.T) {
 		}
 		if !tr.RunningKnown || tr.BackgroundTasks != 0 || tr.SessionCrons != 0 {
 			t.Errorf("got %+v", tr)
+		}
+	})
+	t.Run("mixed_known_unknown", func(t *testing.T) {
+		for _, body := range []string{
+			`{"background_tasks":[]}`, `{"session_crons":[]}`,
+			`{"background_tasks":[],"session_crons":null}`, `{"background_tasks":"x","session_crons":[]}`,
+		} {
+			_, tr, err := parseStopInput([]byte(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tr.RunningKnown {
+				t.Errorf("%s: RunningKnown = true", body)
+			}
 		}
 	})
 	t.Run("null_fields_unknown", func(t *testing.T) {
@@ -284,7 +305,7 @@ func TestStopE2E(t *testing.T) {
 	})
 }
 
-func TestRuleMode(t *testing.T) {
+func TestRuleModeHook(t *testing.T) {
 	t.Run("default_only_waiting_enforces", func(t *testing.T) {
 		for _, r := range stop.DefaultRules() {
 			want := stop.ModeLog

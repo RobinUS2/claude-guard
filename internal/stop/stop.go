@@ -1,6 +1,7 @@
 package stop
 
 import (
+	clog "github.com/RobinUS2/claude-guard/internal/log"
 	"regexp"
 	"strings"
 	"time"
@@ -168,4 +169,12 @@ func evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 	// reflects session state even for "stop allowed" events.
 	res.ContinueCount = sess.load().Continues
 	return res
+}
+
+// RecordWouldBlock writes one "would block" record (rule, session id, time)
+// to the decision log for every log-mode rule that matched.
+func RecordWouldBlock(dlog *clog.DecisionLogger, sessionID string, res Result) {
+	for _, name := range res.WouldBlock {
+		dlog.StopWouldBlock(clog.StopWouldBlockRecord{SessionID: sessionID, Rule: name})
+	}
 }

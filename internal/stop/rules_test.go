@@ -296,6 +296,10 @@ func TestStopWaitingPhrases(t *testing.T) {
 		{"quoted_text_passes", `The log said "waiting for the build to finish" and then failed.`, false},
 		{"code_block_passes", "Output:\n```\nwaiting for CI to finish\n```\nDone.", false},
 		{"wacht_op_jouw_akkoord_passes", "Ik wacht op jouw akkoord.", false},
+		{"single_quoted_passes", "The log said 'waiting for the build to finish' and then failed.", false},
+		{"third_person_passes", "The agent is waiting for CI.", false},
+		{"first_person_im_matches", "I'm waiting for the deploy to finish.", true},
+		{"once_ci_finishes_matches", "I'll check back once CI finishes.", true},
 		{"zodra_je_merget_passes", "Zodra je merget, rond ik de release af.", false},
 	}
 	for _, c := range cases {

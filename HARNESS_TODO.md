@@ -6,7 +6,7 @@ Do not edit or remove items. Add work you discover under "## Discovered" as `- [
 
 ## Items
 
-- [ ] **T1**: Input: cmd/claude-guard/stop.go reads the documented Stop hook input, `last_assistant_message`,
+- [x] **T1**: Input: cmd/claude-guard/stop.go reads the documented Stop hook input, `last_assistant_message`,
 `stop_hook_active`, `session_id`, `transcript_path`, `background_tasks`, `session_crons`, and fills
 Transcript.LastAssistantText from last_assistant_message (falling back to the old transcript array only
 when last_assistant_message is absent). background_tasks and session_crons: an empty array means known and
@@ -20,13 +20,13 @@ with a docs-shaped stdin JSON ("Waiting for CI on PR 12.", empty background_task
 asserts the block output, plus the same input with one background task asserting {}. Tests: TestStopE2E
 with subtests waiting_nothing_running_blocks, background_task_lets_it_stop, stop_hook_active_lets_it_stop.
   - verified
-- [ ] **T3**: Per-rule mode in internal/stop/stop.go: every rule is `enforce` or `log`, configurable in the existing
+- [x] **T3**: Per-rule mode in internal/stop/stop.go: every rule is `enforce` or `log`, configurable in the existing
 claude-guard config (document the key), default log for all rules except waiting-nothing-running, which
 defaults to enforce. A log-mode rule that matches writes a "would block" record (rule name, session id,
 time) to the decision log and lets the session stop. Tests: TestRuleMode with subtests
 default_only_waiting_enforces, log_mode_records_would_block, config_override_enforces.
   - reopened (1): hidden acceptance check failed: `~/.fleetctl/tasks/bin/pass.sh ./internal/stop/ TestRuleMode default_only_waiting_enforces log_mode_records_would_block config_override_enforces` (output in the round feedback)
-- [ ] **T4**: Tighten waiting-nothing-running in internal/stop/rules.go: it matches only when the session says IT is
+- [x] **T4**: Tighten waiting-nothing-running in internal/stop/rules.go: it matches only when the session says IT is
 waiting on a machine process (CI, checks, a build, a deploy, a pipeline, a job, a run, an agent, a test
 suite), in English or Dutch. It never matches waiting on a person or a decision (your review, approval,
 akkoord, an answer, the owner), negations ("not waiting"), text inside code blocks or quotes, or bare
@@ -40,7 +40,7 @@ per rule how often it would have blocked (log mode) or did block (enforce), and 
 sessions; no message text. Put it in cmd/claude-guard/stopstats.go. Tests: TestStopStats with subtests
 counts_per_rule, distinct_sessions, since_filter.
   - verified
-- [ ] **T6**: README.md: describe what the Stop hook reads and returns, the enforce/log switch and its defaults, that only
+- [x] **T6**: README.md: describe what the Stop hook reads and returns, the enforce/log switch and its defaults, that only
 waiting-nothing-running enforces by default, and `stop-stats`. Remove any claim that the other rules send a
 session back to work while they are in log mode.
   - reopened (1): hidden acceptance check failed: `grep -qi 'log mode\|log-mode\|mode: log\|"log"' README.md` (output in the round feedback)

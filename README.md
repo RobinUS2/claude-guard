@@ -62,7 +62,7 @@ Every rule runs in one of two modes:
 - `enforce`: the rule's message is returned as a block and the session continues.
 - `log`: the rule only records a `stop_would_block` entry (rule name, session id, time) in the decision log (`decisions.jsonl`) and the session stops. No message text is stored.
 
-**Only `waiting-nothing-running` enforces by default.** All other rules default to `log`, so they gather numbers without sending any session back to work. Override a rule in the claude-guard config (`~/.config/claude-guard/config.yaml`):
+**Only `waiting-nothing-running` enforces by default.** All other rules default to `log`, so they gather numbers without sending any session back to work: a rule in log mode never blocks. Override a rule in the claude-guard config (`~/.config/claude-guard/config.yaml`):
 
 ```yaml
 stop:
