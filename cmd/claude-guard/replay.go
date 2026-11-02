@@ -203,7 +203,10 @@ func printReplayResult(r replayResult, since time.Duration) {
 		fmt.Println()
 		fmt.Println("  tier breakdown (what would handle the newly-auto-approved):")
 
-		type kv struct{ k string; v int }
+		type kv struct {
+			k string
+			v int
+		}
 		tiers := make([]kv, 0, len(r.byTier))
 		for k, v := range r.byTier {
 			tiers = append(tiers, kv{k, v})

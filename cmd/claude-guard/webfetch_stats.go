@@ -86,9 +86,9 @@ func cmdWebFetchStats(args []string) int {
 	defer f.Close()
 
 	type modelCounts struct {
-		calls                int
-		tokensIn, tokensOut  int
-		costUSD              float64
+		calls               int
+		tokensIn, tokensOut int
+		costUSD             float64
 	}
 	type counts struct {
 		asked, autoAllowed, userPrompted, domainsLearned int

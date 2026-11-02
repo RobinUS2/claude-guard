@@ -12,6 +12,9 @@ type Transcript struct {
 	LastAssistantText string // joined text blocks of last assistant message
 	FirstUserText     string // first user message content
 	BashCalls         []string
+	BashCallTurns     []int // 1-based turn of each BashCalls entry; empty when unknown
+	LastTextTurn      int   // 1-based turn of the last assistant text (the proposal); 0 when unknown
+	TurnStart         int   // 1-based message index of the last real user prompt; 0 when unknown
 	HasTodoWrite      bool
 	LastTodoItems     []TodoItem
 	TurnCount         int // total number of turns in the transcript
@@ -20,6 +23,31 @@ type Transcript struct {
 	BackgroundTasks int  // still-running background tasks, shells and subagents
 	SessionCrons    int  // scheduled wake-ups for this session
 	RunningKnown    bool // true only when the input carried background_tasks or session_crons
+
+	// TranscriptBlind is true when neither an inline transcript nor a
+	// readable transcript file supplied BashCalls, todo items and TurnCount.
+	// Rules in transcriptRules are then skipped rather than evaluated on
+	// empty data.
+	TranscriptBlind bool
+}
+
+// transcriptRules lists the rules that read BashCalls, todo items, the first
+// user message or the turn count. They cannot be judged without a transcript.
+var transcriptRules = map[string]bool{
+	"open-todo-items":         true,
+	"pr-created-not-verified": true,
+	"failing-tests":           true,
+	"context-monitor":         true,
+	"install-not-run":         true,
+	"proposed-test-not-run":   true,
+	"completion-quality":      true,
+	"llm-semantic-review":     true,
+}
+
+// ExternalRule is implemented by rules whose evaluation calls an external
+// service. Such a rule never runs while it is in log mode.
+type ExternalRule interface {
+	CallsExternalService() bool
 }
 
 // TodoItem represents a single todo entry.
@@ -55,6 +83,8 @@ type Result struct {
 	Rule          string   // name of the rule that fired, "" otherwise
 	CapReached    bool     // true when a rule would have fired but the session cap was hit
 	WouldBlock    []string // log-mode rules that matched; they did not block
+	Blind         []string // transcript rules skipped because no transcript data was available
+	SkippedLog    []string // external-service rules skipped because they are in log mode
 	RulesSeen     int      // how many rules were evaluated (not skipped by gates)
 	ContinueCount int      // total continues this session after this evaluation
 }
@@ -117,6 +147,21 @@ func evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 			continue
 		}
 
+		// Transcript rules cannot be judged without transcript data: skip
+		// them and report them as blind. This comes before the text pre-filter and
+		// session gates: a rule that lacks its data is blind whatever the text says.
+		if t.TranscriptBlind && transcriptRules[rule.Name()] {
+			res.Blind = append(res.Blind, rule.Name())
+			continue
+		}
+
+		// A rule that would call an external service never runs in log mode:
+		// no call, no record beyond the skip.
+		if er, ok := rule.(ExternalRule); ok && er.CallsExternalService() && modeOf(rule.Name()) == ModeLog {
+			res.SkippedLog = append(res.SkippedLog, rule.Name())
+			continue
+		}
+
 		// Text pre-filter gate — must match before any shell check runs.
 		if pf := rule.TextPreFilter(); pf != "" {
 			re, err := regexp.Compile(`(?i)` + pf)
@@ -172,9 +217,13 @@ func evaluate(sessionID, sessionDir string, stopHookActive bool, t Transcript, r
 }
 
 // RecordWouldBlock writes one "would block" record (rule, session id, time)
-// to the decision log for every log-mode rule that matched.
+// to the decision log for every log-mode rule that matched, and one "blind"
+// record for every rule skipped for lack of transcript data.
 func RecordWouldBlock(dlog *clog.DecisionLogger, sessionID string, res Result) {
 	for _, name := range res.WouldBlock {
 		dlog.StopWouldBlock(clog.StopWouldBlockRecord{SessionID: sessionID, Rule: name})
+	}
+	for _, name := range res.Blind {
+		dlog.StopBlind(clog.StopWouldBlockRecord{SessionID: sessionID, Rule: name})
 	}
 }

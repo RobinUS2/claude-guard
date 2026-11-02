@@ -42,7 +42,16 @@ func (r *proposedTestNotRunRule) TextPreFilter() string {
 
 func (r *proposedTestNotRunRule) Eval(t Transcript, _ ShellContext) (bool, string) {
 	testPatterns := []string{"go test", "npm test", "make test", "pytest", "cargo test"}
-	for _, bash := range t.BashCalls {
+	// A test run counts when it happened in the same turn as the proposal:
+	// any Bash call at or after the last real user prompt, by message order.
+	// A proposal is usually the final text after the tool calls, so comparing
+	// against the proposal's own message would miss them. Without turn
+	// positions every call counts.
+	positioned := t.TurnStart > 0 && len(t.BashCallTurns) == len(t.BashCalls)
+	for i, bash := range t.BashCalls {
+		if positioned && t.BashCallTurns[i] < t.TurnStart {
+			continue
+		}
 		for _, pat := range testPatterns {
 			if strings.Contains(bash, pat) {
 				return false, ""
@@ -322,10 +331,12 @@ func (r *stopPhraseGuardRule) Eval(t Transcript, _ ShellContext) (bool, string) 
 // noAskHumanRule catches "Should I...?" patterns in autonomous sessions.
 type noAskHumanRule struct{}
 
-func (r *noAskHumanRule) Name() string          { return "no-ask-human" }
-func (r *noAskHumanRule) HighConfidence() bool  { return false }
-func (r *noAskHumanRule) MaxContinues() int     { return 2 }
-func (r *noAskHumanRule) TextPreFilter() string { return `(?i)\b(should I|do you want|would you like|shall I)\b` }
+func (r *noAskHumanRule) Name() string         { return "no-ask-human" }
+func (r *noAskHumanRule) HighConfidence() bool { return false }
+func (r *noAskHumanRule) MaxContinues() int    { return 2 }
+func (r *noAskHumanRule) TextPreFilter() string {
+	return `(?i)\b(should I|do you want|would you like|shall I)\b`
+}
 
 func (r *noAskHumanRule) Eval(_ Transcript, _ ShellContext) (bool, string) {
 	v := os.Getenv("CLAUDE_GUARD_AUTONOMOUS")
@@ -366,10 +377,12 @@ func (r *contextMonitorRule) Eval(t Transcript, _ ShellContext) (bool, string) {
 // person or a decision never matches.
 type waitingNothingRunningRule struct{}
 
-func (r *waitingNothingRunningRule) Name() string          { return "waiting-nothing-running" }
-func (r *waitingNothingRunningRule) HighConfidence() bool  { return false }
-func (r *waitingNothingRunningRule) MaxContinues() int     { return 1 } // fire once only
-func (r *waitingNothingRunningRule) TextPreFilter() string { return `\b(wait|waiting|once|when|wacht|wachten|zodra)\b` }
+func (r *waitingNothingRunningRule) Name() string         { return "waiting-nothing-running" }
+func (r *waitingNothingRunningRule) HighConfidence() bool { return false }
+func (r *waitingNothingRunningRule) MaxContinues() int    { return 1 } // fire once only
+func (r *waitingNothingRunningRule) TextPreFilter() string {
+	return `\b(wait|waiting|once|when|wacht|wachten|zodra)\b`
+}
 
 const (
 	waitingTargetsEN = `(?:ci|checks?|builds?|deploys?|deployments?|pipelines?|workflows?|jobs?|runs?|agents?|tests?|test\s+suites?|github\s+actions)`
@@ -397,19 +410,19 @@ var (
 	}
 	// What may precede "waiting" when this session is the one waiting: nothing
 	// (a gerund fragment), or I/we, optionally with connectors and adverbs.
-	waitingOwnSubject = regexp.MustCompile(`(?i)^[\s,;:-]*(?:(?:so|and|ok|okay|then|nu|dus|en)[\s,]+)*(?:(?:i|we|ik|wij)(?:['\x{2019}](?:m|re|ll)|\s+(?:am|are|will|zal|ga))?\s+)?(?:(?:now|still|currently|just|also|nu|even|nog)\s+)*$`)
+	waitingOwnSubject  = regexp.MustCompile(`(?i)^[\s,;:-]*(?:(?:so|and|ok|okay|then|nu|dus|en)[\s,]+)*(?:(?:i|we|ik|wij)(?:['\x{2019}](?:m|re|ll)|\s+(?:am|are|will|zal|ga))?\s+)?(?:(?:now|still|currently|just|also|nu|even|nog)\s+)*$`)
 	waitingFirstPerson = regexp.MustCompile(`(?i)\b(?:i|we|i['\x{2019}](?:ll|m|ve)|we['\x{2019}](?:ll|re)|ik|wij|we)\b`)
 	// The sentence is about a person or a decision.
-	waitingHuman = regexp.MustCompile(`(?i)\b(?:your|jouw|jullie|uw|approval|approve[sd]?|akkoord|goedkeuring|answers?|antwoord|owner|eigenaar|decisions?|beslissing|sign-?off|confirmation|bevestiging|replies|reply|feedback|reviews?|reviewers?)\b`)
+	waitingHuman    = regexp.MustCompile(`(?i)\b(?:your|jouw|jullie|uw|approval|approve[sd]?|akkoord|goedkeuring|answers?|antwoord|owner|eigenaar|decisions?|beslissing|sign-?off|confirmation|bevestiging|replies|reply|feedback|reviews?|reviewers?)\b`)
 	waitingNegation = regexp.MustCompile(`(?i)(?:\b(?:not|never|no\s+longer|niet|nooit|geen)\b|n't)`)
 
-	waitingFenceRe     = regexp.MustCompile("(?s)```.*?(?:```|$)")
-	waitingInlineRe    = regexp.MustCompile("`[^`\\n]*`")
-	waitingQuotedRe    = regexp.MustCompile(`"[^"\n]*"|\x{201C}[^\x{201D}\n]*\x{201D}|\x{2018}[^\x{2019}\n]*\x{2019}`)
+	waitingFenceRe  = regexp.MustCompile("(?s)```.*?(?:```|$)")
+	waitingInlineRe = regexp.MustCompile("`[^`\\n]*`")
+	waitingQuotedRe = regexp.MustCompile(`"[^"\n]*"|\x{201C}[^\x{201D}\n]*\x{201D}|\x{2018}[^\x{2019}\n]*\x{2019}`)
 	// Single quotes only count as quotes when not part of a word (apostrophes).
 	waitingSingleQuote = regexp.MustCompile(`(^|[^\p{L}\p{N}])'[^'\n]*'($|[^\p{L}\p{N}])`)
 	waitingBlockquote  = regexp.MustCompile(`(?m)^\s*>.*$`)
-	waitingSentenceSep = regexp.MustCompile(`[.!?]+\s+|\n`)
+	waitingSentenceSep = regexp.MustCompile(`[.!?]+\s+|\n|[,;:]\s*|\s+[-\x{2013}\x{2014}]+\s+`)
 )
 
 // stripQuoted removes code blocks, inline code, quoted text and blockquotes,
@@ -500,9 +513,9 @@ func DefaultRules() []StopRule {
 //   - First time this session (MaxContinues = 1)
 type completionQualityRule struct{}
 
-func (r *completionQualityRule) Name() string         { return "completion-quality" }
-func (r *completionQualityRule) HighConfidence() bool { return true }
-func (r *completionQualityRule) MaxContinues() int    { return 1 }
+func (r *completionQualityRule) Name() string          { return "completion-quality" }
+func (r *completionQualityRule) HighConfidence() bool  { return true }
+func (r *completionQualityRule) MaxContinues() int     { return 1 }
 func (r *completionQualityRule) TextPreFilter() string { return "" }
 
 func (r *completionQualityRule) Eval(t Transcript, _ ShellContext) (bool, string) {

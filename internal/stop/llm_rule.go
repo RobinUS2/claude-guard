@@ -77,6 +77,9 @@ func (r *LLMStopRule) HighConfidence() bool { return true }
 // injection per session without any additional state management needed.
 func (r *LLMStopRule) MaxContinues() int { return 1 }
 
+// CallsExternalService marks this rule as one that must not run in log mode.
+func (r *LLMStopRule) CallsExternalService() bool { return true }
+
 // TextPreFilter: no pre-filter — the LLM can decide to skip based on content.
 func (r *LLMStopRule) TextPreFilter() string { return "" }
 

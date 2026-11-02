@@ -1,7 +1,9 @@
 package stop
 
 import (
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -130,4 +132,65 @@ func testContains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+type countingTransport struct{ calls int }
+
+func (c *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	c.calls++
+	body := `{"content":[{"type":"text","text":"{\"complete\":false,\"confidence\":\"high\",\"inject\":\"Run the tests.\"}"}]}`
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestLLMRuleLogMode(t *testing.T) {
+	newRule := func() (*LLMStopRule, *countingTransport) {
+		ct := &countingTransport{}
+		return &LLMStopRule{apiKey: "test", model: "m", timeout: time.Second, client: &http.Client{Transport: ct}}, ct
+	}
+	tr := Transcript{TurnCount: 5, FirstUserText: "do it", LastAssistantText: "all done"}
+
+	t.Run("no_external_call_in_log_mode", func(t *testing.T) {
+		rule, ct := newRule()
+		dir := t.TempDir()
+		for i := 0; i < 5; i++ {
+			res := EvaluateModes("s1", dir, false, tr, []StopRule{rule}, time.Second, map[string]string{"llm-semantic-review": ModeLog})
+			if res.Message != "" || len(res.WouldBlock) != 0 {
+				t.Fatalf("stop %d: log mode must not block or match: %+v", i, res)
+			}
+		}
+		if ct.calls != 0 {
+			t.Errorf("external calls in log mode = %d, want 0", ct.calls)
+		}
+	})
+
+	t.Run("enforce_mode_capped_once", func(t *testing.T) {
+		rule, ct := newRule()
+		dir := t.TempDir()
+		fired := 0
+		for i := 0; i < 5; i++ {
+			res := EvaluateModes("s2", dir, false, tr, []StopRule{rule}, time.Second, map[string]string{"llm-semantic-review": ModeEnforce})
+			if res.Message != "" {
+				fired++
+			}
+		}
+		if fired != 1 || ct.calls != 1 {
+			t.Errorf("fired=%d calls=%d, want 1 and 1", fired, ct.calls)
+		}
+	})
+
+	t.Run("blind_without_transcript", func(t *testing.T) {
+		rule, ct := newRule()
+		blind := Transcript{TranscriptBlind: true, TurnCount: 5, LastAssistantText: "all done"}
+		res := EvaluateModes("s3", t.TempDir(), false, blind, []StopRule{rule}, time.Second, map[string]string{"llm-semantic-review": ModeEnforce})
+		if len(res.Blind) != 1 || res.Blind[0] != "llm-semantic-review" {
+			t.Errorf("Blind = %v, want [llm-semantic-review]", res.Blind)
+		}
+		if ct.calls != 0 {
+			t.Errorf("calls = %d, want 0", ct.calls)
+		}
+	})
 }

@@ -20,26 +20,38 @@ import (
 type stopRuleStat struct {
 	Blocked    int // enforce mode: the session was sent back to work
 	WouldBlock int // log mode: the rule matched and the session stopped
+	Blind      int // the rule was skipped: no transcript data was available
 	sessions   map[string]struct{}
 }
+
+const (
+	statBlocked = iota
+	statWouldBlock
+	statBlind
+)
 
 // collectStopStats reads the decision log and counts, per rule, enforced
 // blocks (stop_hook records that injected a message) and log-mode matches
 // (stop_would_block records). No message text is read or kept.
 func collectStopStats(r io.Reader, cutoff time.Time) map[string]*stopRuleStat {
 	out := map[string]*stopRuleStat{}
-	add := func(rule, session string, enforced bool) {
+	add := func(rule, session string, kind int) {
 		st := out[rule]
 		if st == nil {
 			st = &stopRuleStat{sessions: map[string]struct{}{}}
 			out[rule] = st
 		}
-		if enforced {
+		switch kind {
+		case statBlocked:
 			st.Blocked++
-		} else {
+		case statWouldBlock:
 			st.WouldBlock++
+		case statBlind:
+			st.Blind++
 		}
-		if session != "" {
+		// SESSIONS counts only sessions where the rule matched; blind
+		// sessions have their own column.
+		if session != "" && kind != statBlind {
 			st.sessions[session] = struct{}{}
 		}
 	}
@@ -58,7 +70,7 @@ func collectStopStats(r io.Reader, cutoff time.Time) map[string]*stopRuleStat {
 		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
 			continue
 		}
-		if rec.Msg != clog.MsgStopHook && rec.Msg != clog.MsgStopWouldBlock {
+		if rec.Msg != clog.MsgStopHook && rec.Msg != clog.MsgStopWouldBlock && rec.Msg != clog.MsgStopBlind {
 			continue
 		}
 		if ts, err := time.Parse(time.RFC3339Nano, rec.Time); err != nil || ts.Before(cutoff) {
@@ -67,10 +79,12 @@ func collectStopStats(r io.Reader, cutoff time.Time) map[string]*stopRuleStat {
 		switch rec.Msg {
 		case clog.MsgStopHook:
 			if rec.Injected && rec.FiredRule != "" {
-				add(rec.FiredRule, rec.SessionID, true)
+				add(rec.FiredRule, rec.SessionID, statBlocked)
 			}
 		case clog.MsgStopWouldBlock:
-			add(rec.Rule, rec.SessionID, false)
+			add(rec.Rule, rec.SessionID, statWouldBlock)
+		case clog.MsgStopBlind:
+			add(rec.Rule, rec.SessionID, statBlind)
 		}
 	}
 	return out
@@ -116,10 +130,10 @@ func cmdStopStats(args []string, w io.Writer) int {
 
 	fmt.Fprintf(w, "stop rule stats (last %s)\n\n", sinceStr)
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "RULE\tMODE\tBLOCKED\tWOULD BLOCK\tSESSIONS")
+	fmt.Fprintln(tw, "RULE\tMODE\tBLOCKED\tWOULD BLOCK\tBLIND\tSESSIONS")
 	for _, n := range names {
 		st := stats[n]
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\n", n, stop.RuleMode(n, cfg.Stop.Modes), st.Blocked, st.WouldBlock, len(st.sessions))
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\n", n, stop.RuleMode(n, cfg.Stop.Modes), st.Blocked, st.WouldBlock, st.Blind, len(st.sessions))
 	}
 	tw.Flush()
 	if len(names) == 0 {

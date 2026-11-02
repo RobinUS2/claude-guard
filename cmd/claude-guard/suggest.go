@@ -67,13 +67,13 @@ func cmdSuggest(args []string) int {
 
 // suggestCandidate is one pattern group from the analysis.
 type suggestCandidate struct {
-	canonical    string     // program + subcommand (SessionCanonical output)
-	sessionCount int        // unique sessions this appeared in
-	totalCount   int        // raw occurrence count across all sessions
-	samples      []string   // up to 3 representative commands
-	ruleType     string     // "tier2" | "prompt_hint" | "project_rule" | "already_blocked" | "skip"
-	confidence   string     // "high" | "medium" | "low"
-	proposal     string     // human-readable proposal text
+	canonical    string   // program + subcommand (SessionCanonical output)
+	sessionCount int      // unique sessions this appeared in
+	totalCount   int      // raw occurrence count across all sessions
+	samples      []string // up to 3 representative commands
+	ruleType     string   // "tier2" | "prompt_hint" | "project_rule" | "already_blocked" | "skip"
+	confidence   string   // "high" | "medium" | "low"
+	proposal     string   // human-readable proposal text
 }
 
 func runSuggest(logPath string, cutoff time.Time, minSessions int, eng *engine.Engine) []suggestCandidate {
@@ -181,12 +181,12 @@ func runSuggest(logPath string, cutoff time.Time, minSessions int, eng *engine.E
 // This is a deterministic lookup table — no engine calls, no LLM.
 var programTier = map[string]string{
 	// Likely safe: well-known read or workflow programs
-	"git":    "tier2_check",
-	"go":     "tier2_check",
-	"make":   "tier2_check",
-	"npm":    "tier2_check",
-	"cargo":  "tier2_check",
-	"python": "tier2_check",
+	"git":     "tier2_check",
+	"go":      "tier2_check",
+	"make":    "tier2_check",
+	"npm":     "tier2_check",
+	"cargo":   "tier2_check",
+	"python":  "tier2_check",
 	"python3": "tier2_check",
 	// Secrets/credentials access → prompt hint is better than allow rule
 	"export": "prompt_hint",
@@ -219,15 +219,15 @@ var programTier = map[string]string{
 
 // safeSubcommands lists program→[]subcommand pairs that are high-confidence safe.
 var safeSubcommands = map[string][]string{
-	"git":    {"push", "add", "commit", "fetch", "pull", "merge", "rebase", "stash"},
-	"go":     {"build", "test", "vet", "install", "run", "generate", "mod", "get"},
-	"make":   {"build", "test", "install", "lint", "check", "clean", "fmt"},
-	"npm":    {"install", "run", "test", "build", "lint", "start"},
-	"cargo":  {"build", "test", "clippy", "fmt", "check", "run"},
-	"python": {"run"},
+	"git":     {"push", "add", "commit", "fetch", "pull", "merge", "rebase", "stash"},
+	"go":      {"build", "test", "vet", "install", "run", "generate", "mod", "get"},
+	"make":    {"build", "test", "install", "lint", "check", "clean", "fmt"},
+	"npm":     {"install", "run", "test", "build", "lint", "start"},
+	"cargo":   {"build", "test", "clippy", "fmt", "check", "run"},
+	"python":  {"run"},
 	"python3": {"run"},
-	"bq":     {"query", "show", "ls"},
-	"gcloud": {"logging", "builds", "run", "compute", "iam", "projects"},
+	"bq":      {"query", "show", "ls"},
+	"gcloud":  {"logging", "builds", "run", "compute", "iam", "projects"},
 }
 
 func classify(canonical string, sessionCount, total int, samples []string) suggestCandidate {
@@ -252,8 +252,8 @@ func classify(canonical string, sessionCount, total int, samples []string) sugge
 		confidence = "high"
 		proposal = fmt.Sprintf(
 			"add to ~/.config/claude-guard/prompt-hints.yaml:\n"+
-			"       context: \"This user's %s commands are part of a normal local dev workflow.\"\n"+
-			"       reason: recurring prompt (%d sessions)",
+				"       context: \"This user's %s commands are part of a normal local dev workflow.\"\n"+
+				"       reason: recurring prompt (%d sessions)",
 			canonical, sessionCount)
 
 	case "high":
@@ -261,7 +261,7 @@ func classify(canonical string, sessionCount, total int, samples []string) sugge
 		confidence = "high"
 		proposal = fmt.Sprintf(
 			"consider adding to compiled-in Tier 2 (instant_allow) or .claude-guard.yml:\n"+
-			"       allow: [{name: %s-readonly, programs: [%s], subcommands: [%s]}]",
+				"       allow: [{name: %s-readonly, programs: [%s], subcommands: [%s]}]",
 			program, program, subcommand)
 
 	case "tier2_check":
@@ -278,14 +278,14 @@ func classify(canonical string, sessionCount, total int, samples []string) sugge
 			confidence = "high"
 			proposal = fmt.Sprintf(
 				"add to .claude-guard.yml for project-specific approval, or consider\n"+
-				"       opening an issue to promote '%s %s' to compiled-in Tier 2",
+					"       opening an issue to promote '%s %s' to compiled-in Tier 2",
 				program, subcommand)
 		} else {
 			ruleType = "project_rule"
 			confidence = "medium"
 			proposal = fmt.Sprintf(
 				"add to .claude-guard.yml in the relevant repo:\n"+
-				"       allow: [{name: %s-%s, programs: [%s], subcommands: [%s]}]",
+					"       allow: [{name: %s-%s, programs: [%s], subcommands: [%s]}]",
 				program, subcommand, program, subcommand)
 		}
 
@@ -294,7 +294,7 @@ func classify(canonical string, sessionCount, total int, samples []string) sugge
 		confidence = "medium"
 		proposal = fmt.Sprintf(
 			"medium-risk — verify it's safe, then add to .claude-guard.yml:\n"+
-			"       allow: [{name: %s-%s, programs: [%s], subcommands: [%s]}]",
+				"       allow: [{name: %s-%s, programs: [%s], subcommands: [%s]}]",
 			program, subcommand, program, subcommand)
 
 	default:

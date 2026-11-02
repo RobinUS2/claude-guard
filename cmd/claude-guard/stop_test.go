@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/stop"
@@ -339,6 +340,145 @@ func TestRuleModeHook(t *testing.T) {
 		cmdStopWithIO(strings.NewReader(body), &buf)
 		if !strings.Contains(buf.String(), `"decision":"block"`) {
 			t.Errorf("response = %q, want a block", buf.String())
+		}
+	})
+}
+
+func TestStopLogPrivacy(t *testing.T) {
+	const secret = "customer-secret-phrase waiting for CI"
+	run := func(t *testing.T) string {
+		logPath := isolateStop(t, "")
+		payload, _ := json.Marshal(map[string]any{
+			"session_id":             "priv-1",
+			"last_assistant_message": secret,
+			"background_tasks":       []any{},
+			"session_crons":          []any{},
+		})
+		var buf bytes.Buffer
+		if code := cmdStopWithIO(bytes.NewReader(payload), &buf); code != 0 {
+			t.Fatalf("exit code %d", code)
+		}
+		return readFile(t, logPath)
+	}
+
+	t.Run("no_message_text_logged", func(t *testing.T) {
+		got := run(t)
+		if strings.Contains(got, "customer-secret") || strings.Contains(got, "waiting for CI") {
+			t.Errorf("decision log contains message text:\n%s", got)
+		}
+		if strings.Contains(got, "last_assistant_head") && !strings.Contains(got, `"last_assistant_head":""`) {
+			t.Errorf("decision log carries a message head:\n%s", got)
+		}
+	})
+
+	t.Run("message_length_logged", func(t *testing.T) {
+		got := run(t)
+		want := `"last_assistant_len":` + strconv.Itoa(len(secret))
+		if !strings.Contains(got, want) {
+			t.Errorf("decision log missing %s:\n%s", want, got)
+		}
+	})
+}
+
+func TestTranscriptRead(t *testing.T) {
+	writeTranscript := func(t *testing.T, lines ...string) string {
+		p := filepath.Join(t.TempDir(), "session.jsonl")
+		if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	bashLine := func(cmd string) string {
+		return `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"` + cmd + `"}}]}}`
+	}
+	parse := func(t *testing.T, path, msg string) stop.Transcript {
+		payload, _ := json.Marshal(map[string]any{
+			"session_id": "tr-1", "transcript_path": path, "last_assistant_message": msg,
+		})
+		_, tr, err := parseStopInput(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tr
+	}
+
+	t.Run("bash_calls_from_transcript", func(t *testing.T) {
+		p := writeTranscript(t,
+			`{"type":"user","message":{"role":"user","content":"please install"}}`,
+			bashLine("gh pr create"),
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"x","status":"pending"}]}}]}}`,
+		)
+		tr := parse(t, p, "done")
+		if tr.TranscriptBlind {
+			t.Error("transcript marked blind despite a readable file")
+		}
+		if len(tr.BashCalls) != 1 || tr.BashCalls[0] != "gh pr create" {
+			t.Errorf("BashCalls = %v", tr.BashCalls)
+		}
+		if !tr.HasTodoWrite || len(tr.LastTodoItems) != 1 {
+			t.Errorf("todos not read: %+v", tr.LastTodoItems)
+		}
+		if tr.TurnCount != 3 {
+			t.Errorf("TurnCount = %d, want 3", tr.TurnCount)
+		}
+		if tr.LastAssistantText != "done" {
+			t.Errorf("LastAssistantText = %q, want the hook message", tr.LastAssistantText)
+		}
+	})
+
+	t.Run("missing_transcript_marks_blind", func(t *testing.T) {
+		logPath := isolateStop(t, "open-todo-items: enforce")
+		tr := parse(t, filepath.Join(t.TempDir(), "nope.jsonl"), "done")
+		if !tr.TranscriptBlind {
+			t.Fatal("missing transcript not marked blind")
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"session_id": "blind-1", "transcript_path": "/nonexistent/x.jsonl", "last_assistant_message": "done",
+		})
+		var buf bytes.Buffer
+		cmdStopWithIO(bytes.NewReader(payload), &buf)
+		log := readFile(t, logPath)
+		if !strings.Contains(log, `"stop_blind"`) {
+			t.Errorf("blind rules not logged:\n%s", log)
+		}
+		// Every transcript rule is blind, also those whose text pre-filter
+		// does not match the message ("done").
+		stats := collectStopStats(strings.NewReader(log), time.Now().Add(-time.Hour))
+		for _, name := range []string{"open-todo-items", "pr-created-not-verified", "failing-tests", "context-monitor", "install-not-run", "proposed-test-not-run", "completion-quality"} {
+			if !strings.Contains(log, `"rule":"`+name+`"`) {
+				t.Errorf("%s not logged as blind", name)
+			}
+			if stats[name] == nil || stats[name].Blind != 1 {
+				t.Errorf("%s: stop-stats blind count wrong: %+v", name, stats[name])
+			}
+		}
+	})
+
+	t.Run("proposed_test_run_does_not_fire", func(t *testing.T) {
+		rule := stop.DefaultRules()
+		var proposed stop.StopRule
+		for _, r := range rule {
+			if r.Name() == "proposed-test-not-run" {
+				proposed = r
+			}
+		}
+		msg := "Next, run go test ./... to verify."
+		ran := parse(t, writeTranscript(t, bashLine("go test ./...")), msg)
+		if fires, _ := proposed.Eval(ran, nil); fires {
+			t.Error("fired although the transcript shows a test run")
+		}
+		textLine := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"` + msg + `"}]}}`
+		after := parse(t, writeTranscript(t, textLine, bashLine("go test ./...")), msg)
+		if fires, _ := proposed.Eval(after, nil); fires {
+			t.Error("fired although a test ran after the proposal")
+		}
+		before := parse(t, writeTranscript(t, bashLine("go test ./..."), textLine), msg)
+		if fires, _ := proposed.Eval(before, nil); fires {
+			t.Error("fired although a test ran in the same turn, before the final text")
+		}
+		notRan := parse(t, writeTranscript(t, bashLine("ls")), msg)
+		if fires, _ := proposed.Eval(notRan, nil); !fires {
+			t.Error("did not fire although no test ran")
 		}
 	})
 }

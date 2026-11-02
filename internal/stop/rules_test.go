@@ -1,7 +1,10 @@
 package stop
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -309,4 +312,64 @@ func TestStopWaitingPhrases(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStopWaitingClauses(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"comma_clause_fires", "PR #12 is open, waiting for CI.", true},
+		{"semicolon_clause_fires", "Pushed the fix; waiting for CI.", true},
+		{"dutch_comma_clause_fires", "Gepusht, ik wacht nu op de pipeline.", true},
+		{"review_clause_still_passes", "PR #12 is open, waiting for your review.", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sessionWaitsOnMachine(c.text); got != c.want {
+				t.Errorf("sessionWaitsOnMachine(%q) = %v, want %v", c.text, got, c.want)
+			}
+		})
+	}
+}
+
+func TestProposedTestRun(t *testing.T) {
+	var proposed StopRule
+	for _, r := range DefaultRules() {
+		if r.Name() == "proposed-test-not-run" {
+			proposed = r
+		}
+	}
+	parseFixture := func(t *testing.T, name string) Transcript {
+		data, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var turns []json.RawMessage
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			var entry struct {
+				Message json.RawMessage `json:"message"`
+			}
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				t.Fatal(err)
+			}
+			turns = append(turns, entry.Message)
+		}
+		return ParseTranscript(turns)
+	}
+
+	t.Run("ran_in_same_turn_does_not_fire", func(t *testing.T) {
+		tr := parseFixture(t, "proposed_test_ran.jsonl")
+		if fires, _ := proposed.Eval(tr, nil); fires {
+			t.Error("fired although go test ran in the same turn, before the final text")
+		}
+	})
+
+	t.Run("never_ran_fires", func(t *testing.T) {
+		tr := parseFixture(t, "proposed_test_never_ran.jsonl")
+		if fires, _ := proposed.Eval(tr, nil); !fires {
+			t.Error("did not fire although no test ran")
+		}
+	})
 }
