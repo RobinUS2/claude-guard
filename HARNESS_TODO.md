@@ -10,6 +10,7 @@ Do not edit or remove items. Add work you discover under "## Discovered" as `- [
 into new fields on stop.Transcript: BackgroundTasks int and SessionCrons int, plus a bool
 RunningKnown that is true only when the input contained at least one of the two fields.
 Tests: TestParseStopInput with subtests background_tasks_counted, crons_counted, fields_missing_unknown.
+  - verified
 - [x] **T2**: Add rule `waiting-nothing-running` in internal/stop/rules.go, registered in DefaultRules. It fires when
 RunningKnown is true, BackgroundTasks == 0 and SessionCrons == 0, and the last assistant text says the
 session is waiting on something to finish (CI, checks, a build, a deploy, a pipeline, a review, an agent,
@@ -19,8 +20,10 @@ will wake you: start a watcher in the background (for example `gh pr checks <n> 
 or report the item as blocked with what it waits on." MaxContinues 1, not high-confidence.
 Tests: TestStopWaiting with subtests waiting_nothing_running_blocks, waiting_with_background_task_passes,
 waiting_with_cron_passes, not_waiting_passes, unknown_running_passes, second_stop_passes.
+  - verified
 - [x] **T3**: Document the rule in README.md's stop-hook rule list (name, what it checks, the message, that it fires
 once per session and never when the running fields are missing).
+  - verified
 
 ## Discovered
 
