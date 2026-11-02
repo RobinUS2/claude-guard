@@ -44,8 +44,6 @@ counts_per_rule, distinct_sessions, since_filter.
 waiting-nothing-running enforces by default, and `stop-stats`. Remove any claim that the other rules send a
 session back to work while they are in log mode.
   - verified
-- [ ] **T7**: Public-repository hygiene is not satisfied. Personal absolute paths, private naming conventions, and potentially customer-identifying project names remain in code, tests, and documentation. Replace personal paths, identities, vault names, hostnames, and customer/project identifiers throughout the repository with neutral synthetic examples, then run a repository-wide sensitive-string scan.
-  - added by the verifier
 
 ## Discovered
 
