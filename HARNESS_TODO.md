@@ -17,7 +17,7 @@ reported as blind (skipped, counted as `blind` in stop-stats) instead of evaluat
 proposed-test-not-run only fires when the transcript shows no test run after the proposal. Tests:
 TestTranscriptRead with subtests bash_calls_from_transcript, missing_transcript_marks_blind,
 proposed_test_run_does_not_fire.
-  - reopened (2): verifier: Blind handling occurs after the text prefilter and session-state gates. A transcript-dependent rule whose prefilter does not match is skipped before it can be added to Result.Blind. For example, with an unreadable transcript and last_assistant_message "done", proposed-test-not-run is not reported or counted blind, despite lacking the transcript data needed by that rule. The required test…
+  - verified
 - [x] **T3**: waiting-nothing-running in internal/stop/rules.go also splits clauses at commas, semicolons, colons and
 dashes, so these fire: "PR #12 is open, waiting for CI.", "Pushed the fix; waiting for CI.",
 "Gepusht, ik wacht nu op de pipeline."; and the existing passing phrases still pass. Tests:
