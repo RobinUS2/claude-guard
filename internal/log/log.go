@@ -36,6 +36,10 @@ const (
 
 	// MsgStopHook is the slog msg used for Stop hook evaluation events.
 	MsgStopHook = "stop_hook"
+
+	// MsgStopWouldBlock is the slog msg for a log-mode Stop rule that
+	// matched. The session was allowed to stop.
+	MsgStopWouldBlock = "stop_would_block"
 )
 
 // StopHookRecord is the shape for reading stop_hook events from decisions.jsonl.
@@ -56,6 +60,15 @@ type StopHookRecord struct {
 	LastAssistantHead  string `json:"last_assistant_head,omitempty"` // first 200 chars
 	BashCallCount      int    `json:"bash_call_count,omitempty"`
 	HasTodoWrite       bool   `json:"has_todo_write,omitempty"`
+}
+
+// StopWouldBlockRecord is the shape for reading stop_would_block events.
+// It carries no message text, only which rule matched in which session.
+type StopWouldBlockRecord struct {
+	Time      string `json:"time"`
+	Msg       string `json:"msg"`
+	SessionID string `json:"session_id,omitempty"`
+	Rule      string `json:"rule"`
 }
 
 // ReadRecord is the shape for reading decision records back from the
@@ -284,6 +297,20 @@ func (l *DecisionLogger) StopHook(rec StopHookRecord) {
 		attrs = append(attrs, slog.Bool("has_todo_write", true))
 	}
 	l.firehose.LogAttrs(context.Background(), slog.LevelInfo, MsgStopHook, attrs...)
+}
+
+// StopWouldBlock records that a log-mode Stop rule matched and the session
+// was allowed to stop. slog supplies the timestamp.
+func (l *DecisionLogger) StopWouldBlock(rec StopWouldBlockRecord) {
+	if l == nil {
+		return
+	}
+	attrs := make([]slog.Attr, 0, 2)
+	if rec.SessionID != "" {
+		attrs = append(attrs, slog.String("session_id", rec.SessionID))
+	}
+	attrs = append(attrs, slog.String("rule", rec.Rule))
+	l.firehose.LogAttrs(context.Background(), slog.LevelInfo, MsgStopWouldBlock, attrs...)
 }
 
 // decisionAttrs produces the stable attribute list. Field names here

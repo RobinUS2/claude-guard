@@ -35,6 +35,7 @@ type Config struct {
 	Version    int    `yaml:"version"`
 	ShadowMode bool   `yaml:"shadow_mode"`
 	Log        Log    `yaml:"log"`
+	Stop       Stop   `yaml:"stop"`
 	LLM        LLM    `yaml:"llm"`
 	Cache       Cache       `yaml:"cache"`
 	Legacy      Legacy      `yaml:"legacy"`
@@ -71,6 +72,20 @@ type Log struct {
 	Path      string `yaml:"path"` // legacy alias
 	MaxSizeMB int    `yaml:"max_size_mb"`
 	KeepFiles int    `yaml:"keep_files"`
+}
+
+// Stop configures the Stop hook rules.
+//
+// Modes maps a rule name to "enforce" (the rule sends the session back to
+// work) or "log" (the rule only records a "would block" entry and lets the
+// session stop). Rules not listed use the built-in default: log for every
+// rule except waiting-nothing-running, which enforces.
+//
+//	stop:
+//	  modes:
+//	    open-todo-items: enforce
+type Stop struct {
+	Modes map[string]string `yaml:"modes"`
 }
 
 // LLM toggles the Haiku classifier tier.

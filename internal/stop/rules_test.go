@@ -277,3 +277,36 @@ func TestStopWaiting(t *testing.T) {
 		}
 	})
 }
+
+func TestStopWaitingPhrases(t *testing.T) {
+	fires := func(text string) bool {
+		ok, _ := (&waitingNothingRunningRule{}).Eval(Transcript{LastAssistantText: text, RunningKnown: true}, nil)
+		return ok
+	}
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"waiting_for_ci_matches", "PR is open. Waiting for CI on PR 12.", true},
+		{"wacht_op_de_build_matches", "Ik wacht op de build.", true},
+		{"waiting_for_your_review_passes", "Waiting for your review of the build before I continue.", false},
+		{"blocked_on_owner_approval_passes", "Blocked, waiting on the owner's approval for the deploy.", false},
+		{"not_waiting_passes", "I am not waiting for CI, it already passed.", false},
+		{"quoted_text_passes", `The log said "waiting for the build to finish" and then failed.`, false},
+		{"code_block_passes", "Output:\n```\nwaiting for CI to finish\n```\nDone.", false},
+		{"wacht_op_jouw_akkoord_passes", "Ik wacht op jouw akkoord.", false},
+		{"single_quoted_passes", "The log said 'waiting for the build to finish' and then failed.", false},
+		{"third_person_passes", "The agent is waiting for CI.", false},
+		{"first_person_im_matches", "I'm waiting for the deploy to finish.", true},
+		{"once_ci_finishes_matches", "I'll check back once CI finishes.", true},
+		{"zodra_je_merget_passes", "Zodra je merget, rond ik de release af.", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fires(c.text); got != c.want {
+				t.Errorf("fires(%q) = %v, want %v", c.text, got, c.want)
+			}
+		})
+	}
+}

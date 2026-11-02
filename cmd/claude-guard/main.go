@@ -30,6 +30,7 @@ Subcommands:
   doctor              health check: config, schema, API key, hook wiring
   migrate             settings.json allow-list → legacy-patterns.yaml
   backup [--dest D]   copy logs + cache + config to backup destination (default: Google Drive)
+  stop-stats [--since 7d]  per Stop rule: how often it blocked or would have, and in how many sessions
   cache <sub>         inspect/prune the verdict cache: stats, prune, clear
   dashboard           web dashboard: live stats, decisions, cache, learned patterns
   settings <sub>      audit/migrate settings.json permissions
@@ -83,6 +84,8 @@ func run(args []string) int {
 		return cmdStats(args[1:])
 	case "stop":
 		return cmdStop(args[1:])
+	case "stop-stats":
+		return cmdStopStats(args[1:], os.Stdout)
 	case "freeze":
 		return cmdFreeze(args[1:])
 	case "doctor":
