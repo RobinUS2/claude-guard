@@ -26,7 +26,8 @@
 # CLAUDE_GUARD_REQUIRE_LLM below if you want that case to deny instead.
 #
 # Environment overrides:
-#   CLAUDE_GUARD_BIN         path to the claude-guard binary (default: claude-guard on PATH)
+#   CLAUDE_GUARD_BIN         path to the claude-guard binary (default: ~/.claude/bin/claude-guard when
+#                            present, else claude-guard on PATH)
 #   CLAUDE_GUARD_REQUIRE_LLM  "1" makes claude-guard deny (instead of falling through
 #                             to a manual prompt) when no Anthropic/Gemini key is
 #                             available and nothing else resolved the command. Set on
@@ -53,7 +54,20 @@ set -u
 
 input="$(cat)"
 
-CLAUDE_GUARD_BIN="${CLAUDE_GUARD_BIN:-claude-guard}"
+# Resolve the binary without depending on the hook's PATH. Claude Code runs
+# hooks with the PATH of the process that launched the session, and a session
+# started from VS Code or launchd often lacks ~/.claude/bin and ~/go/bin. A
+# bare `claude-guard` then fails with exit 127, the hook gives no decision,
+# and every Bash and Monitor call falls through to a manual prompt (seen
+# 2026-11-15: no decisions logged after 18:18 UTC, Monitor prompted). Prefer
+# the installed copy at its fixed path, then PATH.
+if [ -z "${CLAUDE_GUARD_BIN:-}" ]; then
+  if [ -x "$HOME/.claude/bin/claude-guard" ]; then
+    CLAUDE_GUARD_BIN="$HOME/.claude/bin/claude-guard"
+  else
+    CLAUDE_GUARD_BIN="claude-guard"
+  fi
+fi
 
 # Load keys.env, but only after verifying it is owner-only (not group- or
 # world-readable) and owned by the current user. Use strict line-by-line
