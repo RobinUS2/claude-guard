@@ -2,12 +2,14 @@ package engine
 
 import (
 	"bufio"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/RobinUS2/claude-guard/internal/config"
 	"github.com/RobinUS2/claude-guard/internal/corpus"
 	"github.com/RobinUS2/claude-guard/internal/legacy"
+	"github.com/RobinUS2/claude-guard/internal/redact"
 )
 
 // Golden corpus tests — feed every command from the embedded corpus
@@ -182,5 +184,32 @@ func TestGoldenCorpus_LegacyNotAllow(t *testing.T) {
 	if len(fails) > 0 {
 		t.Errorf("SECURITY: %d commands were allowed past the legacy list:\n%s",
 			len(fails), strings.Join(fails, "\n"))
+	}
+}
+
+// TestGoldenCorpus_LegacyRedactionSkipNotAllow: listed commands that carry
+// a credential-shaped string are withheld from the LLM by the redaction
+// filter, and tier 5 must not allow them. The strings are fictional and
+// built from pieces.
+func TestGoldenCorpus_LegacyRedactionSkipNotAllow(t *testing.T) {
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		LLM:      &stubClassifier{err: errors.New("unavailable")},
+		Legacy:   legacy.FromEntries(corpus.LegacyPatterns),
+		Redactor: redact.New(nil, nil),
+	})
+	fake := []string{
+		"gh" + "p_" + strings.Repeat("Zy9", 8),
+		"AK" + "IA" + strings.Repeat("Q7", 8),
+		"sk-" + "ant-" + strings.Repeat("Xk2", 10),
+	}
+	for _, c := range fake {
+		for _, cmd := range []string{"acme-cli status " + c, "acme-report --token " + c} {
+			if out := e.Decide(Input{ToolName: "Bash", Command: cmd}); out.Verdict == Allow {
+				t.Errorf("SECURITY: allowed via tier %s despite redaction skip: %s", out.Tier, cmd[:12]+"...")
+			}
+		}
 	}
 }
