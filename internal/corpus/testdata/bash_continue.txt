@@ -313,3 +313,19 @@ docker system prune -a
 docker compose down
 docker-compose down
 docker compose stop
+
+# --- always-ask rule must not fire: other services, read-only builds verbs, mere mentions ---
+$CC $CFLAGS main.c
+$EDITOR $FILE
+. ./venv/bin/activate
+curl -s "https://cloudbuild.googleapis.com/v1/projects/$P/builds?filter=status=WORKING"
+curl -s https://cloudbuild.googleapis.com/v1/projects/p/builds/$ID
+env -S 'make test'
+gcloud builds describe $ID --project=p
+gcloud builds list --format='value(id)' | xargs -I{} gcloud builds describe {}
+gcloud builds log $ID --project=p
+gcloud dataflow jobs cancel $J --project=p --region=europe-west4
+gcloud run jobs executions cancel $E --project=p
+git rebase --exec 'make test' HEAD~1
+npx -c 'echo hi'
+source <(direnv export bash)

@@ -134,6 +134,26 @@ func formatGoldenFail(cmd, expected string, out Output) string {
 		" reason=" + out.Reason
 }
 
+// TestGoldenCorpus_BashAsk: every command in bash_ask.txt must end in Ask,
+// from the always_ask tier, and never Allow. Includes the disguised forms.
+func TestGoldenCorpus_BashAsk(t *testing.T) {
+	e := goldenEngine(t)
+	cmds := loadCorpusString(t, corpus.Ask)
+	if len(cmds) == 0 {
+		t.Fatal("empty ask corpus")
+	}
+	var fails []string
+	for _, cmd := range cmds {
+		out := e.Decide(Input{ToolName: "Bash", Command: cmd})
+		if out.Verdict != Ask || out.Tier != "always_ask" || out.Rule != "gcloud-builds-cancel" {
+			fails = append(fails, formatGoldenFail(cmd, "Ask (always_ask)", out))
+		}
+	}
+	if len(fails) > 0 {
+		t.Errorf("%d commands did NOT reach Ask:\n%s", len(fails), strings.Join(fails, "\n"))
+	}
+}
+
 // legacyGoldenEngine is goldenEngine plus the fixture tier-5 list from
 // corpus.LegacyPatterns. No LLM, no cache: tier 5 is the only thing that
 // can allow a command the deterministic tiers left open.

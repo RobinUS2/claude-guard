@@ -19,6 +19,9 @@ var Continue string
 //go:embed testdata/bash_adversarial.txt
 var Adversarial string
 
+//go:embed testdata/bash_ask.txt
+var Ask string
+
 // LegacyPatterns is the fixture tier-5 allow list (settings.json
 // `Bash(...)` entries, one per line) used with LegacyAllow and
 // LegacyNotAllow. The main corpora above run without any legacy list.

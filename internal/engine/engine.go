@@ -601,6 +601,26 @@ func (e *Engine) Decide(in Input) Output {
 		}
 	}
 
+	// Tier 1.56: ALWAYS-ASK (forced prompt, every mode).
+	// Sits after block/freeze/lock (those still win) and before the
+	// ask-reminder, tier 2, cache, LLM and legacy tiers, none of which can
+	// therefore turn a matched command into an auto-approval. Enforced even
+	// in shadow mode: these rules exist because an auto-approval already
+	// caused an incident. Never denies.
+	for _, r := range e.cfg.AlwaysAsk {
+		if v, reason := r.Eval(parsed); v == rules.Match {
+			out.Rule = r.Name()
+			out.Reason = reason
+			out.Tier = "always_ask"
+			out.Shadow.Tier1Rule = out.Rule
+			out.Shadow.Tier1Reason = reason
+			out.Verdict = Ask
+			out.Latency = time.Since(start)
+			e.record(in, out)
+			return out
+		}
+	}
+
 	// Tier 1.6: ASK REMINDER (soft "last resort" nudge).
 	// Runs AFTER unconditional block + freeze (a real security deny always
 	// wins) but BEFORE Tier 2 allow and the cache, so a command that would

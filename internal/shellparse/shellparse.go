@@ -657,3 +657,22 @@ func resolveWord(w *syntax.Word) (string, bool) {
 	}
 	return b.String(), ok
 }
+
+// AllCalls returns a Call for EVERY CallExpr anywhere in the script AST,
+// including ones Parsed.Calls does not reach: command substitution inside
+// arguments (`echo $(cmd)`), `time` clauses, function bodies, and anything
+// else syntax.Walk visits. Rules that must not be evaded by nesting (the
+// always-ask tier) use this instead of Parsed.Calls.
+func (p *Parsed) AllCalls() []Call {
+	if p == nil || p.File == nil {
+		return nil
+	}
+	var out []Call
+	syntax.Walk(p.File, func(node syntax.Node) bool {
+		if ce, ok := node.(*syntax.CallExpr); ok && len(ce.Args) > 0 {
+			out = append(out, resolveCall(ce))
+		}
+		return true
+	})
+	return out
+}

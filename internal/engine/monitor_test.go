@@ -79,7 +79,7 @@ func TestMonitorGoldenCorpus_Allow(t *testing.T) {
 func TestMonitorVerdictMatchesBash(t *testing.T) {
 	e := goldenEngine(t)
 	var all []string
-	for _, c := range []string{corpus.Allow, corpus.Deny, corpus.Continue, corpus.Adversarial} {
+	for _, c := range []string{corpus.Allow, corpus.Deny, corpus.Continue, corpus.Adversarial, corpus.Ask} {
 		all = append(all, loadCorpusString(t, c)...)
 	}
 	var fails []string

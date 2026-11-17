@@ -601,6 +601,26 @@ func DefaultAskReminderRules() []rules.Rule {
 	}
 }
 
+// DefaultAlwaysAskRules returns the compiled-in always-ask rules (engine tier
+// 1.56). A match forces the normal permission prompt in every mode and cannot
+// be overridden by tier 2, the cache, the LLM tier or the legacy allow-list.
+//
+// gcloud builds cancel (Robin, 2026-11-17): a session cancelled the production
+// release gate build by matching on commit instead of checking the trigger,
+// and the guard auto-approved it. Not a deny: the release manager legitimately
+// cancels superseded staging builds, so a human confirms each time.
+func DefaultAlwaysAskRules() []rules.Rule {
+	return []rules.Rule{
+		&rules.GcloudBuildsCancel{
+			RuleName: "gcloud-builds-cancel",
+			Reason:   BuildsCancelReason,
+		},
+	}
+}
+
+// BuildsCancelReason is the text the human sees in the permission prompt.
+const BuildsCancelReason = "gcloud builds cancel: read the build's trigger first; only superseded builds of the staging deploy or PR gate trigger may be cancelled, never a production trigger or a release PR build, never selected by commit match"
+
 // DefaultAllowRules returns the compiled-in tier 2 rule set. These are
 // AST-anchored allow rules — they only match when the command has no
 // redirections, pipes, subshells, or command substitution, AND the

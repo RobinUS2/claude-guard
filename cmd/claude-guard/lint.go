@@ -108,6 +108,7 @@ func cmdLint(args []string) int {
 		{"allow", corpus.Allow, "allow"},
 		{"deny", corpus.Deny, "deny"},
 		{"continue", corpus.Continue, "continue"},
+		{"ask", corpus.Ask, "ask"},
 	} {
 		res := runCorpus(eng, c.label, c.content, c.expected, verbose)
 		check("corpus:"+c.label, res.passed == res.total,
