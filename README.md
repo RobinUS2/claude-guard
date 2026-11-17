@@ -12,7 +12,7 @@
   2. **Instant Allow**: Auto-approves safe, read-only commands (`ls`, `cat`, etc.).
   3. **Cache**: High-speed lookup for previously verified commands.
   4. **LLM Classifier**: Uses models like Claude Haiku to judge semantic safety.
-  5. **Legacy Allow List**: Compatibility with existing glob-based permissions.
+  5. **Legacy Allow List**: Compatibility with existing glob-based permissions, matched per call: every call in the command must match a pattern on its own, and compound or script-carrying shapes always ask.
   6. **Human-in-the-loop**: Falls back to user prompt if no verdict is reached.
 - **SSRF Protection**: Guards for `WebFetch`, `WebSearch`, and WebSocket `Monitor` targets.
 - **Every Shell Path Covered**: `Bash` and `Monitor` both execute shell commands, so both run the identical tier pipeline. Wire the PreToolUse matcher as `Bash|Monitor` — a `Bash`-only matcher leaves `Monitor` commands unreviewed.

@@ -10,7 +10,7 @@ Every Bash command is routed through a six-tier pipeline:
 2.  **Instant allow (AST-based)** — read-only commands (`ls`, `cat`, `git status`, `gcloud ... list`, `terraform plan`, `kubectl get pods`, etc.) but only when they have no pipes, subshells, command substitution, or redirections (other than `2>&1`).
 3.  **Cache** — prior verdicts keyed by `sha256(tool + command + cwd + branch + prompt_version + config_hash)`.
 4.  **LLM classifier (approve-only)** — Haiku 4.5 judges semantic safety. Can only auto-approve; blocks stay deterministic.
-5.  **Legacy allow list** — migrated glob patterns from your existing `settings.json` `permissions.allow`.
+5.  **Legacy allow list** — migrated glob patterns from your existing `settings.json` `permissions.allow`. Matched per call on the shell AST: a command passes only when it is one call, or a plain pipeline of calls, and every call matches a pattern by itself. Compound commands (`;`, `&&`, `||`, `&`, newlines), substitutions, heredocs and here-strings, file redirects, env-var prefixes, an escaped or quoted command word, and shells or exec wrappers anywhere in the pipeline always fall through to the prompt. Never runs after the LLM answered unsafe or unsure; it is the fallback for when the LLM could not answer.
 6.  **Default** — fall through to normal agent user prompt.
 
 ## Tool Evaluators
