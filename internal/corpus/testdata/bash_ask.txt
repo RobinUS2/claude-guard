@@ -50,3 +50,43 @@ eval "gcloud builds cancel 1234-abcd"
 gcloud builds cancel 1234-abcd # comment after
 gcloud builds cancel 1234-abcd 2>&1
 gcloud builds cancel 1234-abcd > /dev/null
+
+# --- shell payload behind a wrapper ---
+timeout 5 sh -c 'gcloud builds cancel 1234-abcd'
+env bash -c 'gcloud builds cancel 1234-abcd'
+nohup bash -c 'gcloud builds cancel 1234-abcd'
+find . -exec sh -c 'gcloud builds cancel 1234-abcd' \;
+gcloud builds list --ongoing --format='value(id)' | xargs -I{} sh -c 'gcloud builds cancel {}'
+
+# --- script fed on stdin ---
+bash <<< 'gcloud builds cancel 1234-abcd'
+echo 'gcloud builds cancel 1234-abcd' | bash
+echo 'gcloud builds cancel 1234-abcd' | sh
+printf 'gcloud builds cancel 1234-abcd\n' | sh
+
+# --- variables, substitutions and escapes in the words ---
+$(which gcloud) builds cancel 1234-abcd
+`which gcloud` builds cancel 1234-abcd
+"$(command -v gcloud)" builds cancel 1234-abcd
+G=gcloud; $G builds cancel 1234-abcd
+gcloud $B cancel 1234-abcd
+gcloud ${B:-builds} cancel 1234-abcd
+gcloud builds --region=europe-west4 $V
+gcloud builds --region europe-west4 $V 1234-abcd
+\gcloud builds cancel 1234-abcd
+g\cloud builds cancel 1234-abcd
+gcloud builds canc\el 1234-abcd
+=gcloud builds cancel 1234-abcd
+gcloud builds list --project=p; $(which gcloud) builds cancel x
+find . -name builds -exec gcloud builds cancel 1234-abcd \;
+
+# --- REST form ---
+curl -X POST https://cloudbuild.googleapis.com/v1/projects/p/builds/1234-abcd:cancel
+curl -X POST -H "Authorization: Bearer $T" https://cloudbuild.googleapis.com/v1/projects/p/locations/europe-west4/builds/1234-abcd:cancel
+wget --post-data='' https://cloudbuild.googleapis.com/v1/projects/p/builds/1234-abcd:cancel
+
+# --- quoted command string run by another program, verb fed by xargs ---
+watch -n1 'gcloud builds cancel 1234-abcd'
+tmux new-session -d 'gcloud builds cancel 1234-abcd'
+parallel 'gcloud builds cancel {}' ::: a b
+echo cancel 1234-abcd | xargs gcloud builds
