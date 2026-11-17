@@ -965,8 +965,14 @@ func (e *Engine) Decide(in Input) Output {
 
 	// Tier 4: LLM classifier (approve-only).
 	llmBudgetOK := e.budget == nil || e.budget.Check(false)
+	// llmRefused is true when the classifier actually answered unsafe or
+	// unsure, or when the redaction filter kept a credential-shaped
+	// command from the classifier. Tier 5 must not turn either into an
+	// allow: both go to the human.
+	llmRefused := false
 	if e.llm != nil && llmBudgetOK {
 		llmVerdict := e.runLLMTier(in, keyInputs, globalKey, projectKey)
+		llmRefused = llmVerdict.refused || llmVerdict.redactSkipped
 		out.Shadow.Tier4LLM = llmVerdict.shadow
 		// Record budget usage after LLM call (sync path).
 		if e.budget != nil {
@@ -1010,9 +1016,15 @@ func (e *Engine) Decide(in Input) Output {
 	}
 
 	// Tier 5: legacy allow list (migrated from settings.json).
-	// Last-resort allow before falling through to the user prompt.
-	if e.legacy != nil {
-		if match := e.legacy.Match(in.Command); match != nil {
+	// Last-resort allow before falling through to the user prompt, and
+	// only for a command the LLM did not judge: an unsafe or unsure
+	// verdict goes to the human, never to a pattern list. It still runs
+	// when the LLM was unavailable (no key, budget, breaker, error,
+	// timeout), which is what the fallback is for. A redaction skip is
+	// not one of those: it counts like a refusal. Matching
+	// is per call on the AST, see legacy.MatchParsed.
+	if e.legacy != nil && !llmRefused {
+		if match := e.legacy.MatchParsed(parsed); match != nil {
 			// out.Shadow.Tier1Rule left unchanged from earlier tiers.
 			if !e.cfg.ShadowMode {
 				out.Verdict = Allow
@@ -1051,11 +1063,15 @@ func (e *Engine) Decide(in Input) Output {
 
 // llmCallResult is the engine-internal summary of a Tier 4 attempt.
 type llmCallResult struct {
-	allow  bool               // true only when LLM said "safe"
-	shadow string             // "safe", "unsafe", "unsure", "skipped:<reason>", or "error"
-	reason string             // human-readable reason for the decision
-	scope  llm.Scope          // global vs project — used for cache key choice
-	slots  []llm.VariableSlot // LLM-identified variable tokens for normalization
+	allow   bool               // true only when LLM said "safe"
+	refused bool               // true when LLM answered "unsafe" or "unsure" (sync path)
+	// redactSkipped: the redaction filter withheld the command from the
+	// LLM. Tier 5 treats this like a refusal.
+	redactSkipped bool
+	shadow  string             // "safe", "unsafe", "unsure", "skipped:<reason>", or "error"
+	reason  string             // human-readable reason for the decision
+	scope   llm.Scope          // global vs project — used for cache key choice
+	slots   []llm.VariableSlot // LLM-identified variable tokens for normalization
 }
 
 // toNormalizeSlots converts llm.VariableSlot → normalize.Slot (which
@@ -1097,7 +1113,7 @@ func (e *Engine) runLLMTier(
 				"pattern", res.SkipReason,
 				"tool_use_id", in.ToolUseID,
 			)
-			return llmCallResult{shadow: "skipped:" + res.SkipReason}
+			return llmCallResult{shadow: "skipped:" + res.SkipReason, redactSkipped: true}
 		}
 		// Use the redacted command for the LLM call.
 		in.Command = res.Redacted
@@ -1336,9 +1352,9 @@ func (e *Engine) mapLLMOutcome(dec *llm.Decision, err error, in Input) llmCallRe
 			"category", dec.Category,
 			"tool_use_id", in.ToolUseID,
 		)
-		return llmCallResult{shadow: shadowWithReason("unsafe", dec.Reason), reason: dec.Reason}
+		return llmCallResult{refused: true, shadow: shadowWithReason("unsafe", dec.Reason), reason: dec.Reason}
 	default:
-		return llmCallResult{shadow: shadowWithReason("unsure", dec.Reason), reason: dec.Reason}
+		return llmCallResult{refused: true, shadow: shadowWithReason("unsure", dec.Reason), reason: dec.Reason}
 	}
 }
 

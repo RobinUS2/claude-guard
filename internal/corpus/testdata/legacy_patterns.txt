@@ -1,0 +1,12 @@
+# legacy_patterns.txt — fixture tier-5 allow list for the legacy corpora.
+# Same format as settings.json permissions.allow entries; one per line.
+# `acme-*` are fictional programs so tier 2 never allows them by itself:
+# a pass in bash_legacy_allow.txt proves tier 5 did the allowing.
+# `true` and `echo` are deliberately NOT listed: in the negative corpus
+# they stand in for "some other command the list never approved".
+Bash(acme-cli status:*)
+Bash(acme-cli logs:*)
+Bash(acme-report:*)
+Bash(head:*)
+Bash(grep:*)
+Bash(wc:*)

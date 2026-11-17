@@ -1,0 +1,26 @@
+# bash_legacy_allow.txt — commands that MUST be allowed by tier 5 (legacy)
+# with the fixture list in legacy_patterns.txt. No LLM, no cache.
+#
+# Tier 5 matches per call on the shell AST: one simple call, or a plain
+# pipeline in which EVERY call matches a listed pattern on its own.
+# A pipe into a read-only filter therefore still passes, but only when
+# that filter (head, grep, wc here) is itself on the list.
+
+# --- one listed call ---
+acme-cli status
+acme-cli status --verbose
+acme-cli logs --since 1h
+acme-report weekly "team a"
+acme-report weekly 'a; b && c'
+acme-report weekly $HOME/out
+acme-report weekly "${HOME}/out"
+
+# --- harmless redirects: fd duplication and /dev/null ---
+acme-cli status 2>&1
+acme-cli status 2>/dev/null
+acme-cli status >/dev/null 2>&1
+
+# --- pipeline where every call is listed ---
+acme-cli logs | head -20
+acme-cli logs --since 1h | grep -i error | wc -l
+acme-cli logs 2>&1 | grep timeout

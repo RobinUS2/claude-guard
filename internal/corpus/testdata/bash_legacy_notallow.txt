@@ -1,0 +1,59 @@
+# bash_legacy_notallow.txt — commands that must NOT be allowed with the
+# fixture list in legacy_patterns.txt loaded. Expected verdict: anything
+# but Allow (normally Continue, i.e. the human is asked; a tier-1 Deny
+# also passes). No LLM, no cache.
+#
+# Every line starts with a listed prefix and then carries something no
+# pattern approved. `true` and `echo` stand in for an unlisted command.
+
+# --- compound separators after a listed call ---
+acme-cli status; true
+acme-cli status;true
+acme-cli status && true
+acme-cli status || true
+acme-cli status & true
+acme-cli status &
+
+# --- pipe into an unlisted command, a shell or an exec wrapper ---
+acme-cli logs | echo
+acme-cli logs | sh
+acme-cli logs | bash
+acme-cli logs | /bin/sh
+acme-cli logs | xargs echo
+acme-cli logs | head | true
+
+# --- escaped or quoted command word ---
+\acme-cli status
+"acme-cli" status
+acme-cli status; \true
+acme-cli status && \echo hi
+acme-cli logs | \true
+
+# --- substitutions carry code the pattern never saw ---
+acme-cli status $(true)
+acme-cli status `true`
+acme-cli status <(true)
+acme-cli status "$(true)"
+acme-cli status ${X:-$(true)}
+acme-cli status $((1+1))
+acme-cli status ${!X}
+acme-cli status ${X[$Y]}
+
+# --- here-strings and file redirects ---
+acme-cli status <<< 'true'
+acme-cli status < input.txt
+acme-cli status > output.txt
+acme-cli status >> output.txt
+acme-cli status >&output.txt
+
+# --- env assignment, grouping, control flow ---
+X=1 acme-cli status
+(acme-cli status)
+{ acme-cli status; }
+! acme-cli status
+for i in 1 2; do acme-cli status; done
+if acme-cli status; then true; fi
+
+# --- not on the list at all ---
+acme-cli restart
+true

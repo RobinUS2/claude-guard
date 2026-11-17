@@ -114,6 +114,26 @@ func cmdLint(args []string) int {
 			fmt.Sprintf("%d/%d pass", res.passed, res.total))
 	}
 
+	// 8-9. Legacy corpora — the same rules plus the embedded fixture
+	// tier-5 list. Proves tier 5 matches per call: listed calls and
+	// listed pipelines pass, anything carrying more never does.
+	legacyEng := engine.NewWithOptions(engine.Options{
+		Config: cfg,
+		Legacy: legacy.FromEntries(corpus.LegacyPatterns),
+	})
+	for _, c := range []struct {
+		label    string
+		content  string
+		expected string
+	}{
+		{"legacy_allow", corpus.LegacyAllow, "allow"},
+		{"legacy_notallow", corpus.LegacyNotAllow, "!allow"},
+	} {
+		res := runCorpus(legacyEng, c.label, c.content, c.expected, verbose)
+		check("corpus:"+c.label, res.passed == res.total,
+			fmt.Sprintf("%d/%d pass", res.passed, res.total))
+	}
+
 	fmt.Println()
 	if pass {
 		fmt.Println("lint: OK")
@@ -129,6 +149,15 @@ type corpusResult struct {
 	fails  []string
 }
 
+// verdictMatches compares a verdict to an expectation; "!x" means
+// "anything but x".
+func verdictMatches(got, expected string) bool {
+	if strings.HasPrefix(expected, "!") {
+		return got != expected[1:]
+	}
+	return got == expected
+}
+
 // runCorpus runs every non-comment, non-empty line from content
 // through the engine and asserts the verdict matches expected.
 func runCorpus(eng *engine.Engine, label, content, expected string, verbose bool) corpusResult {
@@ -142,7 +171,7 @@ func runCorpus(eng *engine.Engine, label, content, expected string, verbose bool
 		}
 		res.total++
 		out := eng.Decide(engine.Input{ToolName: "Bash", Command: line})
-		if string(out.Verdict) == expected {
+		if verdictMatches(string(out.Verdict), expected) {
 			res.passed++
 			if verbose {
 				fmt.Printf("  [ok]   %s\n", line)
