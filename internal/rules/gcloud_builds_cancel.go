@@ -39,9 +39,15 @@ type GcloudBuildsCancel struct {
 func (r *GcloudBuildsCancel) Name() string { return r.RuleName }
 func (r *GcloudBuildsCancel) Kind() string { return "gcloud_builds_cancel" }
 
-var buildsCancelText = regexp.MustCompile(`(?s)(^|[^A-Za-z0-9_-])gcloud\b.*\bbuilds\b.*\bcancel\b`)
+var buildsCancelText = regexp.MustCompile(`(?s)gcloud\b.*\bbuilds\b.*\bcancel\b`)
 
-var buildsCancelREST = regexp.MustCompile(`cloudbuild\.googleapis\.com/\S*builds/[^/:\s]+:cancel`)
+var buildsCancelREST = regexp.MustCompile(`(?i)cloudbuild\.googleapis\.com/\S*builds/[^/:\s]+(:|%3A)cancel`)
+
+// buildsCancelRESTRaw runs over the de-quoted raw text, so a URL whose
+// build id or project part is a variable or substitution (which the word
+// resolver drops), a URL held in a variable, an upper-case host or a
+// percent-encoded colon is still seen.
+var buildsCancelRESTRaw = regexp.MustCompile(`(?i)cloudbuild\.googleapis\.com/[^\n]*builds/[^\n]*(:|%3A)cancel`)
 
 var restClients = map[string]bool{
 	"curl": true, "wget": true, "http": true, "https": true, "xh": true, "httpie": true,
@@ -52,7 +58,24 @@ var shellInterpreters = map[string]bool{
 	// programs that run a quoted command string
 	"watch": true, "tmux": true, "parallel": true, "ssh": true, "script": true,
 	"flock": true, "screen": true,
+	// more programs that run a command string
+	"watchexec": true, "osascript": true,
 }
+
+// Interpreters that run a string given with -c / -e.
+var evalFlagPrograms = map[string]bool{
+	"python": true, "python3": true, "node": true, "perl": true, "ruby": true,
+	"npx": true, "bunx": true, "npm": true, "pnpm": true,
+}
+
+// Wrappers that take a command as their arguments; an unresolved word right
+// after them can stand for the wrapped program.
+var wrapperPrograms = map[string]bool{
+	"env": true, "command": true, "exec": true, "xargs": true, "timeout": true,
+	"nohup": true, "time": true, "sudo": true, "nice": true, "stdbuf": true, "setsid": true,
+}
+
+var envSplitFlag = regexp.MustCompile(`^-[A-Za-z]*S|^--split-string`)
 
 // Read-only or otherwise non-cancel verbs of `gcloud builds`. Once the first
 // positional is one of these the verb is known and later expansions are
@@ -72,14 +95,55 @@ var gcloudValueFlags = map[string]bool{
 }
 
 func (r *GcloudBuildsCancel) Eval(p *shellparse.Parsed) (Verdict, string) {
-	raw := strings.NewReplacer("\\\n", "", "\\", "", "'", "", `"`, "").Replace(p.Raw)
-	rawHit := buildsCancelText.MatchString(raw)
+	// The raw-text checks are lazy: an ordinary command (no interpreter, no
+	// REST client, no unresolved word) never pays for them.
+	var (
+		raw                  string
+		rawDone, hitDone     bool
+		hit, restDone, restH bool
+	)
+	getRaw := func() string {
+		if !rawDone {
+			raw = strings.NewReplacer("\\\n", "", "\\", "", "'", "", `"`, "").Replace(p.Raw)
+			rawDone = true
+		}
+		return raw
+	}
+	t := &rawTexts{
+		hit: func() bool {
+			if !hitDone {
+				s := getRaw()
+				hit = strings.Contains(s, "cancel") && strings.Contains(s, "builds") &&
+					strings.Contains(s, "gcloud") && buildsCancelText.MatchString(s)
+				hitDone = true
+			}
+			return hit
+		},
+		rest: func() bool {
+			if !restDone {
+				restH = buildsCancelRESTRaw.MatchString(getRaw())
+				restDone = true
+			}
+			return restH
+		},
+		mentions: func() bool {
+			s := getRaw()
+			return strings.Contains(s, "gcloud") || strings.Contains(s, "builds")
+		},
+	}
 	for _, c := range p.AllCalls() {
-		if callRunsBuildsCancel(c, rawHit) {
+		if callRunsBuildsCancel(c, t) {
 			return Match, r.Reason
 		}
 	}
 	return NoMatch, ""
+}
+
+// rawTexts holds the lazily computed whole-command checks.
+type rawTexts struct {
+	hit      func() bool // gcloud ... builds ... cancel somewhere in the text
+	rest     func() bool // a Cloud Build :cancel URL somewhere in the text
+	mentions func() bool // the text mentions gcloud or builds at all
 }
 
 func norm(t string) string {
@@ -90,7 +154,14 @@ func norm(t string) string {
 func wordUnresolved(w *syntax.Word) bool {
 	for _, part := range w.Parts {
 		switch pt := part.(type) {
-		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.Lit:
+			if strings.ContainsAny(pt.Value, "{?*[") {
+				return true // brace expansion or glob
+			}
+		case *syntax.SglQuoted:
+			if pt.Dollar {
+				return true // $'...' ANSI-C escapes
+			}
 		case *syntax.DblQuoted:
 			for _, in := range pt.Parts {
 				if _, ok := in.(*syntax.Lit); !ok {
@@ -114,7 +185,69 @@ func wordFlagLike(w *syntax.Word) bool {
 	return ok && strings.HasPrefix(l.Value, "-")
 }
 
-func callRunsBuildsCancel(c shellparse.Call, rawHit bool) bool {
+// runsCommandString reports whether the call hands a command string (or a
+// script on stdin) to another program: a shell, watch, tmux, ssh, env -S,
+// npx -c, git --exec or an alias, `source <(...)` and the like. The caller
+// still needs the phrase in the raw text before it acts on this.
+func runsCommandString(c shellparse.Call, toks []string) bool {
+	for i, t := range toks {
+		b := filepath.Base(t)
+		if shellInterpreters[b] {
+			return true
+		}
+		rest := toks[i+1:]
+		switch {
+		case b == "env":
+			for _, a := range rest {
+				if envSplitFlag.MatchString(a) {
+					return true
+				}
+			}
+		case evalFlagPrograms[b]:
+			for _, a := range rest {
+				if a == "-c" || a == "-e" || strings.HasPrefix(a, "--call") {
+					return true
+				}
+			}
+		case b == "git":
+			for _, a := range rest {
+				if a == "--exec" || strings.HasPrefix(a, "--exec=") || strings.HasPrefix(a, "-x") ||
+					strings.HasPrefix(a, "alias.") || strings.HasPrefix(a, "-calias.") ||
+					strings.HasPrefix(a, "core.") || a == "foreach" || strings.HasSuffix(a, "-filter") {
+					return true
+				}
+			}
+		case b == "awk" || b == "gawk" || b == "mawk":
+			for _, a := range rest {
+				if strings.Contains(a, "system") {
+					return true
+				}
+			}
+		case b == "make" && i == 0:
+			for _, a := range rest {
+				if a == "-" || a == "/dev/stdin" {
+					return true
+				}
+			}
+		case (b == "source" || b == ".") && i == 0:
+			for j, a := range rest {
+				if strings.HasPrefix(a, "/dev/") || strings.HasPrefix(a, "/proc/") {
+					return true
+				}
+				if c.Expr != nil && j+1 < len(c.Expr.Args) {
+					for _, part := range c.Expr.Args[j+1].Parts {
+						if _, ok := part.(*syntax.ProcSubst); ok {
+							return true
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func callRunsBuildsCancel(c shellparse.Call, t *rawTexts) bool {
 	toks := make([]string, 0, len(c.Args)+1)
 	toks = append(toks, norm(c.Program))
 	for _, a := range c.Args {
@@ -123,38 +256,36 @@ func callRunsBuildsCancel(c shellparse.Call, rawHit bool) bool {
 	// pos[i]: word i is an unresolved expansion in a command-word position
 	// (not a flag such as --project=$P).
 	pos := make([]bool, len(toks))
+	anyUnresolved := false
 	for i := range toks {
 		if c.Expr != nil && i < len(c.Expr.Args) {
 			w := c.Expr.Args[i]
 			pos[i] = wordUnresolved(w) && !wordFlagLike(w)
+			anyUnresolved = anyUnresolved || pos[i]
 		}
 	}
 
-	restClient, restURL := false, false
-	for _, t := range toks {
-		b := filepath.Base(t)
-		if shellInterpreters[b] && rawHit {
-			return true // -c payload, heredoc, here-string or piped stdin, at any token position
-		}
-		if restClients[b] {
+	restClient := false
+	for _, tk := range toks {
+		if restClients[filepath.Base(tk)] {
 			restClient = true
-		}
-		if buildsCancelREST.MatchString(t) {
-			restURL = true
+			break
 		}
 	}
-	if restClient && restURL {
-		return true
-	}
-
-	anyPos := func(from, to int) bool {
-		for i := from; i < to && i < len(pos); i++ {
-			if i >= 0 && pos[i] {
+	if restClient {
+		for _, tk := range toks {
+			if buildsCancelREST.MatchString(tk) {
 				return true
 			}
 		}
-		return false
+		if t.rest() {
+			return true // the URL holds a variable or sits in a variable
+		}
 	}
+	if runsCommandString(c, toks) && t.hit() {
+		return true // -c payload, heredoc, here-string or piped stdin, at any token position
+	}
+
 	find := func(from int, word string) int {
 		for i := from; i < len(toks); i++ {
 			if toks[i] == word {
@@ -165,37 +296,75 @@ func callRunsBuildsCancel(c shellparse.Call, rawHit bool) bool {
 	}
 
 	g := -1
-	for i, t := range toks {
-		if filepath.Base(t) == "gcloud" {
+	for i, tk := range toks {
+		if filepath.Base(tk) == "gcloud" {
 			g = i
 			break
 		}
 	}
 
-	if g >= 0 {
-		b := find(g+1, "builds")
-		if b < 0 {
-			// builds from an expansion: gcloud $B cancel
-			return anyPos(g+1, len(toks)) && find(g+1, "cancel") >= 0
-		}
-		if verbIsCancel(toks, pos, b) {
-			return true
-		}
-		// xargs feeds the verb on stdin: `... | xargs gcloud builds` with no
-		// literal verb could be cancel.
-		if find(0, "xargs") >= 0 || strings.HasSuffix(toks[0], "/xargs") {
-			for _, t := range toks[b+1:] {
-				if buildsKnownVerbs[t] {
-					return false
-				}
+	gLit := g >= 0
+	if !gLit && anyUnresolved {
+		for i := range pos {
+			if pos[i] {
+				g = i // unresolved word ($G, $(which gcloud)) may be gcloud
+				break
 			}
-			return true
 		}
+	}
+	if g < 0 {
 		return false
 	}
-	// No literal gcloud: it may hide behind an expansion ($G, $(which gcloud)).
-	b := find(0, "builds")
-	return b > 0 && anyPos(0, b) && find(b+1, "cancel") >= 0
+	// first command word after gcloud (skipping flags and their values)
+	first := -1
+	for i := g + 1; i < len(toks); i++ {
+		if strings.HasPrefix(toks[i], "-") && (c.Expr == nil || i >= len(c.Expr.Args) || wordFlagLike(c.Expr.Args[i])) {
+			if !strings.Contains(toks[i], "=") && gcloudValueFlags[toks[i]] {
+				i++
+			}
+			continue
+		}
+		if toks[i] == "alpha" || toks[i] == "beta" {
+			continue
+		}
+		first = i
+		break
+	}
+	if first >= 0 && pos[first] {
+		if gLit {
+			return true // gcloud $X ...: group and verb unknown
+		}
+		// `$G $X`: both words unknown. Only when the program (or the word
+		// after a wrapper) is the unresolved one, and the text mentions
+		// gcloud, so ordinary `$EDITOR $FILE` calls do not prompt.
+		if (g == 0 || wrapperPrograms[filepath.Base(toks[0])]) && t.mentions() {
+			return true
+		}
+	}
+	b := find(g+1, "builds")
+	if b < 0 {
+		return false
+	}
+	if verbIsCancel(toks, pos, b) {
+		return true
+	}
+	// xargs feeds the verb on stdin: `... | xargs gcloud builds` with no
+	// literal verb could be cancel.
+	hasXargs := false
+	for _, tk := range toks {
+		if filepath.Base(tk) == "xargs" {
+			hasXargs = true
+		}
+	}
+	if hasXargs {
+		for _, tk := range toks[b+1:] {
+			if buildsKnownVerbs[tk] {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // verbIsCancel decides, for the words after a literal `builds`, whether the
