@@ -411,3 +411,29 @@ func TestParse_FeatureSmokeTest(t *testing.T) {
 	}
 	_ = strings.TrimSpace("") // keep strings import until used elsewhere
 }
+
+// AllCalls must reach every call, including those Parsed.Calls does not:
+// command substitution inside arguments, loop bodies, subshells, process
+// substitution and function bodies.
+func TestAllCalls_ReachesNestedCalls(t *testing.T) {
+	p, err := Parse(`echo $(date) "$(whoami)"; for i in $(seq 1 2); do ls $i; done; (pwd); cat <(id); f() { uname; }`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, c := range p.AllCalls() {
+		got[c.Program] = true
+	}
+	for _, want := range []string{"echo", "date", "whoami", "seq", "ls", "pwd", "cat", "id", "uname"} {
+		if !got[want] {
+			t.Errorf("AllCalls missed %q (got %v)", want, got)
+		}
+	}
+}
+
+func TestAllCalls_Nil(t *testing.T) {
+	var p *Parsed
+	if got := p.AllCalls(); got != nil {
+		t.Errorf("nil Parsed: got %v", got)
+	}
+}

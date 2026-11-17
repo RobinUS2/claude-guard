@@ -1,9 +1,18 @@
 package engine
 
 import (
+	"os"
 	"testing"
+	"time"
 
+	"github.com/RobinUS2/claude-guard/internal/cache"
 	"github.com/RobinUS2/claude-guard/internal/config"
+	"github.com/RobinUS2/claude-guard/internal/legacy"
+	"github.com/RobinUS2/claude-guard/internal/llm"
+	"github.com/RobinUS2/claude-guard/internal/projectconfig"
+	"github.com/RobinUS2/claude-guard/internal/redact"
+	"github.com/RobinUS2/claude-guard/internal/rules"
+	"github.com/RobinUS2/claude-guard/internal/store"
 )
 
 // The human-visible reason must be exactly the one Robin approved.
@@ -124,5 +133,79 @@ func TestAlwaysAsk_Tier1StillWinsDisguised(t *testing.T) {
 		if out.Verdict != Deny {
 			t.Errorf("%q: verdict=%s tier=%s, want deny", cmd, out.Verdict, out.Tier)
 		}
+	}
+}
+
+// The always-ask tier must beat everything that could auto-approve: a seeded
+// session approval, a global cache entry, a project allow rule, an LLM that
+// says safe, and a legacy allow-list entry for the whole command family.
+func TestAlwaysAsk_WinsOverEveryAllowSource(t *testing.T) {
+	const cmd = "gcloud builds cancel 1234-abcd --project=p"
+	dir := t.TempDir()
+
+	st, err := store.Open(dir + "/state.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	canonical := normalizeCommand(cmd)
+	if err := st.WriteSessionApproval("sess", "", cache.SessionKey(canonical), canonical, cmd, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyPath := dir + "/legacy.yaml"
+	if err := os.WriteFile(legacyPath, []byte("version: 1\nsource: t\npatterns:\n  - {source: t, prefix: \"gcloud builds *\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	al, err := legacy.Load(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if al.Match(cmd) == nil {
+		t.Fatal("legacy allow-list does not match the command; the test would prove nothing")
+	}
+
+	llmStub := &stubClassifier{verdict: llm.VerdictSafe}
+	cfg := config.Default()
+	cfg.ShadowMode = false
+	e := NewWithOptions(Options{
+		Config:   cfg,
+		Redactor: redact.New(nil, nil),
+		LLM:      llmStub,
+		Cache:    cache.New(dir + "/verdicts"),
+		Store:    st,
+		Legacy:   al,
+		ProjectConfigLoader: func(string) (*projectconfig.Config, error) {
+			return &projectconfig.Config{
+				Path: "/fake/.claude-guard.yml",
+				Rules: []rules.Rule{&rules.AnchoredCommand{
+					RuleName: "project:gcloud", Programs: []string{"gcloud"},
+				}},
+				Hash: "h",
+			}, nil
+		},
+	})
+	// Global cache entry marked safe for this exact command.
+	key := keyForCmd(e, cmd, "/tmp")
+	_ = e.cache.Put(key, cache.Entry{
+		Verdict: cache.VerdictAllow, Tier: "llm", Command: cmd, StoredAt: time.Now(),
+		ExpiresAt: time.Now().Add(time.Hour),
+	}, time.Hour)
+
+	for _, tool := range []string{"Bash", "Monitor"} {
+		out := e.Decide(Input{ToolName: tool, Command: cmd, CWD: "/tmp", SessionID: "sess"})
+		if out.Verdict != Ask || out.Tier != "always_ask" {
+			t.Errorf("%s: verdict=%s tier=%s rule=%s, want ask from always_ask", tool, out.Verdict, out.Tier, out.Rule)
+		}
+	}
+	if llmStub.calls != 0 {
+		t.Errorf("LLM was consulted %d times; the always-ask tier must decide first", llmStub.calls)
+	}
+
+	// Control: the same engine auto-approves a sibling read-only command, so
+	// the allow sources above are really live.
+	out := e.Decide(Input{ToolName: "Bash", Command: "gcloud builds list --project=p", CWD: "/tmp", SessionID: "sess"})
+	if out.Verdict != Allow {
+		t.Errorf("control: verdict=%s tier=%s, want allow", out.Verdict, out.Tier)
 	}
 }
