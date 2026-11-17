@@ -3,6 +3,9 @@
 # from Deny to Allow/Continue, the guard has a bypass. Run on every CI
 # build via `make test`.
 
+# NOTE: disguised `gcloud builds cancel` forms (wrappers, loops, xargs, -c)
+# are Ask, not Deny, so they live in bash_ask.txt.
+
 # --- rm -rf bypass shapes ---
 # Combined short flags
 rm -rf /
@@ -276,3 +279,8 @@ docker --log-level=debug volume rm pg-data
 
 /bin/cp bin/claude-guard ~/go/bin/claude-guard
 cp -v -f -p bin/tool /usr/local/bin/tool
+
+# --- gcloud builds cancel hidden in a shell -c string: tier 1 shell-dash-c
+# denies it before the always-ask tier is reached (still never an allow).
+sh -c 'gcloud builds cancel 1234-abcd'
+bash -c "gcloud --project=p builds cancel 1234-abcd"

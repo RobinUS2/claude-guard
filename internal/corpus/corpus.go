@@ -18,3 +18,6 @@ var Continue string
 
 //go:embed testdata/bash_adversarial.txt
 var Adversarial string
+
+//go:embed testdata/bash_ask.txt
+var Ask string

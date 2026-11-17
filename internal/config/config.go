@@ -53,6 +53,14 @@ type Config struct {
 	// intercepts commands that would otherwise auto-approve.
 	AskReminder []rules.Rule `yaml:"-"`
 
+	// AlwaysAsk holds rules whose match ALWAYS surfaces the permission
+	// dialog (Ask verdict), in every mode including shadow. They sit right
+	// after Tier 1 block / freeze / release-lock, so tier 2 allow, the cache,
+	// the LLM and the legacy allow-list can never turn the command into an
+	// auto-approval. They never deny: tier 1 still wins, and the human can
+	// approve when the action is legitimate.
+	AlwaysAsk []rules.Rule `yaml:"-"`
+
 	// AgentTrustProfiles holds per-agent-type pre-approved program lists.
 	// Populated from DefaultAgentTrustProfiles(); YAML override not supported.
 	AgentTrustProfiles map[string]AgentTrustProfile `yaml:"-"`
@@ -173,6 +181,7 @@ func Default() *Config {
 		InstantBlock:       DefaultBlockRules(),
 		InstantAllow:       DefaultAllowRules(),
 		AskReminder:        DefaultAskReminderRules(),
+		AlwaysAsk:          DefaultAlwaysAskRules(),
 		AgentTrustProfiles: DefaultAgentTrustProfiles(),
 		WorkflowSequences:  DefaultWorkflowSequences(),
 	}
@@ -242,6 +251,7 @@ func Load(path string) LoadResult {
 	cfg.InstantBlock = DefaultBlockRules()
 	cfg.InstantAllow = DefaultAllowRules()
 	cfg.AskReminder = DefaultAskReminderRules()
+	cfg.AlwaysAsk = DefaultAlwaysAskRules()
 	cfg.AgentTrustProfiles = DefaultAgentTrustProfiles()
 	cfg.WorkflowSequences = DefaultWorkflowSequences()
 
