@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,17 +25,24 @@ var TokenVaultAnthropicCandidates = []struct {
 	Vault  string
 	Secret string
 }{
-	{"robin_verlangen", "anthropic_api_key"},
-	{"robin_verlangen", "anthropic"},
 	{"taufinity", "anthropic_api_key"},
 	{"taufinity", "anthropic"},
+	{"robin_verlangen", "anthropic_api_key"},
+	{"robin_verlangen", "anthropic"},
 }
 
 // tokenVaultTimeout caps the time we'll wait on any single subprocess
 // spawn. The vault might be locked (requires passphrase), in which
 // case the CLI exits quickly with an error — but we don't want a hung
 // process to block the hook.
-const tokenVaultTimeout = 300 * time.Millisecond
+//
+// Generous per call because many sessions run hooks concurrently and a
+// slow token-vault must not read as "no key"; tokenVaultTotalTimeout
+// keeps the whole sweep bounded so the hook stays fast.
+var (
+	tokenVaultTimeout      = 1500 * time.Millisecond
+	tokenVaultTotalTimeout = 2 * time.Second
+)
 
 // tokenVaultBinary is the path we invoke. Set as a package-level var
 // for testability (tests stub it with a mock script).
@@ -49,7 +57,11 @@ var tokenVaultBinary = ""
 // unacceptable; 5 minutes of cached miss keeps the hook fast while
 // still picking up "I just unlocked the vault" within a reasonable
 // window.
-const tokenVaultNegativeCacheTTL = 5 * time.Minute
+//
+// Kept short (30s) so one bad sweep cannot disable the LLM tier for long.
+// The marker is only written when every candidate returned a clean
+// "not found"; a timeout or spawn failure is transient and never cached.
+const tokenVaultNegativeCacheTTL = 30 * time.Second
 
 // tokenVaultNegativeCachePath is a tiny file we touch when every
 // candidate misses. If the file's mtime is within TTL, we short-circuit.
@@ -135,15 +147,29 @@ func LookupTokenVaultAnthropic() string {
 		}
 	}
 
+	totalCtx, cancelTotal := context.WithTimeout(context.Background(), tokenVaultTotalTimeout)
+	defer cancelTotal()
+	allClean := true
 	for _, c := range TokenVaultAnthropicCandidates {
-		if v := lookupOne(bin, c.Vault, c.Secret); v != "" {
+		if totalCtx.Err() != nil {
+			allClean = false
+			break
+		}
+		v, clean := lookupOne(totalCtx, bin, c.Vault, c.Secret)
+		if v != "" {
 			inProcessCache.value = v
 			return v
 		}
+		if !clean {
+			allClean = false
+		}
 	}
 
-	// All candidates missed — record a negative marker so the next
-	// invocation doesn't re-sweep.
+	// Record a negative marker only when every candidate cleanly said
+	// "not found". Timeouts are transient and must not disable the tier.
+	if !allClean {
+		return ""
+	}
 	if path := tokenVaultNegativeCachePath(); path != "" {
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
 		_ = os.WriteFile(path, []byte(""), 0o640)
@@ -151,15 +177,21 @@ func LookupTokenVaultAnthropic() string {
 	return ""
 }
 
-func lookupOne(bin, vault, secret string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), tokenVaultTimeout)
+// lookupOne returns the secret and whether a miss was clean (the
+// command ran and exited non-zero, e.g. "not found"). clean is false on
+// timeout or spawn failure, which are transient.
+func lookupOne(parent context.Context, bin, vault, secret string) (string, bool) {
+	ctx, cancel := context.WithTimeout(parent, tokenVaultTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "get", vault, secret)
 	out, err := cmd.Output()
 	if err != nil {
-		return ""
+		var ee *exec.ExitError
+		clean := errors.As(err, &ee) && ctx.Err() == nil
+		return "", clean
 	}
-	return strings.TrimSpace(string(out))
+	v := strings.TrimSpace(string(out))
+	return v, v == ""
 }
 
 // TokenVaultInstalled reports whether a token-vault binary can be
