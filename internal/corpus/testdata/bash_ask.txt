@@ -90,3 +90,39 @@ watch -n1 'gcloud builds cancel 1234-abcd'
 tmux new-session -d 'gcloud builds cancel 1234-abcd'
 parallel 'gcloud builds cancel {}' ::: a b
 echo cancel 1234-abcd | xargs gcloud builds
+
+# --- round 2: REST with expansions, escapes, globs, more launchers ---
+curl -X POST https://cloudbuild.googleapis.com/v1/projects/p/builds/$ID:cancel
+curl -X POST "https://cloudbuild.googleapis.com/v1/projects/$P/builds/$ID:cancel"
+curl -X POST https://cloudbuild.googleapis.com/v1/projects/$(gcloud config get-value project)/builds/$(cat id):cancel
+URL=https://cloudbuild.googleapis.com/v1/projects/p/builds/x:cancel; curl -X POST $URL
+curl -X POST https://CLOUDBUILD.GOOGLEAPIS.COM/v1/projects/p/builds/x:cancel
+curl -X POST https://cloudbuild.googleapis.com/v1/projects/p/builds/x%3Acancel
+curl -X POST "https://cloudbuild.googleapis.com/v1/projects/p/builds/$ID%3Acancel"
+http POST https://cloudbuild.googleapis.com/v1/projects/p/builds/$ID:cancel
+gcloud $'builds' cancel 1234-abcd
+gcloud builds $'can\x63el' 1234-abcd
+$'gcl\x6fud' builds cancel 1234-abcd
+gcloud builds {cancel,list} 1234-abcd
+gcloud builds c* 1234-abcd
+gcloud b* cancel 1234-abcd
+gcloud $BC 1234-abcd
+gcloud ${ARR[@]} 1234-abcd
+gcloud $A $B
+G=gcloud; $G $X
+G=gcloud; $G builds $V 1234-abcd
+env -S 'gcloud builds cancel 1234-abcd'
+env -S"gcloud builds cancel 1234-abcd" true
+npx -c 'gcloud builds cancel 1234-abcd'
+npm exec -c 'gcloud builds cancel 1234-abcd'
+watchexec 'gcloud builds cancel 1234-abcd'
+watchexec -e go -- 'gcloud builds cancel 1234-abcd'
+git rebase -x 'gcloud builds cancel 1234-abcd' HEAD~1
+git rebase --exec 'gcloud builds cancel 1234-abcd' HEAD~1
+git -c alias.zz='!gcloud builds cancel 1234-abcd' zz
+source <(echo 'gcloud builds cancel 1234-abcd')
+. <(echo 'gcloud builds cancel 1234-abcd')
+source /dev/stdin <<< 'gcloud builds cancel 1234-abcd'
+osascript -e 'do shell script "gcloud builds cancel 1234-abcd"'
+awk 'BEGIN{system("gcloud builds cancel 1234-abcd")}'
+make -f - <<< 'x: ; gcloud builds cancel 1234-abcd'

@@ -420,3 +420,7 @@ python3 /private/tmp/claude-501/scratchpad/analysis.py
 python /private/tmp/claude-501/scratchpad/compute.py
 node /private/tmp/claude-501/scratchpad/process.js
 ruby /private/tmp/claude-501/scratchpad/transform.rb
+
+# --- always-ask rule must not fire: read-only builds verbs ---
+gcloud builds list --project=p --region=europe-west4
+git commit -m "docs: mention gcloud builds cancel policy"
