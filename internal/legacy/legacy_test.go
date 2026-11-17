@@ -449,3 +449,69 @@ func TestTrustedPrograms_TrimsGlobStar(t *testing.T) {
 		t.Errorf("trailing '*' should be stripped, got %v", got)
 	}
 }
+
+// TestMatch_PerCall pins the tier-5 shape rules: each pattern sees one
+// call, and the command may only be one call or a plain pipeline of
+// listed calls. `true`/`echo` stand in for a command not on the list.
+func TestMatch_PerCall(t *testing.T) {
+	a := FromEntries("Bash(ls:*)\nBash(git status:*)\nBash(head:*)\nBash(grep:*)\nBash(timeout:*)\nBash(/bin/sh:*)")
+	cases := []struct {
+		cmd  string
+		want bool
+	}{
+		{"ls", true},
+		{"ls -la", true},
+		{"git status --short", true},
+		{"ls | head -5", true},
+		{"ls 2>&1 | grep x | head", true},
+		{"ls 2>/dev/null", true},
+		{"git status -- 'a;b'", true},
+
+		{"ls; true", false},
+		{"ls\ntrue", false},
+		{"ls && true", false},
+		{"ls || true", false},
+		{"ls &", false},
+		{"ls | true", false},
+		{"ls | sh", false},
+		{"ls | /bin/sh", false},   // shells never pass, even when listed
+		{"timeout 5 true", false}, // exec wrappers never pass, even when listed
+		{"ls; \\true", false},
+		{"\\ls", false},
+		{"'ls'", false},
+		{"l\"s\"", false},
+		{"ls $(true)", false},
+		{"ls `true`", false},
+		{"ls <(true)", false},
+		{"ls <<< x", false},
+		{"ls <<EOF\ntrue\nEOF", false},
+		{"ls < f", false},
+		{"ls > f", false},
+		{"ls >&f", false},
+		{"X=1 ls", false},
+		{"(ls)", false},
+		{"{ ls; }", false},
+		{"! ls", false},
+		{"ls ${X:-y}", false},
+		{"ls ${!X}", false},
+		{"if ls; then true; fi", false},
+		{"ls 'unterminated", false}, // parse error never matches
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			if got := a.Match(tc.cmd) != nil; got != tc.want {
+				t.Errorf("Match(%q) = %v, want %v", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMatchParsed_NilSafe(t *testing.T) {
+	var a *AllowList
+	if a.MatchParsed(nil) != nil {
+		t.Error("nil list matched")
+	}
+	if FromEntries("Bash(ls:*)").MatchParsed(nil) != nil {
+		t.Error("nil parse matched")
+	}
+}

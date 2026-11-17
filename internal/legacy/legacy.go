@@ -16,6 +16,11 @@
 // matchers. Non-Bash entries (Read, Write, WebFetch, mcp__*) are
 // skipped because the guard's tier 4 LLM only handles Bash for v1.
 //
+// Matching is per call on the parsed shell AST (MatchParsed): a command
+// is allowed only when it is one call, or a plain pipeline of calls, and
+// every call matches an entry by itself. Compound commands and anything
+// that carries code the patterns cannot see fall through to the prompt.
+//
 // Tier 5 is the safety net during phase 4 of the rollout: any command
 // the smarter tiers don't recognize but that was previously allowed
 // in settings.json continues to flow through. Once shadow-mode shows
@@ -31,6 +36,9 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/RobinUS2/claude-guard/internal/shellparse"
 )
 
 // Pattern is one parsed legacy allow entry.
@@ -86,6 +94,12 @@ var unsafeLegacyPrograms = map[string]struct{}{
 	"bash": {}, "sh": {}, "zsh": {}, "fish": {}, "dash": {},
 	"ksh": {}, "tcsh": {}, "csh": {},
 	"python": {}, "python3": {}, "perl": {}, "ruby": {}, "node": {},
+	// Wrappers whose arguments are another command. A per-call match
+	// on the wrapper would approve whatever command it runs.
+	"xargs": {}, "eval": {}, "exec": {}, "command": {}, "builtin": {},
+	"source": {}, ".": {}, "nohup": {}, "nice": {}, "timeout": {},
+	"gtimeout": {}, "time": {}, "watch": {}, "parallel": {},
+	"sudo": {}, "doas": {}, "su": {},
 }
 
 // unsafeLegacyPrefixes are multi-word Prefix starts that should be
@@ -200,20 +214,268 @@ func (a *AllowList) TrustedPrograms(maxPrograms int) []string {
 	return out
 }
 
-// Match returns the first matching pattern, or nil if none match.
-// The check is a regex anchored at the start of the command — i.e.
-// "did the user's command start with one of the allowed prefixes?".
+// Match parses command and returns the pattern that allowed it, or nil.
+// Convenience wrapper around MatchParsed for callers that only have the
+// raw string; a parse failure never matches.
 func (a *AllowList) Match(command string) *Pattern {
-	if a == nil {
+	if a == nil || len(a.Patterns) == 0 {
 		return nil
 	}
-	command = strings.TrimSpace(command)
+	p, err := shellparse.Parse(command)
+	if err != nil {
+		return nil
+	}
+	return a.MatchParsed(p)
+}
+
+// MatchParsed is the tier-5 matcher. It returns a non-nil pattern only
+// when the parsed command is a single statement made of one simple call,
+// or a plain pipeline of simple calls, and EVERY call matches a legacy
+// pattern on its own. The returned pattern is the one that matched the
+// first call (used for the decision log).
+//
+// Settings.json entries are prefix patterns whose `*` matches anything,
+// so matching them against the raw command string would let a prefix
+// that is allowed carry along whatever follows it after a separator.
+// Here each pattern only ever sees the words of one call.
+//
+// Anything outside the narrow accepted shape returns nil so the command
+// falls through to the user prompt. Rejected, regardless of patterns:
+//   - more than one statement (`;`, newline), `&&`, `||`, background `&`,
+//     negation, coprocesses
+//   - subshells, groups, loops, conditionals, function and variable
+//     declarations: any command node other than a call or a pipe
+//   - command, process and arithmetic substitution anywhere in the AST
+//   - heredocs, here-strings, input redirects and output redirects other
+//     than fd duplication (`2>&1`) or writes to /dev/null
+//   - env-var assignments in front of a call (`X=y prog`)
+//   - a command word that is not one plain literal: quoted, escaped,
+//     expanded, globbed or brace-expanded program names
+//   - a program that runs a script or another command (shells,
+//     interpreters, exec wrappers), even if a pattern would match it
+//   - argument words with expansions other than plain `$NAME`/`${NAME}`
+func (a *AllowList) MatchParsed(p *shellparse.Parsed) *Pattern {
+	if a == nil || len(a.Patterns) == 0 || p == nil || p.File == nil {
+		return nil
+	}
+	calls, ok := legacyCalls(p.File)
+	if !ok || len(calls) == 0 {
+		return nil
+	}
+	var first *Pattern
+	for _, ce := range calls {
+		text, ok := callText(p.Raw, ce)
+		if !ok {
+			return nil
+		}
+		m := a.matchCallText(text)
+		if m == nil {
+			return nil
+		}
+		if first == nil {
+			first = m
+		}
+	}
+	return first
+}
+
+// matchCallText runs the compiled patterns against the text of one call.
+func (a *AllowList) matchCallText(text string) *Pattern {
 	for i := range a.Patterns {
-		if a.Patterns[i].regex != nil && a.Patterns[i].regex.MatchString(command) {
+		if a.Patterns[i].regex != nil && a.Patterns[i].regex.MatchString(text) {
 			return &a.Patterns[i]
 		}
 	}
 	return nil
+}
+
+// legacyCalls returns the simple calls of a command the legacy tier is
+// allowed to judge, in order, or ok=false when the shape is outside what
+// it may auto-allow (see MatchParsed).
+func legacyCalls(f *syntax.File) (calls []*syntax.CallExpr, ok bool) {
+	if len(f.Stmts) != 1 {
+		return nil, false
+	}
+	// No substitution of any kind may appear anywhere: each one runs or
+	// evaluates code that no pattern has seen.
+	clean := true
+	syntax.Walk(f, func(n syntax.Node) bool {
+		switch n.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp,
+			*syntax.ArithmCmd, *syntax.Subshell, *syntax.Block:
+			clean = false
+		}
+		return clean
+	})
+	if !clean {
+		return nil, false
+	}
+	var walk func(s *syntax.Stmt) bool
+	walk = func(s *syntax.Stmt) bool {
+		if s == nil || s.Cmd == nil || s.Negated || s.Background || s.Coprocess || s.Disown {
+			return false
+		}
+		if !redirsAllowed(s.Redirs) {
+			return false
+		}
+		switch c := s.Cmd.(type) {
+		case *syntax.CallExpr:
+			if len(c.Assigns) > 0 || len(c.Args) == 0 {
+				return false
+			}
+			calls = append(calls, c)
+			return true
+		case *syntax.BinaryCmd:
+			if c.Op != syntax.Pipe && c.Op != syntax.PipeAll {
+				return false
+			}
+			return walk(c.X) && walk(c.Y)
+		default:
+			return false
+		}
+	}
+	if !walk(f.Stmts[0]) {
+		return nil, false
+	}
+	return calls, true
+}
+
+// redirsAllowed accepts only redirections that cannot read a file into
+// the command or write one: fd duplication to a numbered fd (`2>&1`,
+// `>&2`, `<&0`) and output to /dev/null. Heredocs and here-strings feed
+// a script body to the program, so they are always rejected.
+func redirsAllowed(rs []*syntax.Redirect) bool {
+	for _, r := range rs {
+		if r == nil || r.Word == nil {
+			return false
+		}
+		w, ok := plainLit(r.Word)
+		if !ok {
+			return false
+		}
+		switch r.Op {
+		case syntax.DplOut, syntax.DplIn:
+			if !isFdNumber(w) {
+				return false
+			}
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrAll, syntax.AppAll:
+			if w != "/dev/null" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isFdNumber(s string) bool {
+	if s == "-" {
+		return true
+	}
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// plainLit returns the value of a word that is exactly one unquoted
+// literal, or ok=false.
+func plainLit(w *syntax.Word) (string, bool) {
+	if w == nil || len(w.Parts) != 1 {
+		return "", false
+	}
+	lit, ok := w.Parts[0].(*syntax.Lit)
+	if !ok {
+		return "", false
+	}
+	return lit.Value, true
+}
+
+// callText renders one call as the text the patterns match against: the
+// source of each word joined by single spaces, so redirections between
+// words are dropped. ok=false when the program word or an argument word
+// is a shape the legacy tier must not judge.
+func callText(raw string, ce *syntax.CallExpr) (string, bool) {
+	prog, ok := plainLit(ce.Args[0])
+	if !ok || prog == "" || strings.ContainsAny(prog, "\\*?[]{}$`'\"") {
+		return "", false
+	}
+	if programRunsOtherCode(prog) {
+		return "", false
+	}
+	parts := make([]string, 0, len(ce.Args))
+	parts = append(parts, prog)
+	for _, w := range ce.Args[1:] {
+		if !argWordAllowed(w) {
+			return "", false
+		}
+		start, end := int(w.Pos().Offset()), int(w.End().Offset())
+		if start < 0 || end > len(raw) || start > end {
+			return "", false
+		}
+		parts = append(parts, raw[start:end])
+	}
+	return strings.Join(parts, " "), true
+}
+
+// programRunsOtherCode reports whether the program (by basename, so an
+// absolute path does not hide it) is one the legacy tier never allows
+// because its arguments are themselves a command or a script.
+func programRunsOtherCode(prog string) bool {
+	_, bad := unsafeLegacyPrograms[filepath.Base(prog)]
+	return bad
+}
+
+// argWordAllowed accepts literals, quoted strings and plain variable
+// references. Indirect, subscripted or operator expansions can evaluate
+// arbitrary code through the variable's value, so they are rejected.
+func argWordAllowed(w *syntax.Word) bool {
+	if w == nil {
+		return false
+	}
+	for _, part := range w.Parts {
+		if !argPartAllowed(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func argPartAllowed(part syntax.WordPart) bool {
+	switch p := part.(type) {
+	case *syntax.Lit, *syntax.SglQuoted:
+		return true
+	case *syntax.ParamExp:
+		return simpleParam(p)
+	case *syntax.DblQuoted:
+		for _, inner := range p.Parts {
+			switch ip := inner.(type) {
+			case *syntax.Lit:
+			case *syntax.ParamExp:
+				if !simpleParam(ip) {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func simpleParam(p *syntax.ParamExp) bool {
+	return p.Param != nil && p.Flags == nil && !p.Excl && !p.Length &&
+		!p.Width && !p.IsSet && p.NestedParam == nil && p.Index == nil &&
+		len(p.Modifiers) == 0 && p.Slice == nil && p.Repl == nil &&
+		p.Names == 0 && p.Exp == nil
 }
 
 // compile builds the regex from the Prefix.
@@ -224,16 +486,12 @@ func (p *Pattern) compile() error {
 	// Quote everything literally, then unquote the * wildcards.
 	quoted := regexp.QuoteMeta(p.Prefix)
 	expanded := strings.ReplaceAll(quoted, `\*`, `.*`)
-	// Anchor at start; the entry is a prefix match.
-	//
-	// Trailing-char class deliberately does NOT include `<` or `>`:
-	// a legacy allow like `Bash(echo:*)` must NOT match
-	// `echo evil > /etc/hosts` — redirects change semantics by
-	// writing/reading a path, which needs fresh safety evaluation.
-	// Step 5's redir-aware PathAccess + step 6's extended-credentials
-	// rules catch the dangerous targets. Pipes (`|`), sequences
-	// (`;`), and background (`&`) stay in the class to preserve
-	// benign shapes like `ls | head`.
+	// Anchor at start; the entry is a prefix match on the text of ONE
+	// call (see MatchParsed), never on the whole command string, so the
+	// trailing `.*` of a `foo *` entry cannot reach past a separator.
+	// The word-boundary class keeps `ls` from matching `lsof`. Redirects
+	// and separators never appear in the call text: MatchParsed rejects
+	// or strips them before matching.
 	re, err := regexp.Compile(`^` + expanded + `($|[\s|;&])`)
 	if err != nil {
 		return fmt.Errorf("compile pattern %q: %w", p.Prefix, err)
@@ -370,4 +628,20 @@ func MigrateSettingsJSON(jsonData []byte) (*File, error) {
 // is more forgiving on those edge cases.
 func yamlJSONUnmarshal(data []byte, dst any) error {
 	return yaml.Unmarshal(data, dst)
+}
+
+// FromEntries builds an AllowList from settings.json-style entries, one
+// per line in text; blank lines and `#` comments are skipped. Used for
+// the embedded fixture list of the legacy corpora (tests and `lint`).
+func FromEntries(text string) *AllowList {
+	var entries []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		entries = append(entries, line)
+	}
+	patterns, _ := ParseSettingsAllowList(entries)
+	return &AllowList{Patterns: patterns}
 }
